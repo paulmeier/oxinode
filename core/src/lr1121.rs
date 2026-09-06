@@ -8,8 +8,11 @@
 //! * [`reset`] — bringing the chip out of reset, and reading BUSY's answer.
 //! * [`version`] — the `GetVersion` reply, and telling a real one from a bus
 //!   that is not working.
+//! * [`tcxo`] — the oscillator startup delay, and what a temperature reading
+//!   has to look like to be believed.
 
 pub mod reset;
+pub mod tcxo;
 pub mod version;
 
 pub use reset::*;

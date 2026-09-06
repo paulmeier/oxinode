@@ -277,36 +277,64 @@ reset. The second would be worrying, except that BUSY demonstrably answers the
 pulse (step 2) and the 191 ms startup is a full boot. Recorded rather than
 resolved.
 
-### 4. TCXO
+### 4. TCXO — done
 
-`set_tcxo_mode` with tune = 3.0 V. The delay field counts 30.52 µs steps and has
-to cover TCXO startup; too short gives `HF_XOSC_START_ERR`. This must happen
-before any RF operation.
-
-Allow ~10 ms after power-on before touching the radio at all; Meshtastic waits
-that long for the TCXO to settle, on top of the `set_tcxo_mode` delay field.
+`set_tcxo_mode` with tune = 3.0 V and a delay of **164 steps (5005 µs)**. The
+delay field counts 30.52 µs steps; the conversion lives in
+`oxinode_core::lr1121::tcxo` with host tests, because every value in the
+datasheet, in this repository and in a log is in different units from at least
+one of the others — and because rounding it *down* is the one mistake that
+produces `HF_XOSC_START_ERR`.
 
 Note the corollary the schematic makes concrete: DIO3 is driving the TCXO
 reference, so **DIO3 is not available as an interrupt line**. That is why the
 board jumpers DIO9 out to the MCU (step 6).
 
-`GetTemp` is a good smoke test — the crate's own docs note it runs off XOSC, so
-it exercises the TCXO path.
-
-**Step 3 leaves this one already measurable.** With the driver attached and
-nothing yet done about the TCXO, `GetErrors` returns exactly one flag:
-
-```
-INFO  lr11xx: errors ErrorStat { hf_xosc_start }
-```
-
-"High frequency XOSC did not start correctly" — the chip tried, and DIO3 is not
-driving the TCXO yet because nothing has told it to. That makes step 4's success
-condition concrete rather than a judgement call: **`hf_xosc_start` clears.**
-Note the crate's own hint on that flag, which matches: redo a reset, *or* send
-`SetTcxoCmd` and redo calibrations.
+The order matters and is the crate's own: `ClearErrors`, `SetTcxoMode`,
+`Calibrate(ALL)`. The calibrations that ran at boot did so without a working
+32 MHz oscillator, so they have to be redone — which is exactly what `lr11xx`'s
+note on the `hf_xosc_start` flag says to do. Clearing *first* means the errors
+read at the end are fresh evidence rather than the flag already latched from
+before.
 
 *Done when:* `hf_xosc_start` is clear, and the temperature reads like a room.
+
+**Verified on hardware, first try:**
+
+```
+INFO  lr11xx: errors ErrorStat { hf_xosc_start }      <- before
+INFO  tcxo: 3.0 V, delay 164 steps (5005 us at 30.52 us per step)
+INFO  tcxo: errors clear -- the 32 MHz oscillator started
+INFO  tcxo: die 18.458565 C, vbat 3.361765 V
+INFO  tcxo: SetTcxoMode took 213 us for a 5005 us delay; calibration took 43579 us
+```
+
+18.5 °C and 3.36 V. `GetTemp` is a real test rather than a formality: it runs
+off the 32 MHz oscillator, so before `SetTcxoMode` it does not fail — it returns
+a *number*, computed from an ADC reading of a clock that is not running.
+"Is this a plausible temperature" is therefore a direct test of whether the TCXO
+came up, and `temperature_is_plausible` is written as an ordered range check
+specifically so that NaN is rejected.
+
+#### The delay is a wait, not a timeout — measured
+
+The datasheet wording ("**maximum** duration for the 32 MHz oscillator to start
+and stabilize") reads like a timeout that ends early once the oscillator is
+detected. It does not behave like one.
+
+| programmed delay | `SetTcxoMode` | `Calibrate(ALL)` |
+|---|---|---|
+| 5005 µs | 213 µs | 43579 µs |
+| 20021 µs | 213 µs | 60058 µs |
+
++15.0 ms of programmed delay bought +16.5 ms of calibration time, near enough
+1:1, while `SetTcxoMode` itself was unchanged. So the wait is not paid by that
+command — it is paid by the first operation that actually needs the oscillator.
+
+The practical consequence: **generosity here is not free.** A larger delay is a
+recurring cost on XOSC startup rather than an unused safety margin, which is why
+the constant stays at the 5 ms every reference implementation uses and the
+margin goes on the evidence instead.
 
 ### 5. RF switch
 

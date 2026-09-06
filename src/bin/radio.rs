@@ -1,9 +1,9 @@
 //! Phase 3 bring-up image for the LR1121.
 //!
-//! Currently at step 3: it configures the SPI bus, reports what the peripheral
-//! actually claimed, pulses NRESET and reports what BUSY did about it, then
-//! asks the chip what it is. See `docs/phase-3-radio.md` for what each step
-//! adds.
+//! Currently at step 4: it configures the SPI bus, reports what the peripheral
+//! actually claimed, pulses NRESET and reports what BUSY did about it, asks the
+//! chip what it is, then starts its 32 MHz oscillator off the board's TCXO.
+//! See `docs/phase-3-radio.md` for what each step adds.
 //!
 //! Unlike `usb-cdc`, this image exposes a **single** CDC-ACM port, and it is a
 //! log port. That is not a simplification for its own sake: DTR is only visible
@@ -21,18 +21,20 @@
 #![no_std]
 #![no_main]
 
+use arbitrary_int::u24;
 use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, spim};
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config as UsbConfig};
+use lr11xx::ops::{Calibrate, TcxoMode, TcxoTune};
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::ResetVerdict;
+use oxinode_core::lr1121::{tcxo, ResetVerdict};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -232,6 +234,8 @@ async fn main(_spawner: Spawner) {
                                     Ok(errors) => defmt::info!("lr11xx: errors {}", errors),
                                     Err(e) => defmt::error!("lr11xx: GetErrors failed, {}", e),
                                 }
+                                defmt::info!("step 3 done");
+                                start_tcxo(&mut dev).await;
                                 radio = Some(dev);
                             }
                             Err(e) => defmt::error!("lr11xx: {}", e),
@@ -241,8 +245,6 @@ async fn main(_spawner: Spawner) {
                 Err(e) => defmt::error!("version: probe failed, {}", e),
             }
         }
-
-        defmt::info!("step 3 done");
 
         // Liveness, and something for a terminal that reconnects later.
         let mut ticks: u32 = 0;
@@ -266,4 +268,103 @@ async fn main(_spawner: Spawner) {
     };
 
     join4(run_usb, pump, bring_up, touch).await;
+}
+
+/// Step 4: start the 32 MHz oscillator from the board's 3.0 V TCXO, and prove
+/// it started.
+///
+/// Bounded as a whole. `lr11xx` waits for BUSY with no timeout of its own, so
+/// any command here that never completes would take the board silent — the
+/// failure step 2 exists to prevent. A cancelled SPI transaction leaves the
+/// driver in an undefined state, which is why nothing is attempted afterwards
+/// except saying so.
+async fn start_tcxo<S, B>(dev: &mut Lr11xx<S, B>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    defmt::info!(
+        "tcxo: 3.0 V, delay {=u32} steps ({=u32} us at 30.52 us per step)",
+        tcxo::STARTUP_STEPS,
+        tcxo::us_for_steps(tcxo::STARTUP_STEPS)
+    );
+
+    let sequence = async {
+        // Clear first, so the errors read at the end are fresh evidence rather
+        // than the `hf_xosc_start` already latched from before the TCXO was
+        // configured.
+        dev.clear_errors().await?;
+
+        let started = Instant::now();
+        let cfg = TcxoMode::builder()
+            .with_delay(u24::new(tcxo::STARTUP_STEPS))
+            .with_tune(TcxoTune::V3p0)
+            .build();
+        dev.set_tcxo_mode(cfg).await?;
+        let tcxo_us = started.elapsed().as_micros() as u32;
+
+        // The calibrations that ran at boot did so without a working 32 MHz
+        // oscillator, so they have to be redone -- which is also what the
+        // crate's own note on `hf_xosc_start` says to do.
+        let calibrating = Instant::now();
+        dev.calibrate(Calibrate::ALL).await?;
+        let calib_us = calibrating.elapsed().as_micros() as u32;
+
+        let errors = dev.errors().await?;
+        let temp = dev.temp().await?;
+        let vbat = dev.vbat().await?;
+        Ok::<_, lr11xx::Error>((errors, temp, vbat, tcxo_us, calib_us))
+    };
+
+    // Generous against a few milliseconds of oscillator startup and
+    // calibration, and still far short of a board that has gone quiet.
+    match with_timeout(Duration::from_millis(500), sequence).await {
+        Err(_) => defmt::error!(
+            "tcxo: no reply within 500 ms -- a command left BUSY high and the \
+             driver has no timeout of its own. The radio is now in an unknown \
+             state; reflash rather than trusting anything after this"
+        ),
+        Ok(Err(e)) => defmt::error!("tcxo: {}", e),
+        Ok(Ok((errors, temp, vbat, tcxo_us, calib_us))) => {
+            if errors.raw_value() == 0 {
+                defmt::info!("tcxo: errors clear -- the 32 MHz oscillator started");
+            } else {
+                defmt::error!(
+                    "tcxo: {} still set after SetTcxoMode and a full calibration",
+                    errors
+                );
+                if errors.hf_xosc_start() {
+                    defmt::error!(
+                        "tcxo: hf_xosc_start persists -- the delay may be too \
+                         short for this TCXO, or DIO3 is not supplying it"
+                    );
+                }
+            }
+
+            if tcxo::temperature_is_plausible(temp) {
+                defmt::info!("tcxo: die {=f32} C, vbat {=f32} V", temp, vbat);
+            } else {
+                defmt::error!(
+                    "tcxo: die temperature {=f32} C is not a number to believe -- \
+                     GetTemp runs off the 32 MHz oscillator, so this is what a \
+                     clock that is not running looks like",
+                    temp
+                );
+            }
+
+            // Timed separately to answer a question the datasheet wording
+            // leaves open: whether the delay field is a timeout that ends when
+            // the oscillator is detected, or a fixed wait paid every time. If
+            // SetTcxoMode's own cost tracks the programmed delay, it is a wait.
+            defmt::info!(
+                "tcxo: SetTcxoMode took {=u32} us for a {=u32} us delay; \
+                 calibration took {=u32} us",
+                tcxo_us,
+                tcxo::us_for_steps(tcxo::STARTUP_STEPS),
+                calib_us
+            );
+        }
+    }
+
+    defmt::info!("step 4 done");
 }
