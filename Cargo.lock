@@ -804,6 +804,7 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-nrf",
+ "embassy-sync",
  "embassy-time",
  "embassy-usb",
  "embedded-hal 1.0.0",

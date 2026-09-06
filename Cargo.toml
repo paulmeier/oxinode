@@ -35,6 +35,10 @@ embassy-nrf = { version = "0.11", features = [
     "unstable-pac",   # POWER.GPREGRET, for reboot-into-bootloader
 ] }
 embassy-usb = "0.6"
+# A pipe between the USB reader and the modem loop. See src/bin/rnode.rs: the
+# reason it exists is that `read_packet` must never be cancelled, and anything
+# that races it with `select` cancels it.
+embassy-sync = "0.8"
 defmt = "1.0"
 
 # Radio. `lr11xx` needs an *async* embedded-hal SpiDevice; `embedded-hal-bus`

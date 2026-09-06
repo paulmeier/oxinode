@@ -27,14 +27,16 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_futures::select::{select, Either};
 use embassy_futures::yield_now;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, spim};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::pipe::{Pipe, Reader};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
-use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, Sender, State};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Sender, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
@@ -129,6 +131,51 @@ async fn main(_spawner: Spawner) {
     // the KISS port, not this one.
     let pump = usb_log::pump(&mut log_tx, || true);
 
+    // Everything the host sends goes through here, and the reason is
+    // cancellation.
+    //
+    // The modem loop has to wait on two things at once -- host bytes and the
+    // radio's interrupt -- and `select` drops whichever future loses. Dropping
+    // `read_packet` mid-flight loses whatever it had already taken from the
+    // endpoint, and the loop cancelled it every 50 ms whether or not the radio
+    // was doing anything. The symptom was a setter going missing perhaps one
+    // round in three: the host would see no reply, decide its configuration had
+    // not taken, and refuse the interface.
+    //
+    // So the only thing that ever awaits `read_packet` is the task below, which
+    // never selects on anything and therefore never cancels it. The pipe is
+    // what the modem loop waits on instead, and a cancelled pipe read consumes
+    // nothing.
+    static HOST_RX: StaticCell<Pipe<NoopRawMutex, 1024>> = StaticCell::new();
+    let host_rx = HOST_RX.init(Pipe::new());
+    let (mut host_reader, host_writer) = host_rx.split();
+
+    let feed_host_rx = async {
+        let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
+        loop {
+            match kiss_rx.read_packet(&mut buf).await {
+                // `write_all` on a full pipe waits for the modem loop to catch
+                // up, which is back-pressure rather than loss -- and the
+                // endpoint NAKs while we are not reading it, so the host simply
+                // retries.
+                Ok(n) => {
+                    // `Writer::write` may take fewer bytes than offered when
+                    // the pipe is nearly full, so this loops until the packet
+                    // is in. Truncating instead would drop the tail of a
+                    // frame, which is the failure this whole arrangement
+                    // exists to remove.
+                    let mut rest = &buf[..n];
+                    while !rest.is_empty() {
+                        let written = host_writer.write(rest).await;
+                        rest = &rest[written..];
+                    }
+                }
+                // The host closed the port. It will be back.
+                Err(_) => Timer::after(Duration::from_millis(50)).await,
+            }
+        }
+    };
+
     let modem = async {
         defmt::info!(
             "oxinode RNode: serial {=str}, image at {=u32:#x}",
@@ -167,7 +214,7 @@ async fn main(_spawner: Spawner) {
                 // has a frame for exactly this, and it makes Reticulum say
                 // "hardware initialisation error" instead of timing out.
                 defmt::error!("radio did not come up: {}", e);
-                serve_without_a_radio(&mut kiss_tx, &mut kiss_rx, &control, &mut led).await;
+                serve_without_a_radio(&mut kiss_tx, &mut host_reader, &control, &mut led).await;
             }
         };
 
@@ -176,14 +223,14 @@ async fn main(_spawner: Spawner) {
             &mut dev,
             &mut irq,
             &mut kiss_tx,
-            &mut kiss_rx,
+            &mut host_reader,
             &control,
             &mut led,
         )
         .await
     };
 
-    join3(run_usb, pump, modem).await;
+    join4(run_usb, pump, feed_host_rx, modem).await;
 }
 
 /// The main loop: host bytes in one direction, radio packets in the other.
@@ -192,7 +239,7 @@ async fn run<'d, D, S, B>(
     dev: &mut lr11xx::Lr11xx<S, B>,
     irq: &mut radio::RadioIrq<'_>,
     tx: &mut Sender<'d, D>,
-    rx: &mut Receiver<'d, D>,
+    host: &mut Reader<'_, NoopRawMutex, 1024>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
 ) -> !
@@ -217,20 +264,23 @@ where
         // A touch can arrive at any moment, including while a packet is in the
         // air, so it is level-triggered and re-checked on every wake rather
         // than waited for on an edge.
-        if usb_log::is_bootloader_touch(rx, control) {
+        if usb_log::is_bootloader_touch_tx(tx, control) {
             boot::reboot_to_bootloader();
         }
 
         let event = {
-            let host = rx.read_packet(&mut usb_buf);
+            // Reading the pipe rather than the endpoint. `select` drops the
+            // loser, and a cancelled pipe read consumes nothing -- whereas a
+            // cancelled `read_packet` loses whatever it had already taken.
+            let from_host = host.read(&mut usb_buf);
             // A bounded wait rather than an indefinite one, so that the loop
             // also serves as a housekeeping tick.
             let radio_irq = irq.wait_asserted(Duration::from_millis(50));
-            select(host, radio_irq).await
+            select(from_host, radio_irq).await
         };
 
         match event {
-            Either::First(Ok(n)) => {
+            Either::First(n) => {
                 for &byte in &usb_buf[..n] {
                     match decoder.feed(byte) {
                         kiss::Step::Pending => {}
@@ -254,9 +304,6 @@ where
                     }
                 }
             }
-            // The host closed the port. Not an error: it will come back.
-            Either::First(Err(_)) => {}
-
             Either::Second(Ok(())) => {
                 if !receiving {
                     // The line is asserted and nothing is listening for it, so
@@ -437,7 +484,7 @@ async fn act<S, B>(
 /// which is where the fault actually is.
 async fn serve_without_a_radio<'d, D>(
     tx: &mut Sender<'d, D>,
-    rx: &mut Receiver<'d, D>,
+    host: &mut Reader<'_, NoopRawMutex, 1024>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
 ) -> !
@@ -449,13 +496,13 @@ where
     let mut outbox = Outbox::<OUTBOX>::new();
     let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     loop {
-        if usb_log::is_bootloader_touch(rx, control) {
+        if usb_log::is_bootloader_touch_tx(tx, control) {
             boot::reboot_to_bootloader();
         }
         // Fast blink: alive, enumerated, no radio.
         led.on();
-        let read = rx.read_packet(&mut buf);
-        if let Either::First(Ok(n)) = select(read, Timer::after(Duration::from_millis(100))).await {
+        let read = host.read(&mut buf);
+        if let Either::First(n) = select(read, Timer::after(Duration::from_millis(100))).await {
             for &byte in &buf[..n] {
                 if decoder.feed(byte) == kiss::Step::Frame {
                     let command = command::decode(decoder.command(), decoder.payload());
