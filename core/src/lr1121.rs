@@ -17,10 +17,16 @@
 //! * [`irq`] — which interrupts are routed to the one line that reaches the
 //!   MCU.
 //! * [`lora`] — modulation parameters, and how long a packet takes to send.
+//! * [`config`] — the settable parameters, their validation, and the chip's
+//!   encodings. Phase 4's seam: the only thing the modem will accept.
+//! * [`reference`] — the module's 73 ppm frequency error, and the arithmetic
+//!   that cancels it.
 
+pub mod config;
 pub mod irq;
 pub mod lora;
 pub mod pa;
+pub mod reference;
 pub mod reset;
 pub mod rf_switch;
 pub mod tcxo;

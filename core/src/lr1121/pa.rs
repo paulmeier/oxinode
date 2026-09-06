@@ -68,6 +68,15 @@ pub const HIGH_POWER: PaConfigWord = PaConfigWord {
     hp_sel: 0x07,
 };
 
+/// Lowest output power the high-power PA accepts, in dBm.
+///
+/// The two PAs overlap over most of their range, which is why
+/// [`pa_config_for`] has to prefer one rather than compute one.
+pub const HP_MIN_DBM: i8 = -9;
+/// Highest output power the high-power PA accepts, in dBm — the *die's*
+/// number. [`MODULE_MAX_SUB_GHZ_DBM`] is lower and is the one that binds.
+pub const HP_MAX_DBM: i8 = 22;
+
 /// Lowest output power the low-power PA accepts, in dBm.
 pub const LP_MIN_DBM: i8 = -17;
 /// Highest output power the low-power PA accepts, in dBm.
@@ -97,6 +106,45 @@ pub const fn low_power_pa_accepts(dbm: i8) -> bool {
 /// Whether this output power requires switching the PA supply to VBAT.
 pub const fn requires_vbat_supply(dbm: i8) -> bool {
     dbm > VBAT_REQUIRED_ABOVE_DBM
+}
+
+/// Whether the high-power PA can produce this output power.
+pub const fn high_power_pa_accepts(dbm: i8) -> bool {
+    dbm >= HP_MIN_DBM && dbm <= HP_MAX_DBM
+}
+
+/// The high-power PA, with the supply that power actually needs.
+///
+/// [`HIGH_POWER`] hard-codes the internal regulator because it was written as a
+/// one-off diagnostic. Driving the high-power PA above 14 dBm from the internal
+/// regulator is a brown-out rather than a refusal, so a configuration layer that
+/// takes an arbitrary power cannot use that constant.
+pub const fn high_power(dbm: i8) -> PaConfigWord {
+    PaConfigWord {
+        pa_sel: 1,
+        reg_pa_supply: if requires_vbat_supply(dbm) { 1 } else { 0 },
+        duty_cycle: 0x04,
+        hp_sel: 0x07,
+    }
+}
+
+/// Which PA to use for an output power, or `None` if neither reaches it.
+///
+/// Prefers the low-power PA wherever it reaches, which is everything from
+/// −17 dBm to 14 dBm. That is a deliberate preference and not an arithmetic
+/// consequence: the two PAs overlap from −9 to 14 dBm, the low-power one draws
+/// less current, and — the reason that decides it — the low-power one is the
+/// only one this project has ever measured. Phase 3 keyed carriers at −17, 0
+/// and +14 dBm and saw them on a receiver. Nothing has ever come out of the
+/// high-power PA on this board.
+pub const fn pa_config_for(dbm: i8) -> Option<PaConfigWord> {
+    if low_power_pa_accepts(dbm) {
+        Some(LOW_POWER)
+    } else if high_power_pa_accepts(dbm) {
+        Some(high_power(dbm))
+    } else {
+        None
+    }
 }
 
 /// The US915 ISM band, in hertz.
@@ -254,6 +302,16 @@ const _: () = assert!(
     "a sweep carrier sits on the receiver's DC spike, where it cannot be measured"
 );
 const _: () = assert!(LP_MAX_DBM < MODULE_MAX_SUB_GHZ_DBM);
+// The low-power PA cannot reach the module's rating, so a configuration layer
+// that only ever used it could not offer the top 6 dB the hardware is rated
+// for. That is the whole reason `pa_config_for` has to know about both.
+const _: () = assert!(high_power_pa_accepts(MODULE_MAX_SUB_GHZ_DBM));
+// ...and the module's rating is inside the die's range, or the clamp is
+// clamping to something the PA cannot produce.
+const _: () = assert!(MODULE_MAX_SUB_GHZ_DBM <= HP_MAX_DBM);
+// The overlap is real and the preference resolves it. If these two ever stop
+// overlapping, `pa_config_for` has a gap in the middle of its range.
+const _: () = assert!(HP_MIN_DBM < LP_MAX_DBM);
 
 #[cfg(test)]
 mod tests {
@@ -277,6 +335,48 @@ mod tests {
             hp_sel: 0x04,
         };
         assert_eq!(w.to_raw(), 0x0102_0304);
+    }
+
+    /// The low-power PA is preferred throughout its range, including the part
+    /// it shares with the high-power one. It is the only PA that has ever been
+    /// measured on this board, so anything that quietly moved the boundary
+    /// would be transmitting through an unproven path.
+    #[test]
+    fn the_low_power_pa_is_preferred_wherever_it_reaches() {
+        for dbm in LP_MIN_DBM..=LP_MAX_DBM {
+            assert_eq!(pa_config_for(dbm), Some(LOW_POWER), "{dbm} dBm");
+        }
+        for dbm in (LP_MAX_DBM + 1)..=MODULE_MAX_SUB_GHZ_DBM {
+            let cfg = pa_config_for(dbm).expect("the module's rating must be reachable");
+            assert_eq!(cfg.pa_sel, 1, "{dbm} dBm should use the high-power PA");
+        }
+    }
+
+    /// Above 14 dBm the internal regulator cannot supply the PA. Getting this
+    /// wrong is not an error the chip reports — it is a brown-out.
+    #[test]
+    fn the_high_power_pa_switches_to_vbat_exactly_where_it_must() {
+        assert_eq!(high_power(VBAT_REQUIRED_ABOVE_DBM).reg_pa_supply, 0);
+        assert_eq!(high_power(VBAT_REQUIRED_ABOVE_DBM + 1).reg_pa_supply, 1);
+        assert_eq!(high_power(MODULE_MAX_SUB_GHZ_DBM).reg_pa_supply, 1);
+    }
+
+    /// Neither PA reaches outside its own range, and nothing between them is
+    /// silently rounded into something the hardware would accept.
+    #[test]
+    fn a_power_neither_pa_can_produce_is_refused_rather_than_clamped() {
+        assert_eq!(pa_config_for(LP_MIN_DBM - 1), None);
+        assert_eq!(pa_config_for(HP_MAX_DBM + 1), None);
+        assert_eq!(pa_config_for(-100), None);
+        assert_eq!(pa_config_for(127), None);
+    }
+
+    /// `HIGH_POWER` stays what it was — a fixed diagnostic word — and is not
+    /// quietly the same thing as the supply-aware builder.
+    #[test]
+    fn the_diagnostic_constant_is_not_the_configurable_one() {
+        assert_eq!(high_power(0), HIGH_POWER);
+        assert_ne!(high_power(MODULE_MAX_SUB_GHZ_DBM), HIGH_POWER);
     }
 
     /// The bug this module exists to route around: in `lr11xx`, selecting the
