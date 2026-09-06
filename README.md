@@ -79,11 +79,16 @@ What that actually establishes:
   arrives on the interrupt line 51910 µs after `SetTx` against 51456 µs of
   computed airtime, and the SDR sees a 52.00 ms burst in the channel.
 
-**Nothing has demodulated a packet.** A burst of the right length in the right
-channel says the modulation is what was asked for; it is not a receiver
-recovering a payload. And there is reason to expect one would fail: 73 ppm puts
-this packet 67 kHz below 915.000 MHz, where LoRa tolerates roughly ±31 kHz at
-125 kHz bandwidth.
+* **it receives.** Pointed at a second Base Duo running stock Meshtastic, it
+  demodulates real packets — the broadcast header and the peer's own node
+  number, RSSI −45 dBm, SNR 11 dB.
+
+**The 73 ppm error belongs to the module, not to this board.** Sweeping the
+receive frequency against the second board gives a reception window of −120 to
++120 kHz, symmetric about zero — so both boards are off by the same amount.
+Replacing the board would not fix it. At 250 kHz bandwidth it does not matter
+and the hardware meshes happily; at the narrower bandwidths an RNode would use,
+it still wants a fix.
 
 **The transmitter is 73 ppm low**, and that is measured rather than suspected:
 chopping between two carriers inside a single capture separates the

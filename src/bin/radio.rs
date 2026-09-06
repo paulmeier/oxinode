@@ -37,6 +37,7 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use lr11xx::ops::Interrupt;
+use lr11xx::ops::Interrupt as Irq;
 use lr11xx::ops::{
     Calibrate, CodingRate, LoRaBandwidth, LoRaModulation, LoRaPacket, PaConfig, PacketType,
     RampTime, RfSwitchConfig, SpreadingFactor, TcxoMode, TcxoTune, TxParams,
@@ -45,6 +46,7 @@ use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
 use oxinode_core::lr1121::{irq as irq_bits, lora, pa, rf_switch, tcxo, ResetVerdict};
+use oxinode_core::meshtastic;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -466,7 +468,7 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, p/o = send a LoRa packet warm/cold, m/u = DC-DC/LDO, t = temperature, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
+        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, p/o = send a LoRa packet warm/cold, m/u = DC-DC/LDO, t = temperature, y = listen (h/i = -60/+60 kHz), z = sweep, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
         CW_LEVELS[2],
@@ -589,6 +591,18 @@ where
                                 route_interrupts(dev, irq, mask).await;
                             }
                         }
+                        // Listen on the second bench board's channel. The
+                        // offset argument steps the commanded frequency, which
+                        // is how the two boards' clocks get compared.
+                        b'y' | b'h' | b'i' => {
+                            let offset_hz: i32 = match byte {
+                                b'h' => -60_000,
+                                b'i' => 60_000,
+                                _ => 0,
+                            };
+                            receive(radio.as_mut(), irq, offset_hz).await;
+                        }
+                        b'z' => sweep_rx(radio.as_mut(), irq).await,
                         // Step 8: the regulator, and a way to compare the two.
                         b'm' | b'u' => {
                             if let Some(dev) = radio.as_mut() {
@@ -1229,4 +1243,205 @@ where
         Ok(Err(e)) => defmt::error!("thermal: {}", e),
         Err(_) => defmt::error!("thermal: no reply within 200 ms"),
     }
+}
+
+/// Listen on the second bench board's Meshtastic channel for a few seconds.
+///
+/// This is the first time anything in oxinode has receive. It exists because
+/// the only radio peer available is a Base Duo running stock Meshtastic, and
+/// hearing it answers a question the SDR could not: **is the 73 ppm error this
+/// board, or the design?**
+///
+/// The two boards carry the same module, so if the error is a property of the
+/// design they share it, and each will hear the other at the frequency both
+/// were told to use. If instead this board is uniquely bad, it will only hear
+/// the other one when commanded roughly 66 kHz away from where the other one
+/// thinks it is transmitting. `offset_hz` is what makes that measurable.
+async fn receive<S, B>(
+    dev: Option<&mut Lr11xx<S, B>>,
+    irq: &mut radio::RadioIrq<'_>,
+    offset_hz: i32,
+) where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::error!("rx: no radio attached");
+        return;
+    };
+    listen(dev, irq, offset_hz, Duration::from_secs(20), true).await;
+}
+
+/// Step the receive frequency across a range and count what arrives at each.
+///
+/// Three fixed offsets could not answer the question. At 250 kHz bandwidth LoRa
+/// tolerates so much frequency error that 0 and ±60 kHz all receive perfectly,
+/// so the measurement said nothing at all.
+///
+/// What does answer it is the **centre** of the window: find where reception
+/// dies on each side, and the midpoint is where the two boards' clocks agree.
+/// If the 73 ppm error belongs to the module design, both boards share it, they
+/// agree at zero offset, and the window is centred on 0. If instead this board
+/// is uniquely bad, the window is centred near +66 kHz — the amount this board
+/// must be told to add to land where the other one actually is.
+async fn sweep_rx<S, B>(dev: Option<&mut Lr11xx<S, B>>, irq: &mut radio::RadioIrq<'_>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::error!("rx: no radio attached");
+        return;
+    };
+    defmt::info!("sweep: 13 steps of 40 kHz, 8 s each; keep the peer transmitting");
+    for step in -6i32..=6 {
+        let offset = step * 40_000;
+        let heard = listen(dev, irq, offset, Duration::from_secs(8), false).await;
+        defmt::info!("sweep: {=i32} Hz -> {=u32} packets", offset, heard);
+    }
+    defmt::info!("sweep: done");
+}
+
+/// Configure for the peer's channel at `offset_hz` and count packets for
+/// `dwell`. Returns how many arrived.
+async fn listen<S, B>(
+    dev: &mut Lr11xx<S, B>,
+    irq: &mut radio::RadioIrq<'_>,
+    offset_hz: i32,
+    dwell: Duration,
+    verbose: bool,
+) -> u32
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let tuned = (meshtastic::US_LONG_FAST_HZ as i64 + offset_hz as i64) as u32;
+    if verbose {
+        defmt::info!(
+            "rx: {=u32} Hz ({=i32} Hz off Meshtastic US LongFast), SF{=u8} BW{=u32} CR4/5, sync {=u8:#04x}",
+            tuned,
+            offset_hz,
+            meshtastic::long_fast::SF,
+            meshtastic::long_fast::BANDWIDTH_HZ,
+            meshtastic::long_fast::SYNC_WORD
+        );
+    }
+
+    let configure = async {
+        dev.set_packet_type(PacketType::LoRa).await?;
+        dev.set_rf_frequency(tuned).await?;
+        dev.set_lora_modulation(
+            LoRaModulation::builder()
+                .with_sf(SpreadingFactor::SF11)
+                .with_bwl(LoRaBandwidth::KHz250)
+                .with_cr(CodingRate::Short45)
+                .with_low_data_rate_optimize(lora::low_data_rate_optimize(
+                    meshtastic::long_fast::SF,
+                    meshtastic::long_fast::BANDWIDTH_HZ,
+                ))
+                .build(),
+        )
+        .await?;
+        dev.set_lora_packet(
+            LoRaPacket::builder()
+                .with_preamble_length(meshtastic::long_fast::PREAMBLE)
+                .with_header_implicit(false)
+                // Explicit header: the length comes off the air, and this is
+                // the ceiling rather than the expected size.
+                .with_payload_length(255)
+                .with_crc(true)
+                .with_invert_iq(false)
+                .build(),
+        )
+        .await?;
+        dev.set_lora_sync_word(meshtastic::long_fast::SYNC_WORD)
+            .await?;
+        // Sensitivity matters more than current here, and it is what the peer
+        // is using.
+        dev.set_rx_boosted(true).await?;
+        dev.clear_irq(Irq::new_with_raw_value(irq_bits::ALL_NAMED))
+            .await?;
+        // 0xFFFFFF: stay in RX until told otherwise, receiving repeatedly.
+        dev.set_rx(u24::new(0xff_ffff)).await?;
+        Ok::<(), lr11xx::Error>(())
+    };
+
+    match with_timeout(Duration::from_millis(500), configure).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            defmt::error!("rx: configuration failed, {}", e);
+            return 0;
+        }
+        Err(_) => {
+            defmt::error!("rx: configuration did not complete");
+            return 0;
+        }
+    }
+    if verbose {
+        defmt::info!("rx: listening");
+    }
+
+    let until = Instant::now() + dwell;
+    let mut heard = 0u32;
+    while Instant::now() < until {
+        if irq.wait_asserted(Duration::from_millis(500)).await.is_err() {
+            continue;
+        }
+        let report = async {
+            let (_, pending) = dev.status().await?;
+            let raw = pending.raw_value();
+            let mut buf = [0u8; 64];
+            let mut len = 0usize;
+            let mut rssi = 0i16;
+            let mut snr = 0i16;
+            if raw & irq_bits::bit::RX_DONE != 0 {
+                let status = dev.rx_buffer_status().await?;
+                len = (status.payload_length() as usize).min(buf.len());
+                dev.read_buffer8(status.offset(), &mut buf[..len]).await?;
+                let pkt = dev.lora_packet_status().await?;
+                // RSSI in dBm is -RssiPkt/2; SNR in dB is SnrPkt/4.
+                rssi = -(pkt.rssi() as i16) / 2;
+                snr = (pkt.snr() as i16 + 2) / 4;
+            }
+            dev.clear_irq(Irq::new_with_raw_value(irq_bits::ALL_NAMED))
+                .await?;
+            Ok::<_, lr11xx::Error>((raw, buf, len, rssi, snr))
+        };
+        match with_timeout(Duration::from_millis(300), report).await {
+            Ok(Ok((raw, buf, len, rssi, snr))) => {
+                if verbose {
+                    for (b, name) in irq_bits::NAMES {
+                        if raw & b != 0 {
+                            defmt::info!("rx: irq {=str}", name);
+                        }
+                    }
+                }
+                if raw & irq_bits::bit::RX_DONE != 0 {
+                    heard += 1;
+                    if verbose {
+                        defmt::info!(
+                            "rx: PACKET {=u32}: {=usize} bytes, RSSI {=i16} dBm, SNR {=i16} dB",
+                            heard,
+                            len,
+                            rssi,
+                            snr
+                        );
+                        defmt::info!("rx: bytes {=[u8]:02x}", buf[..len.min(32)]);
+                    }
+                }
+            }
+            Ok(Err(e)) => defmt::error!("rx: {}", e),
+            Err(_) => defmt::error!("rx: read timed out"),
+        }
+    }
+
+    let _ = with_timeout(Duration::from_millis(200), dev.standby(false)).await;
+    if verbose {
+        defmt::info!(
+            "rx: done at {=i32} Hz offset -- {=u32} packets",
+            offset_hz,
+            heard
+        );
+    }
+    heard
 }

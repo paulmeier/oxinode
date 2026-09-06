@@ -37,11 +37,31 @@ if [[ -z "$nrfutil" ]]; then
     nrfutil="$venv/bin/adafruit-nrfutil"
 fi
 
+# Choosing a port used to mean "the first one that matches the glob", which was
+# fine with one board attached and actively dangerous with two: a second Base
+# Duo running someone else's firmware enumerates on the same glob, and flashing
+# it would overwrite that firmware. So an ambiguous choice is refused rather
+# than guessed.
 port="${OXINODE_DFU_PORT:-}"
 if [[ -z "$port" ]]; then
-    for p in /dev/cu.usbmodem*; do
-        if [[ -e "$p" ]]; then port="$p"; break; fi
+    candidates=()
+    for p in ${OXINODE_DFU_PORT_GLOB:-/dev/cu.usbmodem*}; do
+        [[ -e "$p" ]] && candidates+=("$p")
     done
+    # bash 3.2 (which is what macOS ships) treats expanding an empty array as an
+    # unbound variable under `set -u`, so the count is checked first.
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        echo "dfu-flash: no /dev/cu.usbmodem* port found. Is the board attached?" >&2
+        exit 1
+    elif [[ ${#candidates[@]} -eq 1 ]]; then
+        port="${candidates[0]}"
+    else
+        echo "dfu-flash: more than one USB serial port is attached:" >&2
+        for p in "${candidates[@]}"; do echo "    $p" >&2; done
+        echo "Refusing to guess which one to flash -- picking wrong overwrites" >&2
+        echo "the other board. Set OXINODE_DFU_PORT to the one you mean." >&2
+        exit 1
+    fi
 fi
 if [[ -z "$port" ]]; then
     cat >&2 <<'MSG'

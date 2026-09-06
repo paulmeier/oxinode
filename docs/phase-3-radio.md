@@ -757,6 +757,75 @@ reboot. It is a diagnostic rather than a product, and the release notes say so �
 along with the warning to attach an antenna before pressing anything that
 transmits.
 
+## A second board answers the frequency question
+
+The SDR was removed and a second Base Duo attached, running stock Meshtastic
+2.7.26 — US region, `LONG_FAST` preset (SF11, 250 kHz, CR 4/5), and already
+meshing with third-party nodes.
+
+### Receive works, and it demodulated real packets
+
+The receive path had never been exercised. Configured for the peer's channel it
+worked first time:
+
+```
+INFO  rx: 906875000 Hz, SF11 BW250000 CR4/5, sync 0x2b
+INFO  rx: PACKET 1: 33 bytes, RSSI -45 dBm, SNR 11 dB
+INFO  rx: bytes [ff, ff, ff, ff, 5c, a1, 3d, ba, ...]
+```
+
+`ff ff ff ff` is the Meshtastic broadcast destination and `5c a1 3d ba` is the
+sender, little-endian — `0xba3da15c`, which is exactly the `myNodeNum` the peer
+reports over USB. So this is a real packet from a known transmitter with a
+passing CRC, not a chance correlation.
+
+That also closes the gap step 7b left open, from the other direction: something
+has now demodulated a LoRa packet on this hardware.
+
+The frequency is derived rather than hard-coded. Meshtastic does not store a
+frequency; it hashes the channel name with djb2 and takes the remainder over the
+channel count, so 906.875 MHz is a computed property of the configuration.
+`oxinode_core::meshtastic` reproduces the arithmetic, with tests — it is test
+scaffolding, not a feature, and nothing there survives into the protocol.
+
+### The 73 ppm is the design, not this board
+
+Three fixed offsets said nothing: 0 and ±60 kHz all received perfectly, because
+at 250 kHz LoRa tolerates far more error than that. What discriminates is the
+**centre** of the reception window, so the receive frequency was swept in
+40 kHz steps against a peer transmitting every two seconds:
+
+| offset | −240 | −200 | −160 | −120 | −80 | −40 | 0 | +40 | +80 | +120 | +160 | +200 | +240 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| packets | 0 | 0 | 0 | 4 | 3 | 3 | 3 | 4 | 4 | 4 | 0 | 0 | 0 |
+
+**The window is −120 to +120 kHz, symmetric about zero.** The true edges lie
+within one step, so the centre is 0 ± 20 kHz — ±22 ppm.
+
+If this board were uniquely 73 ppm low and the peer accurate, the window would
+be centred near +66 kHz, spanning roughly −54 to +186 kHz. It is not. **Both
+boards carry the same error**, so it is a property of the nRFLR1121 module
+rather than a fault in the unit on the bench. Replacing the board would not fix
+it.
+
+### The tolerance is wider than this document claimed
+
+Step 7b said LoRa "tolerates roughly a quarter of the bandwidth, about ±31 kHz
+at 125 kHz", and concluded a standard receiver would probably not decode our
+packets. The measurement above says the real tolerance at SF11/250 kHz is
+**±120 to ±160 kHz — about ±48% of the bandwidth**, not ±25%.
+
+Scaling that to 125 kHz suggests ±60 kHz, against our 67 kHz of error. So the
+situation is less dire than stated: marginal rather than hopeless. It is still
+the wrong side of the line, and the scaling is approximate because the tolerance
+depends on spreading factor as well as bandwidth — SF11 was measured, SF7 was
+not.
+
+What has not changed: at 250 kHz this hardware interoperates happily, which the
+peer already demonstrates by meshing with a third-party repeater. At the
+narrower bandwidths an RNode would typically use, 73 ppm remains a real risk and
+still wants a fix.
+
 ## Phase 3 is done
 
 Every step verified on hardware. What it establishes, and what it does not:

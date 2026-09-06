@@ -54,6 +54,9 @@ class TestDfuFlash(unittest.TestCase):
         env["NRFUTIL_LOG"] = log
         env["OXINODE_DFU_PORT"] = "/dev/null"
         env.update(env_extra)
+        for key, value in list(env_extra.items()):
+            if value is None:
+                env.pop(key, None)
 
         proc = subprocess.run(
             [os.path.join(REPO, "tools/dfu-flash.sh"), ELF],
@@ -67,6 +70,64 @@ class TestDfuFlash(unittest.TestCase):
             with open(log, encoding="utf-8") as f:
                 calls = [line.strip() for line in f if line.strip()]
         return proc, calls
+
+    def test_a_single_candidate_port_is_chosen_automatically(self):
+        ports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, ports, ignore_errors=True)
+        only = os.path.join(ports, "cu.usbmodemONE")
+        open(only, "w").close()
+        proc, calls = self.run_script(
+            OXINODE_DFU_PORT=None,
+            OXINODE_DFU_PORT_GLOB=os.path.join(ports, "cu.usbmodem*"),
+            OXINODE_DFU_IN_DFU="1",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(any(only in c for c in calls), calls)
+
+    def test_no_candidate_port_fails_with_a_reason(self):
+        """Replaces a version that skipped itself whenever a board was plugged
+        in -- which, on the machine that does the flashing, was always. It had
+        therefore been testing nothing for as long as it had existed. Pointing
+        the glob at an empty directory makes the case deterministic.
+        """
+        ports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, ports, ignore_errors=True)
+        proc, _ = self.run_script(
+            OXINODE_DFU_PORT=None,
+            OXINODE_DFU_PORT_GLOB=os.path.join(ports, "cu.usbmodem*"),
+            OXINODE_DFU_IN_DFU="1",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no /dev/cu.usbmodem", proc.stderr)
+
+    def test_two_boards_attached_refuses_rather_than_guessing(self):
+        """The hazard this guards is not hypothetical.
+
+        A second Base Duo running someone else's firmware enumerates on the
+        same glob. The old code took the first match, which is alphabetical and
+        therefore arbitrary -- and flashing the wrong one overwrites firmware
+        that was not ours to overwrite.
+        """
+        ports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, ports, ignore_errors=True)
+        first = os.path.join(ports, "cu.usbmodem1101")
+        second = os.path.join(ports, "cu.usbmodem3101")
+        open(first, "w").close()
+        open(second, "w").close()
+        proc, calls = self.run_script(
+            OXINODE_DFU_PORT=None,
+            OXINODE_DFU_PORT_GLOB=os.path.join(ports, "cu.usbmodem*"),
+            OXINODE_DFU_IN_DFU="1",
+        )
+        self.assertNotEqual(proc.returncode, 0, "should refuse, not choose")
+        self.assertIn("more than one", proc.stderr)
+        # Both are named, so the operator can tell which is which.
+        self.assertIn(first, proc.stderr)
+        self.assertIn(second, proc.stderr)
+        # And nothing was flashed.
+        self.assertFalse(
+            any("dfu serial" in c for c in calls), f"attempted a flash: {calls}"
+        )
 
     def test_runs_to_completion_in_dfu_mode(self):
         proc, calls = self.run_script(OXINODE_DFU_IN_DFU="1")
@@ -108,12 +169,6 @@ class TestDfuFlash(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"stderr:\n{proc.stderr}")
         self.assertIn("--touch 1200", calls[1])
 
-    def test_fails_clearly_with_no_port(self):
-        proc, calls = self.run_script(OXINODE_DFU_PORT="", OXINODE_DFU_IN_DFU="1")
-        if proc.returncode == 0:
-            self.skipTest("a board is plugged in; the no-port path cannot be tested")
-        self.assertIn("no serial port found", proc.stderr)
-        self.assertEqual(calls, [], "must not invoke the flasher with no port")
 
 
 if __name__ == "__main__":
