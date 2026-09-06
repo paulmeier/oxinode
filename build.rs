@@ -24,8 +24,15 @@ fn main() {
         out.join("app_flash_origin.rs"),
         format!(
             "/// Address this image is linked at, parsed from `memory.x` at build time.\n\
-             pub const APP_FLASH_ORIGIN: u32 = {:#010x};\n",
-            flash.origin
+             pub const APP_FLASH_ORIGIN: u32 = {:#010x};\n\
+             /// First address past the application region, also from `memory.x`.\n\
+             ///\n\
+             /// This is where the 40 KB the bootloader reserves for application\n\
+             /// data begins, and therefore where anything that has to survive a\n\
+             /// firmware update has to live. See `src/store.rs`.\n\
+             pub const APP_FLASH_END: u32 = {:#010x};\n",
+            flash.origin,
+            flash.end()
         ),
     )
     .expect("cannot write app_flash_origin.rs");

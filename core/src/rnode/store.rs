@@ -43,8 +43,14 @@ const FLAG_FIRMWARE_HASH: u8 = 1 << 1;
 const OFF_MAGIC: usize = 0;
 const OFF_VERSION: usize = 4;
 const OFF_FLAGS: usize = 5;
-const OFF_CRC: usize = 6;
-const OFF_BODY: usize = 10;
+/// Two bytes of nothing, so the header is eight and the record is a whole
+/// number of words. The nRF52840's flash controller writes words, and a record
+/// that was not a multiple of four would have to be padded by the caller --
+/// which is one more thing to get wrong at the only layer that cannot be
+/// tested on the host.
+const OFF_RESERVED: usize = 6;
+const OFF_CRC: usize = 8;
+const OFF_BODY: usize = 12;
 const OFF_EEPROM: usize = OFF_BODY;
 const OFF_SIGNATURE: usize = OFF_EEPROM + EEPROM_SIZE;
 const OFF_FW_HASH: usize = OFF_SIGNATURE + DEVICE_SIGNATURE_LEN;
@@ -107,9 +113,7 @@ impl DeviceStore {
         out[OFF_FLAGS] = flags;
         out[OFF_EEPROM..OFF_EEPROM + EEPROM_SIZE].copy_from_slice(self.rom.as_bytes());
 
-        // Over the flags and the body, so a flipped presence bit is caught too.
-        let crc = crc32(&out[OFF_FLAGS..OFF_FLAGS + 1]);
-        let crc = crc32_continue(crc, &out[OFF_BODY..]);
+        let crc = record_crc(&out);
         out[OFF_CRC..OFF_CRC + 4].copy_from_slice(&crc.to_le_bytes());
         out
     }
@@ -133,9 +137,7 @@ impl DeviceStore {
             bytes[OFF_CRC + 2],
             bytes[OFF_CRC + 3],
         ]);
-        let crc = crc32(&bytes[OFF_FLAGS..OFF_FLAGS + 1]);
-        let crc = crc32_continue(crc, &bytes[OFF_BODY..RECORD_LEN]);
-        if crc != stored {
+        if record_crc(&bytes[..RECORD_LEN]) != stored {
             return None;
         }
 
@@ -160,6 +162,16 @@ impl DeviceStore {
             target_firmware_hash,
         })
     }
+}
+
+/// The CRC over a whole record except the four bytes that hold it.
+///
+/// Everything else is covered, magic and version included. A checksum with a
+/// hole in it is a checksum that passes on the corruption that lands in the
+/// hole.
+fn record_crc(record: &[u8]) -> u32 {
+    let head = crc32(&record[..OFF_CRC]);
+    crc32_continue(head, &record[OFF_CRC + 4..])
 }
 
 /// CRC-32/ISO-HDLC, computed a bit at a time.
@@ -188,6 +200,11 @@ pub fn crc32_continue(crc: u32, data: &[u8]) -> u32 {
 // page to write one and a record spanning two would be two erases -- and the
 // window between them is exactly the failure this design is avoiding.
 const _: () = assert!(RECORD_LEN <= 4096);
+// And it has to be a whole number of 32-bit words, because that is the unit
+// the nRF52840's flash controller writes in. The two reserved bytes are what
+// make that true; if a future field eats them, this is what says so.
+const _: () = assert!(OFF_CRC == OFF_RESERVED + 2);
+const _: () = assert!(RECORD_LEN % 4 == 0);
 
 #[cfg(test)]
 mod tests {

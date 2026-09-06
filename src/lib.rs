@@ -11,6 +11,7 @@ pub mod bringup;
 pub mod logger;
 pub mod modem;
 pub mod radio;
+pub mod store;
 pub mod usb_log;
 
 use core::panic::PanicInfo;

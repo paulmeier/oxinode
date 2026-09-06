@@ -33,6 +33,17 @@ pub fn relocate_vector_table() {
     cortex_m::asm::isb();
 }
 
+/// Restart the application.
+///
+/// What `CMD_RESET` asks for. Distinct from [`reboot_to_bootloader`]: this
+/// comes back up running oxinode, having left `GPREGRET` alone. The host
+/// expects the serial port to disappear and re-enumerate, and says so — it
+/// closes the port, waits, and finds the device again by its USB serial
+/// number.
+pub fn reboot() -> ! {
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
 /// Magic value the Adafruit nRF52 bootloader looks for in `GPREGRET` to stay in
 /// UF2 mass-storage mode instead of booting the application.
 ///

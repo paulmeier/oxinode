@@ -60,6 +60,16 @@ impl<'d> Led<'d> {
     }
 }
 
+/// The nRF52840's factory device ID.
+///
+/// Read-only, set at manufacture, and unique to the chip. It is what the USB
+/// serial string is made from, and what phase 6 binds the device hash to so a
+/// signature made for one board does not validate another.
+pub fn device_id() -> u64 {
+    let ficr = embassy_nrf::pac::FICR;
+    ((ficr.deviceid(1).read() as u64) << 32) | ficr.deviceid(0).read() as u64
+}
+
 /// Claim the device serial string, derived from the nRF52840's factory device
 /// ID so the host names the port consistently and two boards never collide.
 ///
@@ -69,10 +79,7 @@ impl<'d> Led<'d> {
 pub fn take_device_serial() -> &'static str {
     static SERIAL: StaticCell<[u8; 16]> = StaticCell::new();
 
-    let ficr = embassy_nrf::pac::FICR;
-    let id = ((ficr.deviceid(1).read() as u64) << 32) | ficr.deviceid(0).read() as u64;
-
-    let buf = SERIAL.init(oxinode_core::serial::hex_u64(id));
+    let buf = SERIAL.init(oxinode_core::serial::hex_u64(device_id()));
     // `hex_u64` only ever emits ASCII hex digits, which its own tests assert.
     core::str::from_utf8(buf).expect("hex_u64 produced non-ASCII")
 }

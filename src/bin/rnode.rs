@@ -41,11 +41,13 @@ use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
 use oxinode::modem::Modem;
+use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::lr1121::config::ValidConfig;
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::protocol::{Action, Protocol, Sink};
+use oxinode_core::rnode::store::DeviceStore;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -65,6 +67,19 @@ const USB_PID: u16 = 0x0003;
 /// and a little more, so a full packet can always be queued whole — which
 /// matters because [`Outbox`] drops whole frames rather than truncating them.
 const OUTBOX: usize = 2048;
+
+/// How long the EEPROM has to stay still before it is written to flash.
+///
+/// `rnodeconf` provisions a board with 155 single-byte writes six milliseconds
+/// apart. Committing each of them would mean 155 page erases — thirteen
+/// seconds of stalled CPU to absorb one second of commands — so the image is
+/// held in RAM and written out once the writes stop.
+///
+/// The cost is that this much of a provisioning run is lost if the board is
+/// unplugged at exactly the wrong moment. That is survivable and visible: the
+/// host reads the image back immediately afterwards and would find it short.
+/// Losing it because the flash could not keep up would not be.
+const PERSIST_IDLE: Duration = Duration::from_millis(250);
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -124,6 +139,13 @@ async fn main(_spawner: Spawner) {
 
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
+
+    // Read before anything else touches it. What comes back is either a record
+    // this firmware wrote, or the state of a board nobody has provisioned --
+    // there is no third answer; see `oxinode::store`.
+    let mut storage = Storage::new(p.NVMC);
+    let device = storage.load();
+    let mcu_id = board::device_id();
 
     let run_usb = usb.run();
     // `|| true` rather than waiting for DTR: this image's log is continuous
@@ -214,7 +236,20 @@ async fn main(_spawner: Spawner) {
                 // has a frame for exactly this, and it makes Reticulum say
                 // "hardware initialisation error" instead of timing out.
                 defmt::error!("radio did not come up: {}", e);
-                serve_without_a_radio(&mut kiss_tx, &mut host_reader, &control, &mut led).await;
+                // Provisioning still works. A board whose radio is dead can
+                // still be given an identity, and telling somebody to fix the
+                // radio first would be inventing a dependency that is not
+                // there.
+                serve_without_a_radio(
+                    &mut kiss_tx,
+                    &mut host_reader,
+                    &control,
+                    &mut led,
+                    &mut storage,
+                    device,
+                    mcu_id,
+                )
+                .await;
             }
         };
 
@@ -226,6 +261,9 @@ async fn main(_spawner: Spawner) {
             &mut host_reader,
             &control,
             &mut led,
+            &mut storage,
+            device,
+            mcu_id,
         )
         .await
     };
@@ -242,17 +280,23 @@ async fn run<'d, D, S, B>(
     host: &mut Reader<'_, NoopRawMutex, 1024>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
+    storage: &mut Storage<'_>,
+    device: DeviceStore,
+    mcu_id: u64,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
-    let mut protocol = Protocol::new();
+    let mut protocol = Protocol::with_storage(device, mcu_id);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     let mut outbox = Outbox::<OUTBOX>::new();
     let mut usb_buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut rx_buf = [0u8; kiss::HW_MTU];
+    // When the EEPROM was last changed, and therefore when it should be
+    // written out. See `PERSIST_IDLE`.
+    let mut dirty_since: Option<Instant> = None;
     // What the radio is currently programmed with, so a configuration is not
     // reprogrammed on every packet -- and, more to the point, so that a change
     // is applied exactly once and can be logged when it happens.
@@ -260,11 +304,40 @@ where
     let mut receiving = false;
     let mut last_blink = Instant::now();
 
+    // TNC mode. A device with a stored configuration is supposed to come up on
+    // air by itself -- that is the whole point of `rnodeconf --tnc`, and the
+    // only reason to store a configuration at all. Nothing here waits for a
+    // host, and a host that connects later reconfigures it as it would any
+    // other board.
+    let resume = protocol.resume_stored_config();
+    if resume != Action::None {
+        defmt::info!("tnc: resuming the stored configuration");
+        act(
+            dev,
+            irq,
+            &mut protocol,
+            resume,
+            &mut applied,
+            &mut receiving,
+            &mut outbox,
+        )
+        .await;
+    } else if let Some(reason) = protocol.last_error() {
+        defmt::warn!(
+            "tnc: the stored configuration is not one this radio can do: {=str}",
+            reason.message()
+        );
+    }
+
     loop {
         // A touch can arrive at any moment, including while a packet is in the
         // air, so it is level-triggered and re-checked on every wake rather
         // than waited for on an edge.
         if usb_log::is_bootloader_touch_tx(tx, control) {
+            // Anything unwritten goes to flash first. A reflash is exactly
+            // when losing a provisioning would be least welcome, and the
+            // record survives the flash itself -- see `oxinode::store`.
+            commit(storage, &protocol);
             boot::reboot_to_bootloader();
         }
 
@@ -289,17 +362,33 @@ where
                         }
                         kiss::Step::Frame => {
                             let command = command::decode(decoder.command(), decoder.payload());
-                            let action = protocol.handle(command, &mut outbox);
-                            act(
-                                dev,
-                                irq,
-                                &mut protocol,
-                                action,
-                                &mut applied,
-                                &mut receiving,
-                                &mut outbox,
-                            )
-                            .await;
+                            match protocol.handle(command, &mut outbox) {
+                                // Not a radio action, and not "write it out
+                                // now" either: the timer restarts on every
+                                // write, so a burst of them costs one erase.
+                                Action::Persist => dirty_since = Some(Instant::now()),
+                                // Everything queued is written before the
+                                // reset, because the host asked for this and
+                                // will look at the result afterwards.
+                                Action::Reset => {
+                                    defmt::info!("reset requested by the host");
+                                    outbox.flush(tx).await;
+                                    commit(storage, &protocol);
+                                    boot::reboot();
+                                }
+                                action => {
+                                    act(
+                                        dev,
+                                        irq,
+                                        &mut protocol,
+                                        action,
+                                        &mut applied,
+                                        &mut receiving,
+                                        &mut outbox,
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                     }
                 }
@@ -363,6 +452,17 @@ where
             }
         }
 
+        // Write the EEPROM out once it has stopped changing. Checked on every
+        // iteration rather than on the housekeeping tick, because during a
+        // provisioning run there are host bytes arriving and the tick never
+        // fires.
+        if let Some(since) = dirty_since {
+            if since.elapsed() > PERSIST_IDLE {
+                commit(storage, &protocol);
+                dirty_since = None;
+            }
+        }
+
         outbox.flush(tx).await;
 
         // Belt and braces. Every path above is *supposed* to await something
@@ -390,6 +490,13 @@ async fn act<S, B>(
 {
     match action {
         Action::None => {}
+
+        // Handled where the command was decoded, because neither is anything
+        // to do with the radio. Reported rather than ignored: reaching here
+        // would mean a caller had forgotten one.
+        Action::Persist | Action::Reset => {
+            defmt::error!("a storage action reached the radio path");
+        }
 
         Action::Reconfigure => {
             let Some(valid) = protocol.valid_config() else {
@@ -482,21 +589,27 @@ async fn act<S, B>(
 /// cannot detect the device reports "could not detect device" — which points at
 /// the cable. Answering and then failing to configure points at the radio,
 /// which is where the fault actually is.
+#[allow(clippy::too_many_arguments)]
 async fn serve_without_a_radio<'d, D>(
     tx: &mut Sender<'d, D>,
     host: &mut Reader<'_, NoopRawMutex, 1024>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
+    storage: &mut Storage<'_>,
+    device: DeviceStore,
+    mcu_id: u64,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
 {
-    let mut protocol = Protocol::new();
+    let mut protocol = Protocol::with_storage(device, mcu_id);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     let mut outbox = Outbox::<OUTBOX>::new();
     let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
+    let mut dirty_since: Option<Instant> = None;
     loop {
         if usb_log::is_bootloader_touch_tx(tx, control) {
+            commit(storage, &protocol);
             boot::reboot_to_bootloader();
         }
         // Fast blink: alive, enumerated, no radio.
@@ -506,16 +619,48 @@ where
             for &byte in &buf[..n] {
                 if decoder.feed(byte) == kiss::Step::Frame {
                     let command = command::decode(decoder.command(), decoder.payload());
-                    let action = protocol.handle(command, &mut outbox);
-                    if action != Action::None {
-                        protocol.report_error(error::INITRADIO, &mut outbox);
+                    match protocol.handle(command, &mut outbox) {
+                        Action::None => {}
+                        // Provisioning has nothing to do with the radio, and
+                        // works here exactly as it does when one came up. A
+                        // board with a dead radio can still be given an
+                        // identity, and refusing would be inventing a
+                        // dependency that is not there.
+                        Action::Persist => dirty_since = Some(Instant::now()),
+                        Action::Reset => {
+                            outbox.flush(tx).await;
+                            commit(storage, &protocol);
+                            boot::reboot();
+                        }
+                        // Anything that needed the radio: say why it cannot
+                        // happen, rather than leaving the host to time out.
+                        _ => protocol.report_error(error::INITRADIO, &mut outbox),
                     }
                 }
+            }
+        }
+        if let Some(since) = dirty_since {
+            if since.elapsed() > PERSIST_IDLE {
+                commit(storage, &protocol);
+                dirty_since = None;
             }
         }
         led.off();
         Timer::after(Duration::from_millis(100)).await;
         outbox.flush(tx).await;
+    }
+}
+
+/// Write the device record out, and say so if it will not go.
+///
+/// There is nothing useful to do about a failure here, which is why this
+/// returns nothing: the host is about to read the image back and will find it
+/// unchanged. What matters is that the log says which of the two happened,
+/// because "the provisioning did not stick" and "the flash write failed" look
+/// identical from the other end of the serial port.
+fn commit(storage: &mut Storage<'_>, protocol: &Protocol) {
+    if let Err(e) = storage.save(protocol.store()) {
+        defmt::error!("store: could not write the device record: {}", e);
     }
 }
 
