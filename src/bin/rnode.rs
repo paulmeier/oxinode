@@ -29,10 +29,11 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
 use embassy_futures::select::{select, Either};
+use embassy_futures::yield_now;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, spim};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, Sender, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
@@ -257,7 +258,26 @@ where
             Either::First(Err(_)) => {}
 
             Either::Second(Ok(())) => {
-                if receiving {
+                if !receiving {
+                    // The line is asserted and nothing is listening for it, so
+                    // clearing it is the only thing that will put it down --
+                    // and it *must* go down. `wait_asserted` is level
+                    // triggered: on a line that is already high it returns
+                    // immediately, forever, and this loop would then spin
+                    // without ever yielding. Nothing else in the executor gets
+                    // polled after that, USB included, and the board goes on
+                    // enumerating while answering nothing.
+                    //
+                    // That is not hypothetical. It is what happened the first
+                    // time this image was run against a host: `start_rx`
+                    // failed, `receiving` stayed false, the chip's error
+                    // interrupt stayed up, and both serial ports stopped
+                    // opening while the device still showed as connected.
+                    let mut modem = Modem::new(dev, irq);
+                    if let Err(e) = modem.clear_interrupts().await {
+                        defmt::error!("could not clear a stuck interrupt: {}", e);
+                    }
+                } else {
                     let mut modem = Modem::new(dev, irq);
                     match modem.receive(&mut rx_buf, Duration::from_millis(20)).await {
                         Ok(Some(report)) => {
@@ -297,6 +317,14 @@ where
         }
 
         outbox.flush(tx).await;
+
+        // Belt and braces. Every path above is *supposed* to await something
+        // that can actually pend, but a loop that can complete an iteration
+        // with every future already resolved starves the executor rather than
+        // merely running hot -- and the failure looks like dead hardware, not
+        // like a busy one. One unconditional yield costs nothing and removes
+        // the whole class.
+        yield_now().await;
     }
 }
 
@@ -471,19 +499,32 @@ impl<const N: usize> Outbox<N> {
         let mut sent = 0;
         while sent < self.len {
             let end = (sent + max).min(self.len);
-            if tx.write_packet(&self.buf[sent..end]).await.is_err() {
-                // The host went away mid-frame. Everything queued is now part
-                // of a conversation nobody is having; drop it rather than
-                // delivering half a frame to whoever connects next.
-                self.len = 0;
-                return;
+            // Bounded, because `write_packet` waits for the host to ask for
+            // the data and a host that has closed the port never will. Without
+            // a bound the modem stops servicing the radio the moment somebody
+            // disconnects, and only starts again if they come back.
+            match with_timeout(
+                Duration::from_millis(500),
+                tx.write_packet(&self.buf[sent..end]),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                // The host went away mid-frame. Everything queued is part of a
+                // conversation nobody is having; drop it rather than delivering
+                // half a frame to whoever connects next.
+                Ok(Err(_)) | Err(_) => {
+                    self.len = 0;
+                    self.dropped += 1;
+                    return;
+                }
             }
             sent = end;
         }
         // A full-size final packet needs a zero-length packet behind it, or the
         // host waits for the rest of a transfer that is already complete.
         if self.len % max == 0 && self.len != 0 {
-            let _ = tx.write_packet(&[]).await;
+            let _ = with_timeout(Duration::from_millis(500), tx.write_packet(&[])).await;
         }
         self.len = 0;
         if self.dropped > 0 {
