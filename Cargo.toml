@@ -36,6 +36,15 @@ embassy-nrf = { version = "0.11", features = [
 ] }
 embassy-usb = "0.6"
 defmt = "1.0"
+
+# Radio. `lr11xx` needs an *async* embedded-hal SpiDevice; `embedded-hal-bus`
+# supplies the exclusive-owner wrapper that turns embassy's SPIM plus a
+# chip-select GPIO into one. `lora-phy` and `defmt` are mandatory dependencies
+# of `lr11xx` with no feature to switch them off -- see docs/phase-3-radio.md
+# for why oxinode uses the low-level API and lets LTO drop the rest.
+lr11xx = "0.1"
+embedded-hal-async = "1.0"
+embedded-hal-bus = { version = "0.3", default-features = false, features = ["async"] }
 static_cell = "2.1"
 
 [build-dependencies]
@@ -51,7 +60,14 @@ path = "src/bin/blink.rs"
 name = "usb-cdc"
 path = "src/bin/usb_cdc.rs"
 
-# Debug builds of this still have to fit in 824K of flash and run at 64 MHz,
+# Phase 3 bring-up image. Deliberately separate from `usb-cdc` until phase 5
+# merges the transports: with no debug probe, a failure you can bisect by
+# choosing which image to flash is worth the duplication.
+[[bin]]
+name = "radio"
+path = "src/bin/radio.rs"
+
+# Debug builds of this still have to fit in 784K of flash and run at 64 MHz,
 # so keep some optimisation on even in dev.
 [profile.dev]
 opt-level = "s"

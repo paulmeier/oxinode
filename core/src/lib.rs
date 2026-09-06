@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ble;
+pub mod gpio;
 pub mod linker_script;
 pub mod logbuf;
 pub mod serial;

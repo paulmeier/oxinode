@@ -18,7 +18,7 @@ This is phase 1 of 7. Being precise about that:
 | 0 | Pin/hardware recon | done, verified against upstream |
 | 1 | Blink an LED, prove flashing | **running on hardware** |
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
-| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | not started — [plan](docs/phase-3-radio.md) |
+| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–1 of 8 done, [plan](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | not started |
 | 5 | RNode KISS protocol + command set, over USB | not started |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
@@ -35,7 +35,8 @@ The same crate's low-level API is complete, and an RNode wants raw LoRa PHY
 rather than LoRaWAN, so oxinode builds on that directly. See
 [docs/phase-3-radio.md](docs/phase-3-radio.md).
 
-Phases 1 and 2 are confirmed on hardware. What that actually establishes:
+Phases 1 and 2 are confirmed on hardware, and phase 3 has reached step 1 of 8.
+What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
   an application that never enables it;
@@ -46,10 +47,16 @@ Phases 1 and 2 are confirmed on hardware. What that actually establishes:
   a zero-length packet behind it, and the `0xC0`/`0xDB` bytes that KISS framing
   will later treat as delimiters;
 * a 1200-baud open/close reboots the board into its bootloader, so reflashing
-  needs no button press.
+  needs no button press;
+* defmt logs decode on a second serial port, which is the only diagnostic
+  channel this board has — there is no debug probe;
+* the SPI peripheral that will drive the LR1121 is configured, and reports back
+  from its own `PSEL` registers that it claimed the four pins we meant.
 
-There is still no radio code, no KISS framing, and no display code — not
-stubbed, not half-written, absent.
+**The radio has not been addressed.** Nothing has been transmitted, nothing has
+been read from the LR1121, and its chip ID is still unknown — the bus exists,
+the conversation does not. There is no KISS framing and no display code either:
+not stubbed, not half-written, absent.
 
 ## Hardware
 

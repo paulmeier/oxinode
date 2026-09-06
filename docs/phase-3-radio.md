@@ -53,7 +53,7 @@ the unused half.
 
 ## Steps
 
-### 0. defmt over USB — prerequisite, not polish
+### 0. defmt over USB — done
 
 `lr11xx` calls `defmt::debug!` and `defmt::trace!` internally. A binary using it
 **will not link** without a `#[defmt::global_logger]`, and with no debug probe
@@ -64,23 +64,77 @@ one, and retrofitting a second interface later renumbers them and changes the
 device paths on the host.
 
 *Done when:* the board enumerates two serial ports; defmt output decodes on the
-second while the first still echoes.
+second while the first still echoes. **Verified on hardware.** Three things had
+to be true at once, each silent on its own: `DEFMT_LOG` set (it filters at
+*compile* time, defaulting to `error`), `-Tdefmt.x` linked (or the `.defmt`
+section holding the interned format strings is absent and `defmt-print` refuses
+the ELF), and `defmt::timestamp!` defined (or the link fails on
+`_defmt_timestamp`).
 
-### 1. SPI
+### 1. SPI — done
 
 SPIM on SCK P1.13, MOSI P1.14, MISO P1.15, with CS P1.12 driven as a GPIO.
-`lr11xx` wants an `embedded-hal` `SpiDevice`, so the bus needs wrapping
-(`embedded-hal-bus`, or embassy's equivalent). Mode 0. Start at ~1 MHz and raise
-once something works.
+`lr11xx` wants an **async** `embedded-hal` `SpiDevice`, so the bus is wrapped in
+`embedded-hal-bus`'s `ExclusiveDevice`. Mode 0, MSB first, 1 MHz.
+
+**SPIM2, not SPIM3.** SPIM3 is the fast instance, and also the one carrying an
+nRF52840 EasyDMA anomaly around CPU writes to the RAM holding an in-flight TX
+buffer, which `embassy-nrf` does not work around. At 1 MHz that speed buys
+nothing. SPIM2 also keeps both TWI/SPI-shared instances free for the phase-7
+display.
+
+`config.orc = 0x00` is not decoration: `lr11xx` requires MOSI held low during a
+read, and the over-read character is the byte SPIM sends once the TX buffer runs
+short — which is exactly what a `Read` operation is.
+
+Worth knowing before step 3: EasyDMA cannot read from flash, so a `&[u8]` that
+the compiler promoted to a static would fail. `embassy-nrf` catches this and
+copies through a 512-byte RAM buffer, transparently — but `copy_from_slice`
+panics above 512 bytes. Nothing `lr11xx` sends comes close.
 
 These four signals never reach board copper — they are the module-internal link
-described above. That removes a whole class of problem (nothing is miswired, and
-the trace lengths are short and known, so a conservative clock is only a
-debugging convenience rather than a signal-integrity necessity) and removes the
-only tool that would normally diagnose the rest.
+described above. That removes a whole class of problem (nothing is miswired) and
+removes the only tool that would normally diagnose the rest.
 
-*Done when:* it builds and runs. Real proof arrives at step 3 — and with no
-probe and no exposed pins, there is genuinely no intermediate test to write.
+*Done when:* ~~it builds and runs~~ — **this was too pessimistic.** The original
+note said there was "genuinely no intermediate test to write". There is one, and
+it is worth having: the SPIM's own `PSEL` registers can be read back and compared
+against the pins we asked for. That catches a transposition — and `Spim::new`
+takes `miso` *before* `mosi`, so a transposition is one keystroke away — without
+needing the LR1121 to answer anything. The encoding lives in
+`oxinode_core::gpio` with host tests; `radio::check_pin_selection` does the
+readback.
+
+**Verified on hardware:**
+
+```
+INFO  spi SCK: P1.13
+INFO  spi MISO: P1.15
+INFO  spi MOSI: P1.14
+INFO  spi NSS: P1.12 (GPIO)
+INFO  spi: SPIM2 up, mode 0, MSB first, 1 MHz, ORC 0x00
+```
+
+This proves the peripheral claimed the right MCU pins. It proves nothing about
+the LR1121 on the other end; that starts at step 3.
+
+#### The bring-up image gets a single CDC port
+
+Step 0 left one problem open: `wait_connection()` resolves at
+`SET_CONFIGURATION`, so a startup log is written into a port with no reader and
+discarded, and DTR — which would fix it — never goes true on the *second* CDC
+function of a composite device.
+
+A bring-up image is exactly the case that cannot tolerate that, because its
+entire output is a one-shot startup sequence. So `radio` exposes a single CDC
+function, which *does* see DTR. It uses it twice: the log drain waits for DTR,
+and so does the bring-up sequence itself. Both confirmed on hardware — the log
+above appeared 26 seconds after boot, when the terminal attached, with nothing
+lost. The 1200-baud touch works from the same port, so reflashing needs no
+reset button.
+
+`usb-cdc` keeps its two ports and its continuous heartbeat; the drain loop is
+now shared between both images (`src/usb_log.rs`), with the DTR gate passed in.
 
 ### 2. Reset and BUSY
 

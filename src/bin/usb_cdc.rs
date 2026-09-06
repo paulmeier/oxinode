@@ -28,9 +28,7 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, Sender,
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
-use oxinode::boot;
-use oxinode::logger;
-use oxinode_core::usb as core_usb;
+use oxinode::{boot, usb_log};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -50,8 +48,7 @@ bind_interrupts!(struct Irqs {
 const USB_VID: u16 = 0x1209;
 const USB_PID: u16 = 0x0001;
 
-/// Full-speed bulk endpoints are 64 bytes; anything larger is silently clamped.
-const MAX_PACKET_SIZE: u16 = 64;
+use usb_log::MAX_PACKET_SIZE;
 
 type UsbDriver = Driver<'static, HardwareVbusDetect>;
 
@@ -62,8 +59,8 @@ async fn main(_spawner: Spawner) {
 
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-    // Once only; see take_device_serial.
-    let serial = take_device_serial();
+    // Once only; see board::take_device_serial.
+    let serial = board::take_device_serial();
 
     let mut config = UsbConfig::new(USB_VID, USB_PID);
     config.manufacturer = Some("oxinode");
@@ -118,41 +115,13 @@ async fn main(_spawner: Spawner) {
         oxinode::boot::APP_FLASH_ORIGIN
     );
 
-    // Ships log bytes to the second serial port. Nothing here can call into
-    // defmt while holding the buffer, so draining and logging cannot deadlock.
-    let logs = async {
-        let mut buf = [0u8; MAX_PACKET_SIZE as usize];
-        loop {
-            // Drain whenever the endpoint is live. Anything logged before a host
-            // opens the tty is written into a port with no reader and dropped by
-            // the host -- see the heartbeat below, which guarantees fresh output
-            // exists once someone does attach.
-            log_tx.wait_connection().await;
-            defmt::info!("log port attached");
-            loop {
-                // Losing bytes is expected whenever nothing is listening, but
-                // it must never be silent -- say so on the way back up.
-                let lost = logger::take_dropped();
-                if lost > 0 {
-                    defmt::warn!("log buffer overflowed, {=u32} bytes lost", lost);
-                }
-
-                let n = logger::drain(&mut buf);
-                if n == 0 {
-                    // The logger runs inside a critical section and cannot wake
-                    // a task, so this polls. 20 ms is invisible on a log.
-                    Timer::after(Duration::from_millis(20)).await;
-                    continue;
-                }
-                if log_tx.write_packet(&buf[..n]).await.is_err() {
-                    break; // host closed the port
-                }
-                if n == MAX_PACKET_SIZE as usize && log_tx.write_packet(&[]).await.is_err() {
-                    break;
-                }
-            }
-        }
-    };
+    // Ships log bytes to the second serial port. This image logs continuously,
+    // so it drains from the moment the endpoint is live rather than waiting for
+    // DTR -- which it could not see anyway on a second CDC function. Output
+    // produced before a terminal attaches is written into a port with no reader
+    // and dropped by the host; the heartbeat below is what makes that
+    // survivable.
+    let logs = usb_log::pump(&mut log_tx, || true);
 
     let echo = async {
         loop {
@@ -209,38 +178,10 @@ async fn echo_session(
                 }
             }
             Either::Second(()) => {
-                if is_bootloader_touch(rx, control) {
+                if usb_log::is_bootloader_touch(rx, control) {
                     boot::reboot_to_bootloader();
                 }
             }
         }
     }
-}
-
-/// Read the current line state and ask [`oxinode_core::usb::is_bootloader_touch`]
-/// what it means. The rule itself is tested on the host; this is just the part
-/// that has to touch the USB stack.
-fn is_bootloader_touch(
-    rx: &Receiver<'static, UsbDriver>,
-    control: &ControlChanged<'static>,
-) -> bool {
-    core_usb::is_bootloader_touch(rx.line_coding().data_rate(), control.dtr())
-}
-
-/// A stable, per-board serial number derived from the nRF52840's factory device
-/// ID, so the host names the port consistently and two boards never collide.
-/// Claim the device serial string.
-///
-/// **Call this exactly once.** It hands out a `StaticCell`, and `init` panics on
-/// a second call — which on this board means a dead USB device and a walk over
-/// to press reset. Bind the result once and pass it around.
-fn take_device_serial() -> &'static str {
-    static SERIAL: StaticCell<[u8; 16]> = StaticCell::new();
-
-    let ficr = embassy_nrf::pac::FICR;
-    let id = ((ficr.deviceid(1).read() as u64) << 32) | ficr.deviceid(0).read() as u64;
-
-    let buf = SERIAL.init(oxinode_core::serial::hex_u64(id));
-    // `hex_u64` only ever emits ASCII hex digits, which its own tests assert.
-    core::str::from_utf8(buf).expect("hex_u64 produced non-ASCII")
 }

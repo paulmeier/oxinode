@@ -59,7 +59,7 @@ step "flash runner smoke test"
 try python3 tools/test_dfu_flash.py
 
 step "image layout vs memory.x"
-for bin in blink usb-cdc; do
+for bin in blink usb-cdc radio; do
     elf="target/thumbv7em-none-eabihf/release/$bin"
     [[ -f "$elf" ]] || { echo "missing $elf"; fail=1; continue; }
     rust-objcopy -O binary "$elf" "$elf.bin"

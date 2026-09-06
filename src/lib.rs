@@ -8,6 +8,8 @@
 pub mod board;
 pub mod boot;
 pub mod logger;
+pub mod radio;
+pub mod usb_log;
 
 use core::panic::PanicInfo;
 
