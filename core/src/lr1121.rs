@@ -14,7 +14,10 @@
 //!   in each mode.
 //! * [`pa`] — output power limits, and the rules for keying a carrier without
 //!   damaging anything.
+//! * [`irq`] — which interrupts are routed to the one line that reaches the
+//!   MCU.
 
+pub mod irq;
 pub mod pa;
 pub mod reset;
 pub mod rf_switch;

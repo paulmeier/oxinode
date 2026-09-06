@@ -19,7 +19,7 @@
 
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::typelevel::Binding;
-use embassy_nrf::peripherals::{P1_10, P1_11, P1_12, P1_13, P1_14, P1_15, SPI2};
+use embassy_nrf::peripherals::{P1_08, P1_10, P1_11, P1_12, P1_13, P1_14, P1_15, SPI2};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{interrupt, pac, Peri};
 use embassy_time::{with_timeout, Delay, Duration, Instant, Timer};
@@ -42,6 +42,8 @@ pub const MISO: (u8, u8) = (1, 15);
 pub const NRESET: (u8, u8) = (1, 10);
 /// See [`NSS`].
 pub const BUSY: (u8, u8) = (1, 11);
+/// The LR1121's DIO9, jumpered out of the module on the `IRQ_JUMPER` net.
+pub const IRQ: (u8, u8) = (1, 8);
 
 /// 1 MHz to start with.
 ///
@@ -245,6 +247,59 @@ impl<'d> RadioReset<'d> {
         self.busy
     }
 }
+
+/// The LR1121's interrupt line, DIO9, on nRF P1.08.
+///
+/// Unlike SPI, NRESET and BUSY, this one **does** reach board copper: it is the
+/// only LoRa signal that leaves the module at all. It is still not probeable
+/// without soldering to a jumper, but it is at least a net with a name.
+pub struct RadioIrq<'d> {
+    pin: Input<'d>,
+}
+
+impl<'d> RadioIrq<'d> {
+    /// Claim P1.08.
+    ///
+    /// Pulled down, which is a choice rather than a default. Before
+    /// `SetDioIrqParams` runs, DIO9 is not yet an interrupt output and may be
+    /// high-impedance; a floating input would make "no interrupt" read as noise.
+    /// With a pull-down, the idle state is a fact. The chip drives the line
+    /// push-pull once configured, so the pull costs nothing then.
+    pub fn new(pin: Peri<'d, P1_08>) -> Self {
+        Self {
+            pin: Input::new(pin, Pull::Down),
+        }
+    }
+
+    /// Whether the line is asserted right now.
+    pub fn is_asserted(&self) -> bool {
+        self.pin.is_high()
+    }
+
+    /// Wait for the line to rise, or give up.
+    ///
+    /// Bounded, for the same reason everything else here is: an interrupt that
+    /// never arrives must produce a log line rather than a board that has gone
+    /// quiet. `wait_for_high` returns immediately if the line is already high,
+    /// so a caller that wants an *edge* has to check the level first — which is
+    /// exactly the trap `wait_for_low` set in step 2.
+    pub async fn wait_asserted(&mut self, timeout: Duration) -> Result<(), IrqTimeout> {
+        with_timeout(timeout, self.pin.wait_for_high())
+            .await
+            .map_err(|_| IrqTimeout)
+    }
+
+    /// Wait for the line to fall, or give up.
+    pub async fn wait_cleared(&mut self, timeout: Duration) -> Result<(), IrqTimeout> {
+        with_timeout(timeout, self.pin.wait_for_low())
+            .await
+            .map_err(|_| IrqTimeout)
+    }
+}
+
+/// The interrupt line did not move before the deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub struct IrqTimeout;
 
 /// BUSY stayed high past the deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

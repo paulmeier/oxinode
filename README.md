@@ -18,7 +18,7 @@ This is phase 1 of 7. Being precise about that:
 | 0 | Pin/hardware recon | done, verified against upstream |
 | 1 | Blink an LED, prove flashing | **running on hardware** |
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
-| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–5 and 7a of 8 done, [plan](docs/phase-3-radio.md) |
+| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–6 and 7a of 8 done, [plan](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | not started |
 | 5 | RNode KISS protocol + command set, over USB | not started |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
@@ -35,7 +35,7 @@ The same crate's low-level API is complete, and an RNode wants raw LoRa PHY
 rather than LoRaWAN, so oxinode builds on that directly. See
 [docs/phase-3-radio.md](docs/phase-3-radio.md).
 
-Phases 1 and 2 are confirmed on hardware, and phase 3 has reached step 5 of 8.
+Phases 1 and 2 are confirmed on hardware, and phase 3 has reached step 6 of 8.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -69,8 +69,14 @@ What that actually establishes:
   of measured range, all at one frequency to within 0.6 kHz. That is what proves
   the RF switch masks, which a `TxDone` alone never could.
 
-**No packet has been sent.** A carrier is not a modulation and there is no
-interrupt handling yet.
+* **interrupts reach the MCU.** The LR1121 raises `cmd_error` on its DIO9, the
+  jumpered line lands on P1.08, an async wait wakes 152 µs later, and the line
+  falls again when the interrupt is cleared. With nothing routed to DIO9 the
+  same interrupt fires inside the chip and the pin stays down, which is what
+  shows the mask is doing the work.
+
+**No packet has been sent.** A carrier is not a modulation, and `TxDone` — the
+interrupt that actually matters — has not been seen.
 
 **The transmitter is 73 ppm low**, and that is measured rather than suspected:
 chopping between two carriers inside a single capture separates the

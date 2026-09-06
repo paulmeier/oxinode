@@ -36,13 +36,14 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
+use lr11xx::ops::Interrupt;
 use lr11xx::ops::{
     Calibrate, PaConfig, PacketType, RampTime, RfSwitchConfig, TcxoMode, TcxoTune, TxParams,
 };
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::{pa, rf_switch, tcxo, ResetVerdict};
+use oxinode_core::lr1121::{irq as irq_bits, pa, rf_switch, tcxo, ResetVerdict};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -70,6 +71,7 @@ async fn main(_spawner: Spawner) {
     // something to read. Nothing is transmitted by doing this.
     let mut spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
     let mut reset = radio::RadioReset::new(p.P1_10, p.P1_11);
+    let mut irq = radio::RadioIrq::new(p.P1_08);
 
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
     let serial = board::take_device_serial();
@@ -245,6 +247,7 @@ async fn main(_spawner: Spawner) {
                                 defmt::info!("step 3 done");
                                 if start_tcxo(&mut dev, tcxo::TUNE_3V0, true).await {
                                     configure_rf_switch(&mut dev).await;
+                                    route_interrupts(&mut dev, &mut irq, irq_bits::DIO9_MASK).await;
                                 }
                                 radio = Some(dev);
                             }
@@ -256,7 +259,7 @@ async fn main(_spawner: Spawner) {
             }
         }
 
-        console(&mut log_rx, &control, radio).await
+        console(&mut log_rx, &control, radio, &mut irq).await
     };
 
     join3(run_usb, pump, bring_up).await;
@@ -453,6 +456,7 @@ async fn console<'d, D, S, B>(
     rx: &mut Receiver<'d, D>,
     control: &ControlChanged<'d>,
     mut radio: Option<Lr11xx<S, B>>,
+    irq: &mut radio::RadioIrq<'_>,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -460,7 +464,7 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, ? = status, b = bootloader",
+        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
         CW_LEVELS[2],
@@ -563,6 +567,19 @@ where
                                     Instant::now()
                                         + Duration::from_millis(pa::CW_MAX_BURST_MS as u64),
                                 );
+                            }
+                        }
+                        // Step 6: provoke an interrupt with no RF at all.
+                        b'j' => provoke_irq(radio.as_mut(), irq).await,
+                        // Negative control. Route NOTHING to DIO9, then provoke
+                        // the same interrupt: the line must stay down. Without
+                        // this, a DIO9 that signals every interrupt regardless
+                        // of the mask passes the positive test exactly as well
+                        // as a correctly configured one.
+                        b'k' | b'l' => {
+                            if let Some(dev) = radio.as_mut() {
+                                let mask = if byte == b'k' { 0 } else { irq_bits::DIO9_MASK };
+                                route_interrupts(dev, irq, mask).await;
                             }
                         }
                         b'?' => report(radio.as_mut(), cw_until.is_some()).await,
@@ -788,5 +805,148 @@ fn tune_from_code(code: u8) -> TcxoTune {
         0x05 => TcxoTune::V2p7,
         0x07 => TcxoTune::V3p3,
         _ => TcxoTune::V3p0,
+    }
+}
+
+/// Step 6: tell the chip which interrupts to signal on DIO9, and check the line
+/// is where it should be before anything has fired.
+async fn route_interrupts<S, B>(
+    dev: &mut Lr11xx<S, B>,
+    irq: &mut radio::RadioIrq<'_>,
+    dio9_mask: u32,
+) where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    defmt::info!(
+        "irq: DIO9 -> P{=u8}.{=u8}, mask {=u32:#010x}; DIO11 mask {=u32:#010x} (it does not leave the module)",
+        radio::IRQ.0,
+        radio::IRQ.1,
+        dio9_mask,
+        irq_bits::DIO11_MASK
+    );
+
+    let sequence = async {
+        // Clear first: a stale flag would hold the line high from the moment it
+        // becomes an output, and the idle check below would fail for a reason
+        // that has nothing to do with the routing.
+        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED))
+            .await?;
+        dev.set_dio_irq(
+            Interrupt::new_with_raw_value(dio9_mask),
+            Interrupt::new_with_raw_value(irq_bits::DIO11_MASK),
+        )
+        .await
+    };
+
+    match with_timeout(Duration::from_millis(200), sequence).await {
+        Err(_) => {
+            defmt::error!("irq: no reply within 200 ms");
+            return;
+        }
+        Ok(Err(e)) => {
+            defmt::error!("irq: {}", e);
+            return;
+        }
+        Ok(Ok(_)) => {}
+    }
+
+    if irq.is_asserted() {
+        defmt::error!("irq: P1.08 is already high with every interrupt cleared");
+    } else {
+        defmt::info!("irq: P1.08 idle low");
+    }
+    defmt::info!("step 6 configured; press j to prove the line actually moves");
+}
+
+/// Raise an interrupt deliberately and watch P1.08 follow it.
+///
+/// The trigger is `SetTxCw` issued without a packet type — the refusal found at
+/// step 7a, which latches `cmd_error`. It is worth its weight here: it is the
+/// only interrupt that can be raised **without transmitting anything**, so the
+/// interrupt path is testable before there is a packet to send, and testable
+/// again later without putting a carrier in the air.
+///
+/// Three things are checked, and the middle one is the one that matters:
+/// the line is low beforehand, it *rises* — waited on asynchronously, not
+/// polled — and it falls again when the interrupt is cleared. A line stuck high
+/// would pass a naive "is it high" test and fail this one.
+async fn provoke_irq<S, B>(dev: Option<&mut Lr11xx<S, B>>, irq: &mut radio::RadioIrq<'_>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::error!("irq: no radio attached");
+        return;
+    };
+
+    if with_timeout(
+        Duration::from_millis(200),
+        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED)),
+    )
+    .await
+    .is_err()
+    {
+        defmt::error!("irq: could not clear before the test");
+        return;
+    }
+
+    if irq.is_asserted() {
+        defmt::error!("irq: line still high after clearing; it is stuck, not idle");
+        return;
+    }
+
+    // Provoke. The chip is freshly booted or has had its packet type cleared,
+    // so this is refused -- which is the point.
+    let started = Instant::now();
+    let provoke = with_timeout(Duration::from_millis(200), dev.set_tx_cw()).await;
+    if provoke.is_err() {
+        defmt::error!("irq: the provoking command did not complete");
+        return;
+    }
+
+    let rose = irq.wait_asserted(Duration::from_millis(200)).await;
+    match rose {
+        Ok(()) => defmt::info!(
+            "irq: P1.08 rose {=u32} us after the command -- the async wait woke",
+            started.elapsed().as_micros() as u32
+        ),
+        Err(_) => defmt::warn!(
+            "irq: P1.08 did not rise within 200 ms -- correct if nothing is routed to it"
+        ),
+    }
+
+    // What actually fired, from the chip's own view.
+    match with_timeout(Duration::from_millis(200), dev.status()).await {
+        Ok(Ok((_, pending))) => {
+            let raw = pending.raw_value();
+            defmt::info!("irq: pending {=u32:#010x}", raw);
+            for (b, name) in irq_bits::NAMES {
+                if raw & b != 0 {
+                    defmt::info!("irq:   {=str}", name);
+                }
+            }
+        }
+        _ => defmt::error!("irq: could not read what fired"),
+    }
+
+    if rose.is_err() {
+        defmt::info!("irq: (the chip's own pending flags above say whether it fired at all)");
+    }
+
+    match with_timeout(
+        Duration::from_millis(200),
+        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => match irq.wait_cleared(Duration::from_millis(200)).await {
+            Ok(()) => {
+                defmt::info!("irq: P1.08 fell again once cleared -- the line follows the chip")
+            }
+            Err(_) => defmt::error!("irq: P1.08 stayed high after clearing; it is stuck high"),
+        },
+        _ => defmt::error!("irq: could not clear afterwards"),
     }
 }

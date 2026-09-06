@@ -537,7 +537,7 @@ passes it via `RfSwitchConfig::new_with_raw_value`, which keeps the coincidence
 visible instead of load-bearing — and matters directly here, since this board
 is meant to use its 2.4 GHz path.
 
-### 6. Interrupts
+### 6. Interrupts — done, except for `TxDone` itself
 
 `set_dio_irq(irq1 /* DIO9 */, irq2 /* DIO11 */)`, with nRF P1.08 as an interrupt
 input. **DIO9 is confirmed**, no longer assumed: the module brings `LR_DIO9` out
@@ -545,7 +545,56 @@ on pin 11, its datasheet requires that pin be jumpered to an MCU GPIO, and the
 Base Duo schematic does so on a net named `IRQ_JUMPER` landing on P1.08. The
 module's other two exposed LoRa pins, `LR_DIO7` and `LR_DIO8`, are unconnected.
 
+DIO11 does not leave the module at all, so its mask is **empty** — a fact about
+this board, asserted at compile time, rather than a default nobody filled in.
+
+The DIO9 mask deliberately omits `preamble_detected`, `sync_word_header_valid`
+and `cad_detected`: on a busy band those fire constantly and would wake the MCU
+for events it can do nothing about. What is kept ends an operation or reports a
+fault.
+
 *Done when:* `TxDone` raises P1.08 and the async wait wakes.
+
+#### Testable before there is a packet to send
+
+`TxDone` needs step 7b, so on the plan as written step 6 could not be checked
+until after the step that depends on it. It can, though — because step 7a turned
+up an interrupt that can be raised **deliberately, with no RF at all**.
+
+`SetTxCw` without a packet type is refused and latches `cmd_error`, which is
+bit 22 and maskable like any other. That makes it a trigger: exact, repeatable,
+and requiring nothing in the air.
+
+```
+INFO  irq: DIO9 -> P1.8, mask 0x00c005cc; DIO11 mask 0x00000000
+INFO  irq: P1.08 idle low
+INFO  irq: P1.08 rose 152 us after the command -- the async wait woke
+INFO  irq: pending 0x00400000
+INFO  irq:   cmd_error
+INFO  irq: P1.08 fell again once cleared -- the line follows the chip
+```
+
+Three things are checked and the third is the one that catches a stuck line: low
+before, rising (waited on asynchronously through GPIOTE, not polled), and
+**falling again when the interrupt is cleared**. A pin wired to nothing and
+pulled up would pass a naive "is it high" test and fail this one.
+
+#### The negative control: proving the mask is doing the work
+
+A DIO9 that signalled *every* interrupt regardless of the mask would pass the
+test above exactly as well as a correctly configured one. So the same
+provocation was repeated with **nothing** routed to DIO9:
+
+| DIO9 mask | chip's pending flags | P1.08 |
+|---|---|---|
+| `0x00c005cc` | `0x00400000` — `cmd_error` | **rises** |
+| `0x00000000` | `0x00400000` — `cmd_error` | stays low |
+
+Identical event inside the chip, opposite behaviour on the pin, and the only
+difference is the mask. That is the routing being real rather than incidental.
+
+What remains for step 7b is `TxDone` specifically: the path is proven, the
+particular interrupt the transmitter raises is not.
 
 ### 7. First transmission
 
