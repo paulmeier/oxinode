@@ -38,8 +38,10 @@
 //! debugging this deserves better than "mismatch".
 
 use super::command::RSSI_OFFSET;
-use super::command::{cmd, Command, RadioState};
+use super::command::{cmd, hash_kind, Command, RadioState};
 use super::command::{DETECT_RESP, FW_VERSION_MAJOR, FW_VERSION_MINOR, MCU_NRF52, PLATFORM_NRF52};
+use super::eeprom::{self, Eeprom, BOARD_HMBRW};
+use super::store::DeviceStore;
 use crate::lr1121::config::{ConfigError, RadioConfig, ValidConfig, DEFAULT};
 
 /// Somewhere for response frames to go.
@@ -66,6 +68,17 @@ pub enum Action<'a> {
     Standby,
     /// Send this.
     Transmit(&'a [u8]),
+    /// The persistent device data changed. Write it out.
+    ///
+    /// Deliberately not "write it out *now*". `rnodeconf` provisions a board
+    /// by sending 155 single-byte writes six milliseconds apart, and a device
+    /// that erased a flash page for each of them would need thirteen seconds
+    /// to absorb one second of commands. The caller is expected to hold the
+    /// change in memory and commit once the writes stop — see
+    /// `docs/phase-6-provisioning.md`.
+    Persist,
+    /// The host asked the device to restart.
+    Reset,
 }
 
 /// The protocol state.
@@ -79,6 +92,11 @@ pub struct Protocol {
     rx_count: u32,
     tx_count: u32,
     last_error: Option<ConfigError>,
+    /// Everything that survives a power cycle.
+    store: DeviceStore,
+    /// The MCU's factory device ID, which the device hash is bound to. Zero on
+    /// a `Protocol::new`, because a pure state machine has no chip to ask.
+    mcu_id: u64,
 }
 
 impl Default for Protocol {
@@ -106,7 +124,71 @@ impl Protocol {
             rx_count: 0,
             tx_count: 0,
             last_error: None,
+            store: DeviceStore::new(),
+            mcu_id: 0,
         }
+    }
+
+    /// A modem that has just booted on a real board: whatever was in flash,
+    /// and the chip's own device ID.
+    pub const fn with_storage(store: DeviceStore, mcu_id: u64) -> Self {
+        let mut protocol = Self::new();
+        protocol.store = store;
+        protocol.mcu_id = mcu_id;
+        protocol
+    }
+
+    /// The persistent device data, for the storage layer to write out.
+    pub const fn store(&self) -> &DeviceStore {
+        &self.store
+    }
+
+    /// The EEPROM image, as the host reads it.
+    pub const fn rom(&self) -> &Eeprom {
+        &self.store.rom
+    }
+
+    /// Adopt the stored configuration, if there is one: TNC mode.
+    ///
+    /// A provisioned device with a saved configuration is supposed to come up
+    /// on air by itself, with no host attached — that is what `rnodeconf --tnc`
+    /// asks for and the only reason to store a configuration at all.
+    ///
+    /// The stored values are put through the same validation as anything a
+    /// host sends, and for the same reason: they were written by a tool that
+    /// does not know what this radio can do. A configuration that does not
+    /// validate leaves the radio off, with [`Protocol::last_error`] saying why,
+    /// exactly as an impossible request from a host would.
+    ///
+    /// A host that connects afterwards and configures the device overrides
+    /// this, which is right: it is the same set of fields.
+    pub fn resume_stored_config(&mut self) -> Action<'static> {
+        let Some(stored) = self.store.rom.stored_config() else {
+            return Action::None;
+        };
+        self.config.frequency_hz = stored.frequency_hz;
+        self.config.bandwidth_hz = stored.bandwidth_hz;
+        self.config.spreading_factor = stored.spreading_factor;
+        self.config.coding_rate = stored.coding_rate;
+        self.config.tx_power_dbm = stored.tx_power_dbm;
+        match ValidConfig::new(self.config) {
+            Ok(_) => {
+                self.last_error = None;
+                self.state = RadioState::On;
+                Action::Reconfigure
+            }
+            Err(e) => {
+                self.last_error = Some(e);
+                self.state = RadioState::Off;
+                Action::None
+            }
+        }
+    }
+
+    /// Whether a stored configuration is in force: the device is a TNC rather
+    /// than a host-controlled modem.
+    pub const fn is_tnc(&self) -> bool {
+        self.store.rom.stored_config().is_some()
     }
 
     /// The configuration as the host has set it — the *wanted* values.
@@ -165,6 +247,70 @@ impl Protocol {
                 out.frame(cmd::MCU, &[MCU_NRF52]);
                 Action::None
             }
+            Command::QueryBoard => {
+                out.frame(cmd::BOARD, &[BOARD_HMBRW]);
+                Action::None
+            }
+
+            // The whole image in one frame, escaped -- it contains a 128-byte
+            // RSA signature, which is uniformly distributed bytes and so
+            // certainly contains the frame delimiter.
+            Command::ReadRom => {
+                out.frame(cmd::ROM_READ, self.store.rom.as_bytes());
+                Action::None
+            }
+            // No reply. The host does not wait for one; it writes the next
+            // byte six milliseconds later and reads the whole image back at
+            // the end, which is a better check than 155 acknowledgements.
+            Command::WriteRom { addr, value } => {
+                self.store.rom.write(addr, value);
+                Action::Persist
+            }
+            Command::WipeRom => {
+                self.store.wipe();
+                Action::Persist
+            }
+            Command::SaveConfig => {
+                self.store.rom.save_config(&self.config);
+                Action::Persist
+            }
+            Command::DeleteConfig => {
+                self.store.rom.delete_config();
+                Action::Persist
+            }
+            Command::Reset => Action::Reset,
+
+            // Answered only when there is an identity to hash. An
+            // unprovisioned device would otherwise hand back a hash of erased
+            // bytes, and let a signature be made over a device that does not
+            // exist yet -- which the next provisioning would inherit.
+            Command::QueryDeviceHash => {
+                if self.store.rom.is_provisioned() {
+                    let hash = eeprom::device_hash(&self.store.rom, self.mcu_id);
+                    out.frame(cmd::DEV_HASH, &hash);
+                }
+                Action::None
+            }
+            Command::StoreDeviceSignature(sig) => {
+                let mut stored = [0u8; eeprom::DEVICE_SIGNATURE_LEN];
+                stored.copy_from_slice(sig);
+                self.store.device_signature = Some(stored);
+                Action::Persist
+            }
+            Command::SetFirmwareHash(hash) => {
+                let mut stored = [0u8; eeprom::HASH_LEN];
+                stored.copy_from_slice(hash);
+                self.store.target_firmware_hash = Some(stored);
+                Action::Persist
+            }
+            Command::QueryHash(kind) => {
+                self.report_hash(kind, out);
+                Action::None
+            }
+            // Nothing to prepare. On an ESP32 this is what stops the device
+            // serving its bootstrap console from flash that is about to be
+            // overwritten; there is no such thing here.
+            Command::FirmwareUpdateImminent => Action::None,
 
             Command::SetFrequency(hz) => {
                 self.set(|c| c.frequency_hz = hz);
@@ -258,9 +404,10 @@ impl Protocol {
             // Silence, deliberately. A response to a command we do not
             // implement would be a response the host has to interpret, and the
             // one thing worse than not answering is answering wrongly.
-            Command::NotYetImplemented(_) | Command::Unknown(_) | Command::Malformed(_) => {
-                Action::None
-            }
+            Command::NotYetImplemented(_)
+            | Command::NotApplicable(_)
+            | Command::Unknown(_)
+            | Command::Malformed(_) => Action::None,
         }
     }
 
@@ -358,6 +505,28 @@ impl Protocol {
     pub fn report_counters<S: Sink>(&self, out: &mut S) {
         out.frame(cmd::STAT_RX, &self.rx_count.to_be_bytes());
         out.frame(cmd::STAT_TX, &self.tx_count.to_be_bytes());
+    }
+
+    /// Answer a stored-hash request.
+    ///
+    /// Only the target hash exists here, and that is a real limit rather than
+    /// an omission. `hash_kind::FIRMWARE` asks the device for the hash of the
+    /// firmware it is *running*, and an image cannot contain a hash of itself;
+    /// producing one means hashing the flash at runtime over an extent the
+    /// linker does not hand us in any form worth trusting. Answering with
+    /// something else would be worse than not answering: the host compares the
+    /// two, and a wrong match reads as a verified firmware.
+    fn report_hash<S: Sink>(&self, kind: u8, out: &mut S) {
+        if kind != hash_kind::TARGET_FIRMWARE {
+            return;
+        }
+        let Some(hash) = self.store.target_firmware_hash else {
+            return;
+        };
+        let mut payload = [0u8; 1 + eeprom::HASH_LEN];
+        payload[0] = hash_kind::TARGET_FIRMWARE;
+        payload[1..].copy_from_slice(&hash);
+        out.frame(cmd::HASHES, &payload);
     }
 
     /// Tell the host something went wrong. See [`super::command::error`].
@@ -480,6 +649,63 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A frame written the way `rnodeconf` writes one: escaped payload.
+    fn host_frame(command: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![kiss::FEND, command];
+        for &b in payload {
+            match b {
+                kiss::FEND => out.extend_from_slice(&[kiss::FESC, kiss::TFEND]),
+                kiss::FESC => out.extend_from_slice(&[kiss::FESC, kiss::TFESC]),
+                other => out.push(other),
+            }
+        }
+        out.push(kiss::FEND);
+        out
+    }
+
+    /// The identity block and its MD5, as in `eeprom`'s own tests: computed by
+    /// Python's `hashlib` rather than by the code under test.
+    const GOLDEN_INFO: [u8; eeprom::INFO_LEN] = [
+        0xF0, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x01, 0x68, 0xB9, 0xB1, 0x40,
+    ];
+    const GOLDEN_CHECKSUM: [u8; 16] = [
+        0x41, 0x9E, 0x21, 0xE3, 0x9C, 0x5B, 0x75, 0x3F, 0x1F, 0x34, 0x41, 0x8C, 0xEE, 0xB5, 0x92,
+        0x5E,
+    ];
+
+    /// Every byte `rnodeconf --rom` writes, in the order it writes them: the
+    /// identity, the checksum, the 128-byte signature, and the lock byte last.
+    ///
+    /// The signature bytes are deliberately every value from 0 to 127 and then
+    /// some — a real RSA signature is uniformly distributed, so it contains
+    /// `0xC0` and `0xDB`, and this must too or the escaping is not exercised.
+    fn provisioning_writes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (i, b) in GOLDEN_INFO.iter().enumerate() {
+            bytes.extend(host_frame(
+                cmd::ROM_WRITE,
+                &[eeprom::addr::PRODUCT + i as u8, *b],
+            ));
+        }
+        for (i, b) in GOLDEN_CHECKSUM.iter().enumerate() {
+            bytes.extend(host_frame(
+                cmd::ROM_WRITE,
+                &[eeprom::addr::CHECKSUM + i as u8, *b],
+            ));
+        }
+        for i in 0..eeprom::SIGNATURE_LEN {
+            bytes.extend(host_frame(
+                cmd::ROM_WRITE,
+                &[eeprom::addr::SIGNATURE + i as u8, (i as u8).wrapping_mul(3)],
+            ));
+        }
+        bytes.extend(host_frame(
+            cmd::ROM_WRITE,
+            &[eeprom::addr::INFO_LOCK, eeprom::INFO_LOCK_BYTE],
+        ));
+        bytes
     }
 
     /// The bytes `RNodeInterface.detect()` writes, verbatim.
@@ -971,5 +1197,325 @@ mod tests {
         assert_eq!(out.payload(cmd::ST_ALOCK), Some(&[0x00, 0xFA][..]));
         let echoed = u16::from_be_bytes([0x00, 0xFA]);
         assert_eq!(echoed as f32 / 100.0, 2.5);
+    }
+
+    // ---- phase 6: provisioning ------------------------------------------
+
+    /// `rnodeconf`'s probe is twice as long as `rnsd`'s, and an unprovisioned
+    /// board answers five of the eight. The three it does not answer are
+    /// silences with reasons: no identity to hash, and no stored hashes.
+    #[test]
+    fn the_rnodeconf_probe_is_answered_as_far_as_an_unprovisioned_board_can() {
+        let mut p = Protocol::new();
+        let mut wire = Wire::default();
+        let bytes = [
+            host_frame(cmd::DETECT, &[command::DETECT_REQ]),
+            host_frame(cmd::FW_VERSION, &[0x00]),
+            host_frame(cmd::PLATFORM, &[0x00]),
+            host_frame(cmd::MCU, &[0x00]),
+            host_frame(cmd::BOARD, &[0x00]),
+            host_frame(cmd::DEV_HASH, &[0x01]),
+            host_frame(cmd::HASHES, &[0x01]),
+            host_frame(cmd::HASHES, &[0x02]),
+        ]
+        .concat();
+        let mut d = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+        for &b in &bytes {
+            if d.feed(b) == kiss::Step::Frame {
+                let (c, payload) = (d.command(), d.payload().to_vec());
+                p.handle(decode(c, &payload), &mut wire);
+            }
+        }
+        let replies = read_back(&wire.0);
+        assert_eq!(
+            replies.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+            vec![
+                cmd::DETECT,
+                cmd::FW_VERSION,
+                cmd::PLATFORM,
+                cmd::MCU,
+                cmd::BOARD
+            ]
+        );
+        assert_eq!(
+            replies.last().unwrap().1,
+            vec![eeprom::BOARD_HMBRW],
+            "the board byte is what rnodeconf prints after the model"
+        );
+    }
+
+    /// The whole `rnodeconf --rom` bootstrap, as bytes, followed by the
+    /// `download_eeprom` it validates with. This is the phase in one test: if
+    /// it passes, a real host provisioning a real board gets a device it calls
+    /// provisioned.
+    #[test]
+    fn provisioning_over_the_wire_produces_an_eeprom_the_host_accepts() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        let mut d = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+        let mut persists = 0;
+        for &b in &provisioning_writes() {
+            if d.feed(b) == kiss::Step::Frame {
+                let (c, payload) = (d.command(), d.payload().to_vec());
+                if p.handle(decode(c, &payload), &mut sink) == Action::Persist {
+                    persists += 1;
+                }
+            }
+        }
+        assert_eq!(
+            persists,
+            eeprom::INFO_LEN + 16 + eeprom::SIGNATURE_LEN + 1,
+            "every write has to ask to be persisted"
+        );
+        assert!(
+            sink.0.is_empty(),
+            "an EEPROM write is not acknowledged; the host reads the image back instead"
+        );
+
+        // Now the readback, and parse it the way parse_eeprom does.
+        let mut wire = Wire::default();
+        p.handle(Command::ReadRom, &mut wire);
+        let dump = read_back(&wire.0);
+        assert_eq!(dump.len(), 1);
+        let (command, image) = &dump[0];
+        assert_eq!(*command, cmd::ROM_READ);
+        assert_eq!(image.len(), eeprom::SIZE);
+
+        assert_eq!(
+            image[eeprom::addr::INFO_LOCK as usize],
+            eeprom::INFO_LOCK_BYTE
+        );
+        assert_eq!(&image[..eeprom::INFO_LEN], &GOLDEN_INFO);
+        assert_eq!(
+            &image[eeprom::addr::CHECKSUM as usize..][..16],
+            &GOLDEN_CHECKSUM
+        );
+        assert!(p.rom().is_provisioned());
+    }
+
+    /// A device hash is only offered once there is an identity to hash. An
+    /// unprovisioned board that answered would let `rnodeconf --sign` create a
+    /// signature over erased bytes, which the next provisioning would inherit.
+    #[test]
+    fn the_device_hash_is_answered_only_once_there_is_an_identity() {
+        let mut p = Protocol::with_storage(DeviceStore::new(), 0x0011_2233_4455_6677);
+        let mut before = Frames::default();
+        p.handle(Command::QueryDeviceHash, &mut before);
+        assert!(before.0.is_empty());
+
+        let mut d = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+        let mut sink = Frames::default();
+        for &b in &provisioning_writes() {
+            if d.feed(b) == kiss::Step::Frame {
+                let (c, payload) = (d.command(), d.payload().to_vec());
+                p.handle(decode(c, &payload), &mut sink);
+            }
+        }
+
+        let mut after = Frames::default();
+        p.handle(Command::QueryDeviceHash, &mut after);
+        let hash = after.payload(cmd::DEV_HASH).expect("a hash");
+        assert_eq!(hash.len(), eeprom::HASH_LEN);
+        assert_eq!(
+            hash,
+            eeprom::device_hash(p.rom(), 0x0011_2233_4455_6677),
+            "the hash on the wire is the one the module computes"
+        );
+    }
+
+    /// The signature `rnodeconf --sign` sends back is stored whole, and asked
+    /// to be persisted.
+    #[test]
+    fn a_device_signature_is_stored_and_persisted() {
+        let mut p = Protocol::new();
+        let sig = [0xA5u8; eeprom::DEVICE_SIGNATURE_LEN];
+        let mut sink = Frames::default();
+        assert_eq!(
+            p.handle(Command::StoreDeviceSignature(&sig), &mut sink),
+            Action::Persist
+        );
+        assert_eq!(p.store().device_signature, Some(sig));
+        assert!(sink.0.is_empty());
+    }
+
+    /// A wipe takes the provisioning and the signature with it, and the device
+    /// is then exactly what it was before it was ever provisioned.
+    #[test]
+    fn a_wipe_returns_the_device_to_the_state_it_shipped_in() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        let mut d = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+        for &b in &provisioning_writes() {
+            if d.feed(b) == kiss::Step::Frame {
+                let (c, payload) = (d.command(), d.payload().to_vec());
+                p.handle(decode(c, &payload), &mut sink);
+            }
+        }
+        p.handle(Command::StoreDeviceSignature(&[1; 64]), &mut sink);
+        assert!(p.rom().is_provisioned());
+
+        assert_eq!(p.handle(Command::WipeRom, &mut sink), Action::Persist);
+        assert!(!p.rom().is_provisioned());
+        assert_eq!(p.store(), &DeviceStore::new());
+    }
+
+    /// TNC mode, the round trip that gives storing a configuration a point:
+    /// the host configures the device exactly as `rnsd` would, saves, and the
+    /// same values come back on the next boot with the radio coming up on
+    /// its own.
+    #[test]
+    fn a_saved_configuration_comes_back_at_the_next_boot() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::SetFrequency(915_200_000), &mut sink);
+        p.handle(Command::SetBandwidth(250_000), &mut sink);
+        p.handle(Command::SetTxPower(17), &mut sink);
+        p.handle(Command::SetSpreadingFactor(9), &mut sink);
+        p.handle(Command::SetCodingRate(6), &mut sink);
+        assert_eq!(p.handle(Command::SaveConfig, &mut sink), Action::Persist);
+        assert!(p.is_tnc());
+
+        // Reboot: the record is what survives, nothing else.
+        let record = p.store().encode();
+        let restored = DeviceStore::decode(&record).expect("a valid record");
+        let mut next = Protocol::with_storage(restored, 0);
+        assert!(!next.radio_is_on(), "nothing is on until it is resumed");
+
+        assert_eq!(next.resume_stored_config(), Action::Reconfigure);
+        assert!(next.radio_is_on());
+        assert_eq!(next.config().frequency_hz, 915_200_000);
+        assert_eq!(next.config().bandwidth_hz, 250_000);
+        assert_eq!(next.config().tx_power_dbm, 17);
+        assert_eq!(next.config().spreading_factor, 9);
+        assert_eq!(next.config().coding_rate, 6);
+    }
+
+    /// A device with no stored configuration comes up host-controlled, which
+    /// is what every board does until somebody asks for TNC mode.
+    #[test]
+    fn without_a_stored_configuration_the_radio_stays_off_at_boot() {
+        let mut p = Protocol::new();
+        assert!(!p.is_tnc());
+        assert_eq!(p.resume_stored_config(), Action::None);
+        assert!(!p.radio_is_on());
+    }
+
+    /// A stored configuration is validated on the way out, not just on the way
+    /// in. It was written by a tool that does not know what this radio can do,
+    /// and the alternative to checking is a board that boots with nobody
+    /// watching and programs the chip with nonsense.
+    #[test]
+    fn a_stored_configuration_the_radio_cannot_do_leaves_it_off() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::SetSpreadingFactor(13), &mut sink);
+        p.handle(Command::SaveConfig, &mut sink);
+
+        let restored = DeviceStore::decode(&p.store().encode()).unwrap();
+        let mut next = Protocol::with_storage(restored, 0);
+        assert_eq!(next.resume_stored_config(), Action::None);
+        assert!(!next.radio_is_on());
+        assert_eq!(
+            next.last_error(),
+            Some(ConfigError::SpreadingFactorOutOfRange)
+        );
+    }
+
+    /// Deleting the configuration puts the device back under host control.
+    #[test]
+    fn deleting_the_configuration_ends_tnc_mode() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::SaveConfig, &mut sink);
+        assert!(p.is_tnc());
+        assert_eq!(p.handle(Command::DeleteConfig, &mut sink), Action::Persist);
+        assert!(!p.is_tnc());
+    }
+
+    /// The target firmware hash round trips. The *running* firmware's hash
+    /// does not, and that is a limit rather than an oversight: an image cannot
+    /// contain a hash of itself, and answering with something else would let
+    /// the host's comparison succeed against a value that means nothing.
+    #[test]
+    fn the_target_firmware_hash_round_trips_and_the_running_one_is_not_invented() {
+        let mut p = Protocol::new();
+        let hash = [0x5Au8; eeprom::HASH_LEN];
+        let mut sink = Frames::default();
+        assert_eq!(
+            p.handle(Command::SetFirmwareHash(&hash), &mut sink),
+            Action::Persist
+        );
+
+        let mut target = Frames::default();
+        p.handle(Command::QueryHash(hash_kind::TARGET_FIRMWARE), &mut target);
+        let payload = target.payload(cmd::HASHES).expect("a hash frame");
+        assert_eq!(payload[0], hash_kind::TARGET_FIRMWARE);
+        assert_eq!(&payload[1..], &hash);
+        assert_eq!(payload.len(), 33, "the host reads exactly 33 bytes");
+
+        let mut running = Frames::default();
+        p.handle(Command::QueryHash(hash_kind::FIRMWARE), &mut running);
+        assert!(running.0.is_empty());
+    }
+
+    /// Before one is set, there is nothing to report, and reporting zeroes
+    /// would be reporting a hash.
+    #[test]
+    fn an_unset_firmware_hash_is_not_reported_as_zero() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::QueryHash(hash_kind::TARGET_FIRMWARE), &mut sink);
+        assert!(sink.0.is_empty());
+    }
+
+    /// A reset is an action for the caller, not something the protocol does,
+    /// and it is asked for rather than assumed — the decoder has already
+    /// checked the guard byte, and a frame without it never gets here.
+    #[test]
+    fn a_reset_is_handed_to_the_caller() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        assert_eq!(p.handle(Command::Reset, &mut sink), Action::Reset);
+        assert!(sink.0.is_empty());
+        assert_eq!(
+            p.handle(Command::Malformed(cmd::RESET), &mut sink),
+            Action::None
+        );
+    }
+
+    /// Commands for hardware this board does not have are silent, like every
+    /// other command it cannot answer. A device that replied to a WiFi query
+    /// would be claiming to have WiFi.
+    #[test]
+    fn commands_for_absent_hardware_are_silent() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        for c in [cmd::WIFI_MODE, cmd::NP_INT, cmd::CFG_READ] {
+            assert_eq!(p.handle(Command::NotApplicable(c), &mut sink), Action::None);
+        }
+        assert!(sink.0.is_empty());
+    }
+
+    /// Provisioning does not disturb the radio. `rnodeconf` writes 155 bytes
+    /// into a device that a host may still have on air, and an EEPROM write
+    /// that reconfigured the radio would take the link down mid-provisioning.
+    #[test]
+    fn writing_the_eeprom_does_not_touch_the_radio() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::SetRadioState(RadioState::On), &mut sink);
+        assert!(p.radio_is_on());
+        let before = *p.config();
+
+        let mut d = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+        for &b in &provisioning_writes() {
+            if d.feed(b) == kiss::Step::Frame {
+                let (c, payload) = (d.command(), d.payload().to_vec());
+                let action = p.handle(decode(c, &payload), &mut sink);
+                assert_eq!(action, Action::Persist);
+            }
+        }
+        assert!(p.radio_is_on());
+        assert_eq!(p.config(), &before);
     }
 }

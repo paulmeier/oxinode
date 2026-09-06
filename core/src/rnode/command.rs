@@ -5,7 +5,9 @@
 //! `RNodeInterface` (RNS 1.5.0), and the doc comment says which. See
 //! [`super`] for why the host and not the firmware is the source.
 
-/// Command bytes, as `RNodeInterface.KISS` defines them.
+use super::eeprom;
+
+/// Command bytes, as `RNodeInterface.KISS` and `rnodeconf.KISS` define them.
 pub mod cmd {
     /// A packet: outbound from the host, or inbound from the radio.
     pub const DATA: u8 = 0x00;
@@ -49,6 +51,8 @@ pub mod cmd {
     pub const STAT_BAT: u8 = 0x27;
     /// Blink the indicator.
     pub const BLINK: u8 = 0x30;
+    /// Display intensity. Phase 7.
+    pub const DISP_INT: u8 = 0x45;
     /// Random byte.
     pub const RANDOM: u8 = 0x40;
     /// Framebuffer extents. Phase 7.
@@ -59,18 +63,67 @@ pub mod cmd {
     pub const FB_WRITE: u8 = 0x43;
     /// Bluetooth control. Phase 8.
     pub const BT_CTRL: u8 = 0x46;
+    /// Which board this is. See [`super::super::eeprom::BOARD_HMBRW`].
+    pub const BOARD: u8 = 0x47;
     /// Which platform this is. See [`super::PLATFORM_NRF52`].
     pub const PLATFORM: u8 = 0x48;
     /// Which microcontroller this is. See [`super::MCU_NRF52`].
     pub const MCU: u8 = 0x49;
     /// Firmware version, two bytes: major then minor.
     pub const FW_VERSION: u8 = 0x50;
-    /// Read the device's EEPROM. Phase 6.
+    /// Read the device's EEPROM, all of it, in one frame.
     pub const ROM_READ: u8 = 0x51;
-    /// The device has reset.
+    /// Write one EEPROM byte: `[address, value]`.
+    pub const ROM_WRITE: u8 = 0x52;
+    /// Store the current radio configuration and enter TNC mode.
+    pub const CONF_SAVE: u8 = 0x53;
+    /// Forget the stored radio configuration.
+    pub const CONF_DELETE: u8 = 0x54;
+    /// Reset the device. Guarded by [`super::CONFIRM_BYTE`].
     pub const RESET: u8 = 0x55;
+    /// Report the device hash. See [`super::super::eeprom::device_hash`].
+    pub const DEV_HASH: u8 = 0x56;
+    /// Store a device signature over that hash, 64 bytes.
+    pub const DEV_SIG: u8 = 0x57;
+    /// Store the expected firmware hash, 32 bytes.
+    pub const FW_HASH: u8 = 0x58;
+    /// Erase the EEPROM. Guarded by [`super::CONFIRM_BYTE`].
+    pub const ROM_WIPE: u8 = 0x59;
+    /// Report a stored hash. See [`super::hash_kind`].
+    pub const HASHES: u8 = 0x60;
+    /// A firmware update is about to happen.
+    pub const FW_UPD: u8 = 0x61;
+    /// Bluetooth pairing PIN, four bytes. Phase 8.
+    pub const BT_PIN: u8 = 0x62;
+    /// Display address, blanking, rotation, reconditioning. Phase 7.
+    pub const DISP_ADR: u8 = 0x63;
+    /// See [`DISP_ADR`].
+    pub const DISP_BLNK: u8 = 0x64;
+    /// See [`DISP_ADR`].
+    pub const DISP_ROT: u8 = 0x67;
+    /// See [`DISP_ADR`].
+    pub const DISP_RCND: u8 = 0x68;
     /// Read the display. Phase 7.
     pub const DISP_READ: u8 = 0x66;
+    /// Neopixel intensity. This board has no neopixel.
+    pub const NP_INT: u8 = 0x65;
+    /// Disable interference avoidance.
+    pub const DIS_IA: u8 = 0x69;
+    /// WiFi mode, SSID, key, channel, address, netmask, and the sector they
+    /// are stored in. This board has no WiFi.
+    pub const WIFI_MODE: u8 = 0x6A;
+    /// See [`WIFI_MODE`].
+    pub const WIFI_SSID: u8 = 0x6B;
+    /// See [`WIFI_MODE`].
+    pub const WIFI_PSK: u8 = 0x6C;
+    /// See [`WIFI_MODE`].
+    pub const CFG_READ: u8 = 0x6D;
+    /// See [`WIFI_MODE`].
+    pub const WIFI_CHN: u8 = 0x6E;
+    /// See [`WIFI_MODE`].
+    pub const WIFI_IP: u8 = 0x84;
+    /// See [`WIFI_MODE`].
+    pub const WIFI_NM: u8 = 0x85;
     /// A hardware error. See [`super::error`].
     pub const ERROR: u8 = 0x90;
 }
@@ -80,6 +133,24 @@ pub const DETECT_REQ: u8 = 0x73;
 /// What it must get back. Any other answer, or none, and `configure_device`
 /// closes the port.
 pub const DETECT_RESP: u8 = 0x46;
+
+/// The argument `rnodeconf` sends with the two commands that destroy
+/// something: [`cmd::ROM_WIPE`] and [`cmd::RESET`].
+///
+/// Checked rather than assumed, for the same reason [`DETECT_REQ`] is. These
+/// are the only two commands on the link that cannot be undone, and the port
+/// is open to whatever anyone sends down it — a terminal, a probe from an
+/// unrelated tool, a stray byte after a lost frame. One guard byte does not
+/// make that safe, but it does mean a wipe has to be asked for.
+pub const CONFIRM_BYTE: u8 = 0xF8;
+
+/// Which stored hash a [`cmd::HASHES`] request is asking for.
+pub mod hash_kind {
+    /// The hash the firmware is *expected* to have, as set by [`super::cmd::FW_HASH`].
+    pub const TARGET_FIRMWARE: u8 = 0x01;
+    /// The hash of the firmware actually running.
+    pub const FIRMWARE: u8 = 0x02;
+}
 
 /// `KISS.PLATFORM_NRF52`. The host uses this to decide the device has a
 /// display, which is why phase 7 is a consequence of answering honestly here.
@@ -139,10 +210,15 @@ pub mod error {
 /// such a frame overwrite the value, what it ends up with is the second byte of
 /// the escape sequence.
 ///
-/// The table below is transcribed from that parser, branch by branch. It comes
-/// out as a clean rule — multi-byte yes, single-byte no — but it is recorded as
-/// a table rather than as a rule, because it is a fact about someone else's
-/// code and the next version of it does not have to stay tidy.
+/// There are **two** hosts, and they read different command sets: `rnsd` runs
+/// `RNodeInterface`, and `rnodeconf` has a parser of its own. Both are
+/// transcribed here, branch by branch, and the table below is their union. The
+/// two agree on every command they both parse — which is a fact worth having a
+/// test for rather than an assumption, since nothing forces them to.
+///
+/// It comes out as a clean rule — multi-byte yes, single-byte no — but it is
+/// recorded as a table rather than as a rule, because it is a fact about
+/// someone else's code and the next version of it does not have to stay tidy.
 pub const fn host_unescapes(command: u8) -> bool {
     matches!(
         command,
@@ -159,6 +235,14 @@ pub const fn host_unescapes(command: u8) -> bool {
             | cmd::STAT_BAT
             | cmd::FB_READ
             | cmd::DISP_READ
+            // Read by rnodeconf only, and all multi-byte. ROM_READ is the
+            // whole EEPROM in one frame, and it certainly contains 0xC0: a
+            // 128-byte RSA signature is uniformly distributed bytes.
+            | cmd::ROM_READ
+            | cmd::CFG_READ
+            | cmd::DEV_HASH
+            | cmd::HASHES
+            | cmd::BT_PIN
     )
 }
 
@@ -246,6 +330,37 @@ pub enum Command<'a> {
     QueryPlatform,
     /// Report the microcontroller.
     QueryMcu,
+    /// Report which board this is.
+    QueryBoard,
+
+    /// Hand back the whole EEPROM image.
+    ReadRom,
+    /// Write one EEPROM byte.
+    WriteRom { addr: u8, value: u8 },
+    /// Erase the EEPROM.
+    WipeRom,
+    /// Store the current radio configuration and enter TNC mode.
+    SaveConfig,
+    /// Forget the stored radio configuration and go back to host control.
+    DeleteConfig,
+    /// Restart the device.
+    Reset,
+
+    /// Report the device hash.
+    QueryDeviceHash,
+    /// Store a signature over that hash, made on the host.
+    StoreDeviceSignature(&'a [u8]),
+    /// Store the hash the running firmware is expected to have.
+    SetFirmwareHash(&'a [u8]),
+    /// Report a stored hash. See [`hash_kind`].
+    QueryHash(u8),
+    /// A firmware update is about to be flashed.
+    FirmwareUpdateImminent,
+
+    /// A command for hardware this board does not have — WiFi, a neopixel.
+    /// Distinct from [`Command::NotYetImplemented`] because there is no phase
+    /// in which it becomes implemented; the answer is "not on this board".
+    NotApplicable(u8),
     /// A command that is understood but not implemented in this phase — the
     /// display and Bluetooth ones, mostly. Kept distinct from [`Command::Unknown`]
     /// so a log can say "phase 7" rather than "no idea".
@@ -337,17 +452,73 @@ pub fn decode<'a>(command: u8, payload: &'a [u8]) -> Command<'a> {
             _ => Command::Malformed(command),
         },
         cmd::LEAVE => Command::Leave,
+
+        // The two commands that destroy something. Both carry a guard byte,
+        // and both check it: see [`CONFIRM_BYTE`].
+        cmd::ROM_WIPE => match payload.first() {
+            Some(&CONFIRM_BYTE) => Command::WipeRom,
+            _ => Command::Malformed(command),
+        },
+        cmd::RESET => match payload.first() {
+            Some(&CONFIRM_BYTE) => Command::Reset,
+            _ => Command::Malformed(command),
+        },
+
+        cmd::ROM_READ => Command::ReadRom,
+        // `[address, value]`. The address is one byte and the image is 256, so
+        // there is no address this cannot reach and no bounds check to get
+        // wrong -- see `super::eeprom`.
+        cmd::ROM_WRITE => match (payload.first(), payload.get(1)) {
+            (Some(&addr), Some(&value)) => Command::WriteRom { addr, value },
+            _ => Command::Malformed(command),
+        },
+        cmd::CONF_SAVE => Command::SaveConfig,
+        cmd::CONF_DELETE => Command::DeleteConfig,
+
+        cmd::DEV_HASH => Command::QueryDeviceHash,
+        cmd::DEV_SIG => match payload.get(..eeprom::DEVICE_SIGNATURE_LEN) {
+            Some(sig) => Command::StoreDeviceSignature(sig),
+            None => Command::Malformed(command),
+        },
+        cmd::FW_HASH => match payload.get(..eeprom::HASH_LEN) {
+            Some(hash) => Command::SetFirmwareHash(hash),
+            None => Command::Malformed(command),
+        },
+        cmd::HASHES => match payload.first() {
+            Some(&kind @ (hash_kind::TARGET_FIRMWARE | hash_kind::FIRMWARE)) => {
+                Command::QueryHash(kind)
+            }
+            _ => Command::Malformed(command),
+        },
+        cmd::FW_UPD => Command::FirmwareUpdateImminent,
         // The host sends a 0x00 argument with each of these. It is a
         // placeholder, not a selector -- there is nothing else it can be --
         // so it is not checked.
         cmd::FW_VERSION => Command::QueryFirmwareVersion,
         cmd::PLATFORM => Command::QueryPlatform,
         cmd::MCU => Command::QueryMcu,
-        cmd::FB_EXT | cmd::FB_READ | cmd::FB_WRITE | cmd::DISP_READ | cmd::BLINK => {
-            Command::NotYetImplemented(command)
-        }
-        cmd::BT_CTRL => Command::NotYetImplemented(command),
-        cmd::ROM_READ => Command::NotYetImplemented(command),
+        cmd::BOARD => Command::QueryBoard,
+        cmd::FB_EXT
+        | cmd::FB_READ
+        | cmd::FB_WRITE
+        | cmd::DISP_READ
+        | cmd::DISP_INT
+        | cmd::DISP_ADR
+        | cmd::DISP_BLNK
+        | cmd::DISP_ROT
+        | cmd::DISP_RCND
+        | cmd::BLINK => Command::NotYetImplemented(command),
+        cmd::BT_CTRL | cmd::BT_PIN => Command::NotYetImplemented(command),
+        // Hardware this board does not have, and will not grow.
+        cmd::NP_INT
+        | cmd::WIFI_MODE
+        | cmd::WIFI_SSID
+        | cmd::WIFI_PSK
+        | cmd::WIFI_CHN
+        | cmd::WIFI_IP
+        | cmd::WIFI_NM
+        | cmd::CFG_READ
+        | cmd::DIS_IA => Command::NotApplicable(command),
         other => Command::Unknown(other),
     }
 }
@@ -618,9 +789,14 @@ mod tests {
             cmd::FB_READ,
             cmd::FB_WRITE,
             cmd::DISP_READ,
+            cmd::DISP_INT,
+            cmd::DISP_ADR,
+            cmd::DISP_BLNK,
+            cmd::DISP_ROT,
+            cmd::DISP_RCND,
             cmd::BLINK,
             cmd::BT_CTRL,
-            cmd::ROM_READ,
+            cmd::BT_PIN,
         ] {
             assert_eq!(
                 decode(c, &[0x00]),
@@ -628,6 +804,256 @@ mod tests {
                 "{c:#04x}"
             );
         }
+    }
+
+    /// Commands for hardware this board does not have are a third thing again.
+    /// There is no phase in which a WiFi command becomes implemented on a
+    /// board with no WiFi, and a log that said "phase 7" about one would be
+    /// telling somebody to wait for something that is not coming.
+    #[test]
+    fn wifi_and_neopixel_commands_are_not_applicable_rather_than_pending() {
+        for c in [
+            cmd::WIFI_MODE,
+            cmd::WIFI_SSID,
+            cmd::WIFI_PSK,
+            cmd::WIFI_CHN,
+            cmd::WIFI_IP,
+            cmd::WIFI_NM,
+            cmd::CFG_READ,
+            cmd::NP_INT,
+            cmd::DIS_IA,
+        ] {
+            assert_eq!(decode(c, &[0x00]), Command::NotApplicable(c), "{c:#04x}");
+        }
+    }
+
+    /// The two commands that cannot be undone both carry a guard byte, and
+    /// both check it. The port is open to whatever anyone sends down it, and
+    /// an unguarded wipe would be one stray byte away from erasing a board's
+    /// provisioning.
+    #[test]
+    fn a_wipe_or_a_reset_without_its_guard_byte_is_not_one() {
+        assert_eq!(decode(cmd::ROM_WIPE, &[CONFIRM_BYTE]), Command::WipeRom);
+        assert_eq!(decode(cmd::RESET, &[CONFIRM_BYTE]), Command::Reset);
+        for wrong in [0x00u8, 0x01, 0x73, 0xF7, 0xF9, 0xFF] {
+            assert_eq!(
+                decode(cmd::ROM_WIPE, &[wrong]),
+                Command::Malformed(cmd::ROM_WIPE),
+                "{wrong:#04x}"
+            );
+            assert_eq!(
+                decode(cmd::RESET, &[wrong]),
+                Command::Malformed(cmd::RESET),
+                "{wrong:#04x}"
+            );
+        }
+        assert_eq!(
+            decode(cmd::ROM_WIPE, &[]),
+            Command::Malformed(cmd::ROM_WIPE)
+        );
+        assert_eq!(decode(cmd::RESET, &[]), Command::Malformed(cmd::RESET));
+    }
+
+    /// An EEPROM write is `[address, value]`, and every address the byte can
+    /// hold is a real one -- including the two that the framing would
+    /// otherwise eat, which arrive escaped and must come out as themselves.
+    #[test]
+    fn an_eeprom_write_carries_an_address_and_a_value() {
+        assert_eq!(
+            decode(cmd::ROM_WRITE, &[0x9B, 0x73]),
+            Command::WriteRom {
+                addr: 0x9B,
+                value: 0x73
+            }
+        );
+        assert_eq!(
+            decode(cmd::ROM_WRITE, &[kiss::FEND, kiss::FESC]),
+            Command::WriteRom {
+                addr: kiss::FEND,
+                value: kiss::FESC
+            }
+        );
+        assert_eq!(
+            decode(cmd::ROM_WRITE, &[0x00]),
+            Command::Malformed(cmd::ROM_WRITE)
+        );
+        assert_eq!(
+            decode(cmd::ROM_WRITE, &[]),
+            Command::Malformed(cmd::ROM_WRITE)
+        );
+    }
+
+    /// The signature and hash commands carry fixed-width payloads, and a short
+    /// one is a disagreement rather than something to pad out. Storing a
+    /// half-length signature would make a device claim to be signed.
+    #[test]
+    fn a_signature_or_hash_shorter_than_its_field_is_malformed() {
+        let sig = [0xA5u8; eeprom::DEVICE_SIGNATURE_LEN];
+        assert_eq!(
+            decode(cmd::DEV_SIG, &sig),
+            Command::StoreDeviceSignature(&sig)
+        );
+        assert_eq!(
+            decode(cmd::DEV_SIG, &sig[..63]),
+            Command::Malformed(cmd::DEV_SIG)
+        );
+
+        let hash = [0x5Au8; eeprom::HASH_LEN];
+        assert_eq!(decode(cmd::FW_HASH, &hash), Command::SetFirmwareHash(&hash));
+        assert_eq!(
+            decode(cmd::FW_HASH, &hash[..31]),
+            Command::Malformed(cmd::FW_HASH)
+        );
+    }
+
+    /// Only the two hash kinds the host asks for. A third value is a
+    /// disagreement about a command both ends claim to know.
+    #[test]
+    fn only_the_two_defined_hash_kinds_are_accepted() {
+        assert_eq!(
+            decode(cmd::HASHES, &[hash_kind::TARGET_FIRMWARE]),
+            Command::QueryHash(hash_kind::TARGET_FIRMWARE)
+        );
+        assert_eq!(
+            decode(cmd::HASHES, &[hash_kind::FIRMWARE]),
+            Command::QueryHash(hash_kind::FIRMWARE)
+        );
+        for wrong in [0x00u8, 0x03, 0xFF] {
+            assert_eq!(
+                decode(cmd::HASHES, &[wrong]),
+                Command::Malformed(cmd::HASHES),
+                "{wrong:#04x}"
+            );
+        }
+    }
+
+    /// The full handshake `rnodeconf` opens with -- twice as long as the one
+    /// `rnsd` sends, and written as a single burst in one `write()`, so every
+    /// frame's closing delimiter is the next one's opener.
+    #[test]
+    fn the_rnodeconf_probe_decodes_to_the_eight_commands_it_is() {
+        let wire = [
+            kiss::FEND,
+            cmd::DETECT,
+            DETECT_REQ,
+            kiss::FEND,
+            cmd::FW_VERSION,
+            0x00,
+            kiss::FEND,
+            cmd::PLATFORM,
+            0x00,
+            kiss::FEND,
+            cmd::MCU,
+            0x00,
+            kiss::FEND,
+            cmd::BOARD,
+            0x00,
+            kiss::FEND,
+            cmd::DEV_HASH,
+            0x01,
+            kiss::FEND,
+            cmd::HASHES,
+            0x01,
+            kiss::FEND,
+            cmd::HASHES,
+            0x02,
+            kiss::FEND,
+        ];
+        let mut d = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+        let mut frames: Vec<(u8, Vec<u8>)> = Vec::new();
+        for &b in &wire {
+            if d.feed(b) == kiss::Step::Frame {
+                frames.push((d.command(), d.payload().to_vec()));
+            }
+        }
+        let got: Vec<Command> = frames.iter().map(|(c, p)| decode(*c, p)).collect();
+        assert_eq!(
+            got,
+            vec![
+                Command::Detect,
+                Command::QueryFirmwareVersion,
+                Command::QueryPlatform,
+                Command::QueryMcu,
+                Command::QueryBoard,
+                Command::QueryDeviceHash,
+                Command::QueryHash(hash_kind::TARGET_FIRMWARE),
+                Command::QueryHash(hash_kind::FIRMWARE),
+            ]
+        );
+    }
+
+    /// `rnodeconf` is a second host with a second parser, and it reads
+    /// commands `rnsd` never sees. Transcribed the same way, branch by branch.
+    ///
+    /// The two must not disagree about any command they both parse — nothing
+    /// in either codebase forces that, and a divergence would mean a frame
+    /// that is correct for one host and corrupt for the other, with no way to
+    /// be right for both.
+    #[test]
+    fn the_two_hosts_agree_about_every_command_they_both_read() {
+        // rnodeconf accumulates these through an unescaping step.
+        let unescaped = [
+            cmd::ROM_READ,
+            cmd::CFG_READ,
+            cmd::DATA,
+            cmd::FREQUENCY,
+            cmd::BANDWIDTH,
+            cmd::BT_PIN,
+            cmd::DEV_HASH,
+            cmd::HASHES,
+            cmd::FW_VERSION,
+            cmd::STAT_RX,
+            cmd::STAT_TX,
+        ];
+        // And reads these straight out of the stream.
+        let raw = [
+            cmd::BOARD,
+            cmd::PLATFORM,
+            cmd::MCU,
+            cmd::TXPOWER,
+            cmd::SF,
+            cmd::CR,
+            cmd::RADIO_STATE,
+            cmd::RADIO_LOCK,
+            cmd::STAT_RSSI,
+            cmd::STAT_SNR,
+            cmd::RANDOM,
+            cmd::ERROR,
+            cmd::DETECT,
+        ];
+        for c in unescaped {
+            assert!(host_unescapes(c), "{c:#04x} should be unescaped");
+        }
+        for c in raw {
+            assert!(!host_unescapes(c), "{c:#04x} should be read raw");
+        }
+    }
+
+    /// The EEPROM contains a 128-byte RSA signature, which is uniformly
+    /// distributed bytes: on any real device it contains `0xC0` and `0xDB`.
+    /// An unescaped `CMD_ROM_READ` would therefore end its own frame partway
+    /// through, and the host would report a device whose EEPROM is however
+    /// many bytes it happened to get before the first delimiter.
+    #[test]
+    fn an_eeprom_dump_containing_framing_bytes_survives_the_wire() {
+        let mut rom = eeprom::Eeprom::new();
+        for addr in 0..=u8::MAX {
+            rom.write(addr, addr);
+        }
+        let image = rom.as_bytes();
+        assert!(image.contains(&kiss::FEND) && image.contains(&kiss::FESC));
+
+        let mut wire = [0u8; 2 * eeprom::SIZE + 3];
+        let n = encode_response(cmd::ROM_READ, image, &mut wire).expect("fits");
+
+        let mut d = kiss::Decoder::<{ eeprom::SIZE }>::new();
+        let mut got: Option<Vec<u8>> = None;
+        for &b in &wire[..n] {
+            if d.feed(b) == kiss::Step::Frame {
+                got = Some(d.payload().to_vec());
+            }
+        }
+        assert_eq!(got.as_deref(), Some(&image[..]));
     }
 
     /// The RSSI offset, in both directions. The host computes `byte - 157`, so
