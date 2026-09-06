@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: Reticulum opens the port and finds an RNode
+## Status: a provisioned RNode that Reticulum and `rnodeconf` both accept
 
 Being precise about that:
 
@@ -21,7 +21,7 @@ Being precise about that:
 | 3 | LR1121 bring-up over SPI, read chip ID, basic TX | **done** — verified on hardware, [notes](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | **done** — verified on hardware, [notes](docs/phase-4-config.md) |
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
-| 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
+| 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | not started |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | interop constants pinned; stack not started |
 
@@ -39,7 +39,11 @@ Phase 4 turned every radio parameter into a value a host can set, and cancelled
 the 73 ppm reference error phase 3 measured. See
 [docs/phase-4-config.md](docs/phase-4-config.md).
 
-Phases 1 to 5 are confirmed on hardware.
+Phase 6 gave the board an identity that survives a reflash: `rnodeconf` writes
+an EEPROM, signs the device, and stores a configuration it comes up on by
+itself. See [docs/phase-6-provisioning.md](docs/phase-6-provisioning.md).
+
+Phases 1 to 6 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -107,6 +111,21 @@ What that actually establishes:
   Ten starts, ten times up. A `CMD_DATA` frame containing both KISS framing
   bytes goes out as a 19-byte packet in 103363 µs against 102912 µs computed.
 
+* **`rnodeconf` provisions it, and the provisioning sticks.** Unmodified
+  `rnodeconf --rom` writes an identity into the board one byte at a time, reads
+  the whole image back, recomputes the MD5 over it and verifies a 1024-bit RSA
+  signature: *`EEPROM checksum correct` / `Device signature validated`*. The
+  dump was parsed independently in Python too — 256 bytes, the checksum over
+  bytes 0–10 matching the sixteen stored at `0x0b`, the lock byte at `0x9b`.
+  `rnodeconf --sign` gets a device hash that is SHA-256 over the identity block
+  and the chip's factory device ID, recomputed byte for byte on the host.
+
+* **it comes up as a TNC on its own.** With a configuration stored by
+  `rnodeconf --tnc`, a reset takes 421 ms to reach a configured radio with no
+  host attached — the record read back from `0xea000`, validated the same way a
+  host's request would be, and commanded at 915,067,069 Hz, which is phase 4's
+  reference correction applied to a frequency that came out of flash.
+
 * **the 73 ppm is corrected, by the amount it should be.** Turning the
   correction on moves the receive window's edge against the peer board from
   +328 kHz to +254 kHz — a shift of −74 ± 14 kHz against −66.5 kHz predicted —
@@ -140,8 +159,7 @@ all). What is left is the module's own reference, which also drifts ≈0.65 ppm/
 bounds what a static correction can do: 20 °C of temperature swing is 13 ppm, a
 fifth of what is being corrected.
 
-There is no KISS framing and no display code either: not stubbed, not
-half-written, absent.
+There is no display code: not stubbed, not half-written, absent.
 
 ## Hardware
 
@@ -253,6 +271,27 @@ bring-up means charging, not a fault in anything oxinode did.
 * **`UICR.REGOUT0` is already 3.3 V.** The bootloader programs it
   (`UICR_REGOUT0_VOUT_3V3`), so an oxinode image inherits 3.3 V rather than the
   1.8 V reset default. Nothing to do; worth not being surprised by.
+* **The 40 KB above the application is where provisioning lives.** Phase 6 puts
+  the device record at `0xEA000`, in the region the bootloader reserves and
+  then refuses to write through on both of its flashing paths. That is what
+  makes an identity survive a reflash. Do not move `memory.x`'s FLASH length
+  without moving it: the address is derived from the end of the application
+  region, so growing the application would relocate the record and lose it.
+* **`rnodeconf` cannot tell this board's two serial ports apart.** It ends its
+  bootstrap by resetting the device and finding the port again by matching USB
+  serial numbers, taking the first match — but a USB serial number belongs to
+  the device, not to an interface, so both CDC functions carry the same one and
+  the order is not stable. When it picks the log port, `--rom` ends with
+  "Could not download EEPROM from device" after having succeeded. `rnodeconf -i`
+  shows the truth. There is nothing the firmware can do about it that would not
+  be worse — see [docs/phase-6-provisioning.md](docs/phase-6-provisioning.md).
+* **`rnodeconf -i` prints this board's band and power from its own table, not
+  from the device.** For model `0xff` that is "100.0 MHz - 1100.0 MHz" and
+  "Max TX power: 14 dBm". The module is 902–928 MHz at 20 dBm and
+  `oxinode_core::lr1121::config` is what enforces it. The model byte was chosen
+  so `rnodeconf --update` refuses rather than offering to flash a RAK4631 image
+  onto an LR1121; being wrong about the band in a printout is the cheaper of
+  the two.
 * **There *are* SWD pads.** This README says repeatedly that the board has no
   debug probe, and no image here assumes one. But SWDIO and SWDCLK come out to
   test pads TP1/TP2, so if the no-probe constraint ever gets expensive enough,
@@ -449,6 +488,13 @@ core/                 oxinode-core: logic with no hardware dependency, unit test
 core/src/lr1121/config.rs     phase 4: the settable parameters, validated before they reach the chip
 core/src/lr1121/reference.rs  phase 4: the module's 73 ppm error, and the arithmetic that cancels it
 src/modem.rs          phase 4: the one place that programs a configuration, transmits and receives
+core/src/rnode/       phase 5: KISS framing, the command set, the protocol state machine
+core/src/rnode/eeprom.rs      phase 6: the EEPROM image, as rnodeconf reads it
+core/src/rnode/store.rs       phase 6: the record that survives a power cycle, and its checksum
+core/src/hash/        phase 6: MD5 (because the EEPROM checksum is one) and SHA-256
+src/store.rs          phase 6: that record, in the flash a reflash cannot reach
+src/bringup.rs        phase 5: the radio bring-up sequence, without the instrumentation
+src/bin/rnode.rs      phase 5: the product image -- KISS on the first port, log on the second
 src/lib.rs            firmware crate root; panic handler
 src/board.rs          board facts: clock config, LED polarity
 src/boot.rs           VTOR relocation, reboot-into-bootloader
