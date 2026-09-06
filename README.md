@@ -18,7 +18,7 @@ This is phase 1 of 7. Being precise about that:
 | 0 | Pin/hardware recon | done, verified against upstream |
 | 1 | Blink an LED, prove flashing | **running on hardware** |
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
-| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–5 of 8 done, [plan](docs/phase-3-radio.md) |
+| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–5 and 7a of 8 done, [plan](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | not started |
 | 5 | RNode KISS protocol + command set, over USB | not started |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
@@ -64,13 +64,15 @@ What that actually establishes:
   `hf_xosc_start` to clear, and the die reads 18.5 °C at 3.36 V, which is a
   room rather than a stopped clock.
 
-The RF switch masks have been sent and accepted, which is **not** evidence that
-anything reaches the antenna — a wrong mask gives a clean `TxDone` into a dead
-port, and only a receiver can tell the difference.
+* **it transmits.** An unmodulated carrier at a commanded 915 MHz was measured
+  on an RTL-SDR at −17, 0 and +14 dBm: 31 dB of commanded range produced 29.3 dB
+  of measured range, all at one frequency to within 0.6 kHz. That is what proves
+  the RF switch masks, which a `TxDone` alone never could.
 
-**Nothing has been transmitted.** No carrier, no packet, no antenna port has
-been energised — the radio is awake, calibrated and pointed at a switch nobody
-has checked. There is no KISS framing and no display code
+**No packet has been sent.** A carrier is not a modulation, there is no
+interrupt handling yet, and the measured carrier sits 66 kHz (−72 ppm) below
+where it was commanded — probably the receiver's crystal rather than the
+board's TCXO, but that is not yet established. There is no KISS framing and no display code
 either: not stubbed, not half-written, absent.
 
 ## Hardware

@@ -369,7 +369,8 @@ nothing to discover them from and nothing to check them against, which is
 exactly why they are written down once and asserted rather than assembled at
 the call site.
 
-*Done when:* the command is accepted. **Accepted, on hardware:**
+*Done when:* the command is accepted, and — by way of step 7a — a receiver
+confirms something reaches the antenna. **Both, on hardware:**
 
 ```
 INFO  rfsw: enable 0x03, standby 0x00, rx 0x01, tx 0x02, tx_hp 0x02, tx_hf 0x00
@@ -377,11 +378,50 @@ INFO  rfsw: enable 0x03, standby 0x00, rx 0x01, tx 0x02, tx_hp 0x02, tx_hf 0x00
 INFO  rfsw: command accepted -- which is NOT proof that anything reaches the antenna
 ```
 
-**This step still cannot be validated on its own.** A wrong switch
-configuration produces a clean `TxDone` while nothing reaches the antenna: the
-chip does exactly what it was told, and what it was told is a fact about copper
-it cannot see. That is the entire reason step 7 requires an SDR — knowing the
-table is not the same as having sent the command correctly.
+**This step cannot be validated on its own.** A wrong switch configuration
+produces a clean `TxDone` while nothing reaches the antenna: the chip does
+exactly what it was told, and what it was told is a fact about copper it cannot
+see. So step 7a was brought forward, out of order — CW needs no interrupts, so
+step 6 is not a prerequisite — and the switch was proved with a receiver.
+
+#### Validated on an SDR — the switch is right
+
+A NooElec R820T2 (RTL-SDR), `rtl_sdr` capturing raw IQ at 2.048 MS/s centred at
+914.4 MHz so the carrier sits well away from the receiver's own DC spike.
+Spectra are compared against a capture with the transmitter off, because
+902–928 MHz is busy with frequency-hopping traffic and the strongest tone in any
+single capture is usually somebody else.
+
+| commanded | measured rise | at |
+|---|---|---|
+| −17 dBm | +51.9 dB | 914.9336 MHz |
+| 0 dBm | +65.8 dB | 914.9342 MHz |
+| +14 dBm | +81.2 dB | 914.9339 MHz |
+
+**31 dB of commanded range produced 29.3 dB of measured range, at one frequency
+to within 0.6 kHz.** A single burst would only show that *something* appeared;
+a monotonic ramp shows the transmitter is under our control, which is what
+proves the switch mask rather than merely the existence of RF.
+
+The board's sub-GHz SMA had an antenna fitted throughout. The firmware refuses
+powers outside the low-power PA's range rather than clamping them, and stops any
+carrier by itself after 10 s — a bare carrier is a bench diagnostic, not
+something FCC Part 15.247 contemplates, and a crashed host must not be able to
+leave one up.
+
+#### The carrier is 66 kHz low, and it is not clear whose fault that is
+
+Every measurement puts the carrier at 914.934 MHz against a commanded
+915.000 MHz: **−66.1 kHz, or −72 ppm**, repeatable across power levels to under
+a kilohertz.
+
+−72 ppm is ordinary for an uncalibrated RTL-SDR crystal and implausible for the
+LR1121, which is running off a TCXO. That makes the receiver the likely culprit,
+but "likely" is the honest word: there is no calibrated reference on this bench,
+and the test that would settle it — commanding several frequencies and checking
+whether the error stays constant in ppm or in hertz — has not been run. It
+matters before phase 5, because a transmitter 72 ppm off would eat a large part
+of a LoRa link's tolerance.
 
 #### `lr11xx` cannot express the high-frequency TX state
 
@@ -412,16 +452,40 @@ module's other two exposed LoRa pins, `LR_DIO7` and `LR_DIO8`, are unconnected.
 
 Cheapest test first:
 
-**7a — continuous wave.** `set_tx_cw` needs no packet parameters at all: set the
-frequency, configure the PA, transmit. On the SDR it is a carrier at the target
-frequency. This is the first moment the RF switch config from step 5 is proved.
+**7a — continuous wave. Done, ahead of step 6** (CW needs no interrupts).
+
+`set_tx_cw` does **not** need "no packet parameters at all", which is what its
+own documentation implies and what this plan said. It requires
+**`SetPacketType`**, and refuses without it.
+
+That was expensive to learn, so the failure signature is worth recording. With
+frequency and PA configured and no packet type set, `SetTxCw` returns
+`command_status: Fail` and latches `cmd_error`, while `GetErrors` stays
+completely clean and the chip remains in whatever mode it was in. Nothing in the
+error flags points at the cause. Worse, `lr11xx` returns the status of the
+*previous* command from every call, so the last command in a chain fails
+silently: the driver reported success and the firmware logged a carrier that did
+not exist.
+
+Two things made it findable. Reading `stat2.chip_mode` after the sequence — the
+chip either reaches `Tx` or it does not, and that is not a matter of
+interpretation. And a `Reboot`-based radio reset, because several LR1121
+commands persist until reset: once one experiment succeeded, every later one
+succeeded too, for the wrong reason. Without a way back to a virgin chip the
+bisect measured nothing, and the first pass through it produced four confident
+and entirely worthless results.
+
+Bisected against a freshly rebooted radio, three trials each way: with a packet
+type it keys every time, without one it never does. `SetStandby(XOSC)`,
+`SetFs`, `CalibImage`, `SetRegMode`, `ClearIrq` and `ClearErrors` were each
+tested alone and none of them helps.
 
 **7b — a real LoRa packet.** `set_packet_type(LoRa)`, `set_lora_modulation`
 (SF/BW/CR), `set_lora_packet`, `set_lora_sync_word`, `set_pa_config`,
 `set_tx_params`, write the buffer, `set_tx`, await `TxDone`.
 
-*Done when:* the SDR sees the carrier at 7a, and `TxDone` arrives within the
-expected airtime at 7b.
+*Done when:* ~~the SDR sees the carrier at 7a~~ (done — see step 5), and
+`TxDone` arrives within the expected airtime at 7b.
 
 > **Before transmitting.** A LoRa antenna must be attached to the sub-GHz port —
 > the SMA connector, not the 2.4 GHz u.FL. Transmitting into an open port can

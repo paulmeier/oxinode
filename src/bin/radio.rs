@@ -27,18 +27,22 @@
 
 use arbitrary_int::u24;
 use embassy_executor::Spawner;
-use embassy_futures::join::join4;
+use embassy_futures::join::join3;
+use embassy_futures::select::{select3, Either3};
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, spim};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, State};
+use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
-use lr11xx::ops::{Calibrate, RfSwitchConfig, TcxoMode, TcxoTune};
+use lr11xx::ops::{
+    Calibrate, PaConfig, PacketType, RampTime, RfSwitchConfig, TcxoMode, TcxoTune, TxParams,
+};
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::{rf_switch, tcxo, ResetVerdict};
+use oxinode_core::lr1121::{pa, rf_switch, tcxo, ResetVerdict};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -103,7 +107,7 @@ async fn main(_spawner: Spawner) {
         LOG_STATE.init(State::new()),
         usb_log::MAX_PACKET_SIZE,
     );
-    let (mut log_tx, log_rx, control) = logs.split_with_control();
+    let (mut log_tx, mut log_rx, control) = logs.split_with_control();
 
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
@@ -252,28 +256,10 @@ async fn main(_spawner: Spawner) {
             }
         }
 
-        // Liveness, and something for a terminal that reconnects later.
-        let mut ticks: u32 = 0;
-        loop {
-            Timer::after(Duration::from_millis(5000)).await;
-            ticks += 1;
-            match radio.as_mut() {
-                Some(dev) => defmt::info!("idle, tick {=u32}, busy {}", ticks, dev.busy().ok()),
-                None => defmt::info!("idle, tick {=u32}, no radio attached", ticks),
-            }
-        }
+        console(&mut log_rx, &control, radio).await
     };
 
-    let touch = async {
-        loop {
-            control.control_changed().await;
-            if usb_log::is_bootloader_touch(&log_rx, &control) {
-                boot::reboot_to_bootloader();
-            }
-        }
-    };
-
-    join4(run_usb, pump, bring_up, touch).await;
+    join3(run_usb, pump, bring_up).await;
 }
 
 /// Step 4: start the 32 MHz oscillator from the board's 3.0 V TCXO, and prove
@@ -419,13 +405,321 @@ where
     // here and would not be on a different board.
     let cfg = RfSwitchConfig::new_with_raw_value(raw);
 
-    match with_timeout(Duration::from_millis(200), dev.set_dio_as_rf_switch(cfg)).await {
+    let sequence = async {
+        let prior = dev.set_dio_as_rf_switch(cfg).await?;
+        // SetDioAsRfSwitch's own verdict arrives on the next command, so ask
+        // for one rather than assuming.
+        let (status, _) = dev.status().await?;
+        Ok::<_, lr11xx::Error>((prior, status))
+    };
+    match with_timeout(Duration::from_millis(200), sequence).await {
         Err(_) => defmt::error!("rfsw: no reply within 200 ms; the radio is in an unknown state"),
         Ok(Err(e)) => defmt::error!("rfsw: {}", e),
-        Ok(Ok(_)) => defmt::info!(
-            "rfsw: command accepted -- which is NOT proof that anything reaches the antenna. A wrong switch mask gives a clean TxDone into a dead port. Only step 7a, on an SDR, can tell the difference"
-        ),
+        Ok(Ok((prior, status))) => {
+            defmt::info!("rfsw: prior {}, after {}", prior, status);
+            defmt::info!(
+                "rfsw: command accepted -- which is NOT proof that anything reaches the antenna. A wrong switch mask gives a clean TxDone into a dead port. Only step 7a, on an SDR, can tell the difference"
+            );
+        }
     }
 
     defmt::info!("step 5 done");
+}
+
+/// The bench console: single-character commands on the same serial port the log
+/// comes out of.
+///
+/// It also owns the 1200-baud bootloader touch, and owns it **level-triggered**
+/// rather than edge-triggered. The earlier version waited on
+/// `control_changed()` in a task of its own, which meant a touch arriving while
+/// the bring-up sequence was running — a quarter of a second, most of it the
+/// LR1121's 191 ms reset — could be missed, and a missed touch is a walk to the
+/// reset button. Here the condition is re-checked on every wake, including the
+/// 200 ms timer, so nothing can slip between edges.
+async fn console<'d, D, S, B>(
+    rx: &mut Receiver<'d, D>,
+    control: &ControlChanged<'d>,
+    mut radio: Option<Lr11xx<S, B>>,
+) -> !
+where
+    D: UsbDriverTrait<'d>,
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    defmt::info!(
+        "console: 1 = CW at {=i8} dBm, 2 = CW at {=i8} dBm, 3 = CW at {=i8} dBm, 0 = stop, r = reboot radio, ? = status, b = bootloader",
+        CW_LEVELS[0],
+        CW_LEVELS[1],
+        CW_LEVELS[2]
+    );
+
+    let mut buf = [0u8; 64];
+    let mut cw_until: Option<Instant> = None;
+    let mut ticks: u32 = 0;
+
+    loop {
+        let event = select3(
+            rx.read_packet(&mut buf),
+            control.control_changed(),
+            Timer::after(Duration::from_millis(200)),
+        )
+        .await;
+
+        if usb_log::is_bootloader_touch(rx, control) {
+            boot::reboot_to_bootloader();
+        }
+
+        // Enforced here rather than trusted to the host. A carrier that outlives
+        // the thing that asked for it is the failure worth designing against:
+        // an unmodulated carrier sitting in 902-928 MHz is not something a
+        // crashed terminal or an unplugged cable should be able to leave behind.
+        if let Some(deadline) = cw_until {
+            if Instant::now() >= deadline {
+                cw_until = None;
+                defmt::warn!(
+                    "cw: {=u32} ms burst limit reached, stopping",
+                    pa::CW_MAX_BURST_MS
+                );
+                stop_cw(radio.as_mut()).await;
+            }
+        }
+
+        match event {
+            Either3::First(Ok(n)) => {
+                for &byte in &buf[..n] {
+                    match byte {
+                        b'0' | b's' => {
+                            cw_until = None;
+                            stop_cw(radio.as_mut()).await;
+                        }
+                        b'1' | b'2' | b'3' => {
+                            let dbm = CW_LEVELS[(byte - b'1') as usize];
+                            if start_cw(radio.as_mut(), dbm).await {
+                                cw_until = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(pa::CW_MAX_BURST_MS as u64),
+                                );
+                            }
+                        }
+                        // Reboot the radio's own firmware and redo the boot
+                        // configuration, so a prelude can be tested against a
+                        // chip that has not already been put right by an
+                        // earlier attempt. Without this every experiment after
+                        // the first one passes for the wrong reason.
+                        b'r' => {
+                            if let Some(dev) = radio.as_mut() {
+                                cw_until = None;
+                                reinit(dev).await;
+                            }
+                        }
+                        b'?' => report(radio.as_mut(), cw_until.is_some()).await,
+                        b'b' => boot::reboot_to_bootloader(),
+                        b'\r' | b'\n' => {}
+                        other => defmt::warn!("console: unknown command {=u8:#04x}", other),
+                    }
+                }
+            }
+            Either3::First(Err(_)) => {} // host went away; wait for the next one
+            Either3::Second(()) => {}
+            Either3::Third(()) => {
+                // Roughly every five seconds, and only when nothing is keyed --
+                // a log line in the middle of a measurement is noise on the
+                // serial port, not on the air, but it still muddles a trace.
+                ticks += 1;
+                if ticks % 25 == 0 && cw_until.is_none() {
+                    match radio.as_mut() {
+                        Some(dev) => {
+                            defmt::info!("idle, busy {}", dev.busy().ok());
+                        }
+                        None => defmt::info!("idle, no radio attached"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Output powers the console's `1`, `2` and `3` keys select, lowest first.
+///
+/// Lowest first is the order the plan asks for, and the order that makes the
+/// SDR measurement conclusive: three distinct levels at one frequency, stepped
+/// in a known direction, is evidence that the transmitter is under control.
+/// A single burst is only evidence that *something* appeared.
+const CW_LEVELS: [i8; 3] = [pa::LP_MIN_DBM, 0, pa::LP_MAX_DBM];
+
+/// Key an unmodulated carrier. Returns whether it started.
+async fn start_cw<S, B>(dev: Option<&mut Lr11xx<S, B>>, dbm: i8) -> bool
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::error!("cw: no radio attached");
+        return false;
+    };
+
+    // Refuse rather than clamp. Clamping transmits something nobody asked for,
+    // which is the wrong instinct when the thing being transmitted is power
+    // into an antenna.
+    if !pa::low_power_pa_accepts(dbm) {
+        defmt::error!(
+            "cw: {=i8} dBm is outside the low-power PA's range ({=i8} to {=i8})",
+            dbm,
+            pa::LP_MIN_DBM,
+            pa::LP_MAX_DBM
+        );
+        return false;
+    }
+    if !pa::is_in_us915(pa::CW_TEST_HZ) {
+        defmt::error!("cw: {=u32} Hz is outside US915", pa::CW_TEST_HZ);
+        return false;
+    }
+
+    // Every one of these returns the status of the *previous* command, not its
+    // own -- which is why the last one in a chain can fail silently. That is
+    // exactly what happened here the first time: `set_tx_cw` was rejected, the
+    // chain reported success, and the chip sat in standby while the log
+    // claimed a carrier was up. So each status is logged, and a `status()` read
+    // afterwards catches the last command's own verdict.
+    let sequence = async {
+        // `SetPacketType` first, and it is not optional.
+        //
+        // `set_tx_cw`'s own documentation says the frequency and the PA
+        // configuration "have to be called prior to this command", and says
+        // nothing about a packet type -- which for an *unmodulated carrier* is
+        // the reasonable reading. The chip disagrees. Without it, `SetTxCw` is
+        // refused with `command_status: Fail` and a latched `cmd_error`, while
+        // `GetErrors` stays clean, and the chip sits in standby with the log
+        // cheerfully reporting a carrier. Bisected against a freshly rebooted
+        // radio, three times each way: with a packet type it keys, without one
+        // it never does. LoRa is chosen only because something must be.
+        defmt::debug!(
+            "cw: packet type -> {}",
+            dev.set_packet_type(PacketType::LoRa).await?
+        );
+        defmt::debug!(
+            "cw: freq -> {}",
+            dev.set_rf_frequency(pa::CW_TEST_HZ).await?
+        );
+        // The low-power PA on the internal regulator. Built from
+        // `oxinode_core::lr1121::pa` rather than through `PaConfig`'s builder,
+        // which declares `vbat` and `hp` at the same bit.
+        defmt::debug!(
+            "cw: pa -> {}",
+            dev.set_pa_config(PaConfig::new_with_raw_value(pa::LOW_POWER.to_raw()))
+                .await?
+        );
+        defmt::debug!(
+            "cw: tx params -> {}",
+            dev.set_tx_params(
+                TxParams::builder()
+                    .with_ramp_time(RampTime::Us48)
+                    .with_tx_power(dbm)
+                    .build(),
+            )
+            .await?
+        );
+        defmt::debug!("cw: set_tx_cw -> {}", dev.set_tx_cw().await?);
+        let (status, interrupt) = dev.status().await?;
+        let errors = dev.errors().await?;
+        Ok::<_, lr11xx::Error>((status, interrupt, errors))
+    };
+
+    match with_timeout(Duration::from_millis(500), sequence).await {
+        Ok(Ok((status, interrupt, errors))) => {
+            defmt::info!(
+                "cw: after set_tx_cw -- {}, {}, {}",
+                status,
+                interrupt,
+                errors
+            );
+            defmt::info!(
+                "cw: requested {=u32} Hz, {=i8} dBm, low-power PA (stops itself after {=u32} ms)",
+                pa::CW_TEST_HZ,
+                dbm,
+                pa::CW_MAX_BURST_MS
+            );
+            // The only answer that matters: did the chip actually leave standby?
+            if status.stat2().chip_mode() == Ok(lr11xx::ops::ChipMode::Tx) {
+                defmt::info!("cw: chip is in Tx -- it is keyed");
+            } else {
+                defmt::error!("cw: chip is NOT in Tx; nothing is radiating");
+            }
+            true
+        }
+        Ok(Err(e)) => {
+            defmt::error!("cw: {}", e);
+            false
+        }
+        Err(_) => {
+            defmt::error!("cw: no reply within 200 ms; the radio may still be keyed");
+            false
+        }
+    }
+}
+
+/// Drop back to standby on the RC oscillator, which stops any transmission.
+async fn stop_cw<S, B>(dev: Option<&mut Lr11xx<S, B>>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else { return };
+    match with_timeout(Duration::from_millis(200), dev.standby(false)).await {
+        Ok(Ok(_)) => defmt::info!("cw: OFF (standby RC)"),
+        Ok(Err(e)) => defmt::error!("cw: stop failed, {}", e),
+        Err(_) => defmt::error!("cw: stop timed out -- the carrier may still be up"),
+    }
+}
+
+/// Say what the radio thinks it is doing.
+async fn report<S, B>(dev: Option<&mut Lr11xx<S, B>>, keyed: bool)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::info!("status: no radio attached");
+        return;
+    };
+    match with_timeout(Duration::from_millis(200), dev.status()).await {
+        Ok(Ok((status, interrupt))) => {
+            defmt::info!("status: keyed {=bool}, {}, {}", keyed, status, interrupt)
+        }
+        Ok(Err(e)) => defmt::error!("status: {}", e),
+        Err(_) => defmt::error!("status: no reply within 200 ms"),
+    }
+}
+
+/// Restart the LR1121's own firmware and redo the boot configuration.
+///
+/// Exists for one reason: several of the one-time commands in this bring-up
+/// persist until the radio is reset, so once an experiment has succeeded every
+/// later experiment succeeds too — for the wrong reason. Without a way back to
+/// a virgin chip, a bisect measures nothing.
+async fn reinit<S, B>(dev: &mut Lr11xx<S, B>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    defmt::info!("reinit: rebooting the radio firmware");
+    match with_timeout(Duration::from_millis(1000), dev.reboot(false)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            defmt::error!("reinit: reboot failed, {}", e);
+            return;
+        }
+        Err(_) => {
+            defmt::error!("reinit: reboot did not complete within 1 s");
+            return;
+        }
+    }
+    // The radio takes ~191 ms to boot; wait comfortably past that before
+    // speaking to it again.
+    Timer::after(Duration::from_millis(300)).await;
+
+    if start_tcxo(dev).await {
+        configure_rf_switch(dev).await;
+    }
+    defmt::info!("reinit: back to the step 5 state");
 }

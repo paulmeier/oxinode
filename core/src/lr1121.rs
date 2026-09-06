@@ -12,7 +12,10 @@
 //!   has to look like to be believed.
 //! * [`rf_switch`] — which DIOs drive the antenna switch, and what each does
 //!   in each mode.
+//! * [`pa`] — output power limits, and the rules for keying a carrier without
+//!   damaging anything.
 
+pub mod pa;
 pub mod reset;
 pub mod rf_switch;
 pub mod tcxo;
