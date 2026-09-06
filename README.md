@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: it is a radio, but not yet a modem a host can drive
+## Status: Reticulum opens the port and finds an RNode
 
 Being precise about that:
 
@@ -20,7 +20,7 @@ Being precise about that:
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
 | 3 | LR1121 bring-up over SPI, read chip ID, basic TX | **done** — verified on hardware, [notes](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | **done** — verified on hardware, [notes](docs/phase-4-config.md) |
-| 5 | RNode KISS protocol + command set, over USB | not started |
+| 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
 | 7 | SH1107 OLED status display | not started |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | interop constants pinned; stack not started |
@@ -39,7 +39,7 @@ Phase 4 turned every radio parameter into a value a host can set, and cancelled
 the 73 ppm reference error phase 3 measured. See
 [docs/phase-4-config.md](docs/phase-4-config.md).
 
-Phases 1 to 4 are confirmed on hardware.
+Phases 1 to 5 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -99,6 +99,13 @@ What that actually establishes:
   configurations spanning a 3.5× range, measured `TxDone` exceeds computed
   airtime by a *constant* 437–461 µs, which is the `SetTx` transaction, PLL lock
   and PA ramp. A wrong formula would scale; this does not.
+
+* **Reticulum brings it online.** Unmodified `rnsd`, pointed at the serial
+  port, runs its detect handshake, configures the radio, validates that what
+  came back matches what it asked for, and reports `Status: Up` at 3.12 kbps —
+  which is its own arithmetic agreeing with the bitrate `oxinode-core` computes.
+  Ten starts, ten times up. A `CMD_DATA` frame containing both KISS framing
+  bytes goes out as a 19-byte packet in 103363 µs against 102912 µs computed.
 
 * **the 73 ppm is corrected, by the amount it should be.** Turning the
   correction on moves the receive window's edge against the peer board from

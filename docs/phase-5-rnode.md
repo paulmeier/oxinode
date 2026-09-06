@@ -218,3 +218,94 @@ for a quieter one.
 
 This left the board with no serial port at all, and therefore no way to take
 the 1200-baud touch — recovery is a physical double-tap of the reset button.
+
+## Step 5 — what the hardware says
+
+### Reticulum brings the interface up
+
+Real `rnsd`, unmodified, against the board:
+
+```
+[Notice] Opening serial port /dev/cu.usbmodem3101...
+[Notice] RNodeInterface[oxinode RNode] is configured and powered up
+
+ RNodeInterface[oxinode RNode]
+    Status    : Up
+    Rate      : 3.12 kbps
+```
+
+That is phase 5's goal met. The bitrate is worth a second look: 3.12 kbps is
+Reticulum's own arithmetic on the parameters the modem reported back, and it
+agrees with the 3125 bps `oxinode_core::lr1121::config` computes for
+SF8/125 kHz/CR 4/5 — a number pinned by a host test written before any of this
+touched hardware.
+
+Ten consecutive starts, ten times Up.
+
+### The data path carries a packet
+
+A `CMD_DATA` frame whose payload deliberately contains both framing bytes:
+
+```
+sending 19 bytes: c0 db 00 ff 6f 78 69 6e 6f 64 65 20 70 68 61 73 65 20 35
+reply: c0 0f c0            -> CMD_READY
+tx: 19 bytes in 103363 us
+```
+
+Three things at once. The payload arrived as 19 bytes rather than 21, so the
+host's escaping was undone correctly. The airtime is 103363 µs against 102912 µs
+computed — the same constant ~450 µs of `SetTx`, PLL lock and PA ramp that phase
+4 measured across a 3.5× range, so this is the predicted number and not a
+coincidence. And `CMD_READY` came back, which is what releases a host running
+with flow control enabled.
+
+## Three bugs the bench found, and one it did not
+
+**Configuration only worked once.** `apply failed: Radio(Fail)`. The LR1121
+accepts its configuration commands only in standby; from receive it takes them
+and reports `CMD_FAIL` on the next status read. The first configuration after
+boot therefore worked and every one after it silently kept the old settings —
+which, because the protocol layer honestly echoes what it was *told*, would have
+meant transmitting on the old frequency while reporting the new one. This is the
+third time this chip has done exactly this; phase 3 met it with `SetTxCw` and
+again with `SetRegMode`.
+
+**The modem loop could starve the executor.** `RadioIrq::wait_asserted` is level
+triggered, so on a line that is already high it returns immediately, forever.
+With `receiving` false nothing cleared the interrupt and `Outbox::flush` returns
+without awaiting on an empty queue, so an iteration could complete with every
+future already resolved. A task that never returns `Pending` is never
+descheduled, and `usb.run()` stopped being polled: both serial ports stopped
+opening while the device still showed as connected. Recovery was a physical
+double-tap, since with no openable port there is no 1200-baud touch either.
+
+**A cancelled `read_packet` loses data.** `select` drops the losing future, and
+whatever `read_packet` had already taken from the endpoint goes with it. The
+loop cancelled it every 50 ms — that being how often the interrupt wait timed
+out. `read_packet` is now awaited only by a task that never selects, with a pipe
+in between; a cancelled pipe read consumes nothing.
+
+The first hypothesis for that one was that the radio's interrupt was winning the
+race, which would have made it a receive-only problem. A controlled run with the
+radio off dropped commands at the same rate, which is what pointed at the
+timeout instead. Worth recording as a method note: the hypothesis was wrong and
+cheap to falsify, and testing it took less time than the reasoning that produced
+it.
+
+### The one that is still open
+
+A synthetic test that writes the six setters back-to-back still loses roughly
+one command in ten — always the command, never the reply, and only ever a
+four-byte frame. Combining them into one write makes it stop.
+
+What has been excluded: it is not the reply direction (a deliberately invalid
+TX power lets the *reported radio state* say which value the firmware actually
+holds, and it is always the previous round's); it is not SPI and USB contending
+for EasyDMA (a round that does no radio work at all drops at the same rate); it
+is not `tcflush` in the harness (drops occur with and without); and it is not
+the decoder, which has no silent-drop path and logs every error it does have.
+
+It also does not happen with Reticulum, whose own writes are shaped the same way
+but which reads continuously while it writes — ten starts out of ten came up.
+So it is recorded rather than fixed: a real effect, not attributed, and not
+currently reachable by the client this phase exists to serve.
