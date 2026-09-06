@@ -83,6 +83,13 @@ path = "src/bin/radio.rs"
 name = "rnode"
 path = "src/bin/rnode.rs"
 
+# Phase 7 bring-up image for the Super IO board's OLED. Separate from `rnode`
+# for the same reason `radio` was: with no debug probe, a failure you can
+# bisect by choosing which image to flash is worth the duplication.
+[[bin]]
+name = "display"
+path = "src/bin/display.rs"
+
 # Debug builds of this still have to fit in 784K of flash and run at 64 MHz,
 # so keep some optimisation on even in dev.
 [profile.dev]
