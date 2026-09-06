@@ -7,20 +7,30 @@
 
 pub mod board;
 pub mod boot;
+pub mod logger;
 
 use core::panic::PanicInfo;
 
-/// Halt on panic.
+/// Reboot into the UF2 bootloader on panic.
 ///
-/// There is no debug probe on this board and, until the USB CDC image comes up,
-/// no way to report anything either. Halting with interrupts off at least makes
-/// the failure obvious (the LED stops, USB drops off the bus) rather than
-/// letting a half-initialised radio keep transmitting. Recovery is a double-tap
-/// of the reset button into the UF2 bootloader.
+/// The obvious thing is to halt, and that is what this did first. It is the
+/// wrong choice on this board: a halted image is a USB device that never
+/// enumerates, so the only way back is physically double-tapping the reset
+/// button. With no debug probe, a panic in a headless test is otherwise just a
+/// board that went quiet, and every one costs a trip to the bench.
+///
+/// Rebooting into the bootloader instead leaves the board sitting in DFU,
+/// enumerated and ready to be reflashed over serial — recoverable from the
+/// keyboard. It is a stable resting place, not a loop: the bootloader stays put
+/// rather than re-running the image that just failed.
+///
+/// The cost is that the panic message goes with it. Nothing would have survived
+/// the reset to read it anyway, and the alternative was a board that says
+/// nothing *and* cannot be reflashed without getting up.
+///
+/// Worth revisiting before anything ships: a fielded RNode should probably
+/// reset into its application and keep trying rather than wait in a bootloader.
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    cortex_m::interrupt::disable();
-    loop {
-        cortex_m::asm::wfi();
-    }
+    crate::boot::reboot_to_bootloader()
 }

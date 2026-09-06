@@ -18,7 +18,7 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_futures::select::{select, Either};
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
@@ -29,6 +29,7 @@ use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
 use oxinode::boot;
+use oxinode::logger;
 use oxinode_core::usb as core_usb;
 use static_cell::StaticCell;
 
@@ -61,10 +62,13 @@ async fn main(_spawner: Spawner) {
 
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
+    // Once only; see take_device_serial.
+    let serial = take_device_serial();
+
     let mut config = UsbConfig::new(USB_VID, USB_PID);
     config.manufacturer = Some("oxinode");
     config.product = Some("oxinode RNode");
-    config.serial_number = Some(device_serial());
+    config.serial_number = Some(serial);
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -76,27 +80,79 @@ async fn main(_spawner: Spawner) {
     config.device_protocol = 0x01;
     config.composite_with_iads = true;
 
-    static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+    // Two CDC-ACM functions fit in well under 512 bytes of configuration
+    // descriptor, but 256 leaves little room to add a third later.
+    static CONFIG_DESC: StaticCell<[u8; 512]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-    static STATE: StaticCell<State> = StaticCell::new();
+    static DATA_STATE: StaticCell<State> = StaticCell::new();
+    static LOG_STATE: StaticCell<State> = StaticCell::new();
 
     let mut builder = Builder::new(
         driver,
         config,
-        CONFIG_DESC.init([0; 256]),
+        CONFIG_DESC.init([0; 512]),
         BOS_DESC.init([0; 256]),
         &mut [], // no Microsoft OS descriptors; CDC-ACM is class-driver material
         CONTROL_BUF.init([0; 64]),
     );
 
-    let class = CdcAcmClass::new(&mut builder, STATE.init(State::new()), MAX_PACKET_SIZE);
-    let (mut tx, mut rx, control) = class.split_with_control();
+    // Interface order is the contract with the host: the data port is added
+    // first so it enumerates as the lower-numbered tty. Phase 5's KISS stream
+    // takes this one, which is why the log port exists separately rather than
+    // being multiplexed in later.
+    let data = CdcAcmClass::new(&mut builder, DATA_STATE.init(State::new()), MAX_PACKET_SIZE);
+    let (mut tx, mut rx, control) = data.split_with_control();
+
+    let logs = CdcAcmClass::new(&mut builder, LOG_STATE.init(State::new()), MAX_PACKET_SIZE);
+    let (mut log_tx, _log_rx, _log_control) = logs.split_with_control();
 
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
 
     let run_usb = usb.run();
+
+    defmt::info!(
+        "oxinode up: serial {=str}, image at {=u32:#x}",
+        serial,
+        oxinode::boot::APP_FLASH_ORIGIN
+    );
+
+    // Ships log bytes to the second serial port. Nothing here can call into
+    // defmt while holding the buffer, so draining and logging cannot deadlock.
+    let logs = async {
+        let mut buf = [0u8; MAX_PACKET_SIZE as usize];
+        loop {
+            // Drain whenever the endpoint is live. Anything logged before a host
+            // opens the tty is written into a port with no reader and dropped by
+            // the host -- see the heartbeat below, which guarantees fresh output
+            // exists once someone does attach.
+            log_tx.wait_connection().await;
+            defmt::info!("log port attached");
+            loop {
+                // Losing bytes is expected whenever nothing is listening, but
+                // it must never be silent -- say so on the way back up.
+                let lost = logger::take_dropped();
+                if lost > 0 {
+                    defmt::warn!("log buffer overflowed, {=u32} bytes lost", lost);
+                }
+
+                let n = logger::drain(&mut buf);
+                if n == 0 {
+                    // The logger runs inside a critical section and cannot wake
+                    // a task, so this polls. 20 ms is invisible on a log.
+                    Timer::after(Duration::from_millis(20)).await;
+                    continue;
+                }
+                if log_tx.write_packet(&buf[..n]).await.is_err() {
+                    break; // host closed the port
+                }
+                if n == MAX_PACKET_SIZE as usize && log_tx.write_packet(&[]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    };
 
     let echo = async {
         loop {
@@ -110,10 +166,15 @@ async fn main(_spawner: Spawner) {
     // Kept separate from the echo loop so that a host sitting idle with the port
     // open still leaves visible evidence the firmware is alive.
     let heartbeat = async {
+        let mut ticks: u32 = 0;
         loop {
+            // Once a second either way, so the log port always has something
+            // fresh to show a terminal that attaches late -- see the drain loop.
+            ticks += 1;
+            defmt::info!("alive, tick {=u32}", ticks);
             if control.dtr() {
                 led.on();
-                Timer::after(Duration::from_millis(200)).await;
+                Timer::after(Duration::from_millis(1000)).await;
             } else {
                 led.on();
                 Timer::after(Duration::from_millis(60)).await;
@@ -123,7 +184,7 @@ async fn main(_spawner: Spawner) {
         }
     };
 
-    join3(run_usb, echo, heartbeat).await;
+    join4(run_usb, echo, heartbeat, logs).await;
 }
 
 /// Echo bytes until the host goes away, watching control traffic as we go.
@@ -168,7 +229,12 @@ fn is_bootloader_touch(
 
 /// A stable, per-board serial number derived from the nRF52840's factory device
 /// ID, so the host names the port consistently and two boards never collide.
-fn device_serial() -> &'static str {
+/// Claim the device serial string.
+///
+/// **Call this exactly once.** It hands out a `StaticCell`, and `init` panics on
+/// a second call — which on this board means a dead USB device and a walk over
+/// to press reset. Bind the result once and pass it around.
+fn take_device_serial() -> &'static str {
     static SERIAL: StaticCell<[u8; 16]> = StaticCell::new();
 
     let ficr = embassy_nrf::pac::FICR;

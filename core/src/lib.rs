@@ -17,5 +17,6 @@
 
 pub mod ble;
 pub mod linker_script;
+pub mod logbuf;
 pub mod serial;
 pub mod usb;

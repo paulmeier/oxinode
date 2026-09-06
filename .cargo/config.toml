@@ -20,10 +20,24 @@ runner = "tools/dfu-flash.sh"
 rustflags = [
     "-C", "link-arg=-Tlink.x",
 
+    # defmt interns its format strings into a `.defmt` section that never ships
+    # to the device -- the host decoder reads them out of the ELF instead, which
+    # is why the log stream is so compact. Without this script the section is
+    # absent, and `defmt-print` refuses the ELF with "no `.defmt` section".
+    "-C", "link-arg=-Tdefmt.x",
+
     # The nRF52840 is a Cortex-M4F. Without this, the FPU is present but the
     # compiler will not use it.
     "-C", "target-cpu=cortex-m4",
 ]
 
 [env]
-# Nothing yet. When defmt-over-USB lands, DEFMT_LOG goes here.
+# defmt filters at COMPILE time, and with DEFMT_LOG unset the default level is
+# `error` — so `info!` and `debug!` vanish from the binary entirely and the log
+# port stays silent with no hint as to why. Set it explicitly.
+#
+# `debug` rather than `info` because the `lr11xx` driver logs at debug, and that
+# is the whole reason this transport exists. `trace` adds a line per SPI command,
+# which is worth turning on for a specific bring-up problem and painful as a
+# default: DEFMT_LOG=trace cargo run --release --bin usb-cdc
+DEFMT_LOG = "debug"

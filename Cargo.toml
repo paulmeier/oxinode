@@ -13,6 +13,7 @@ members = ["core"]
 
 [dependencies]
 oxinode-core = { path = "core" }
+critical-section = "1.2"
 cortex-m = { version = "0.7.7", features = [
     "inline-asm",
     # Single-core Cortex-M: interrupt-masking is a sufficient critical section.
@@ -34,6 +35,7 @@ embassy-nrf = { version = "0.11", features = [
     "unstable-pac",   # POWER.GPREGRET, for reboot-into-bootloader
 ] }
 embassy-usb = "0.6"
+defmt = "1.0"
 static_cell = "2.1"
 
 [build-dependencies]

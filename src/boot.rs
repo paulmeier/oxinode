@@ -1,6 +1,8 @@
 //! Things that have to happen because we boot from behind a SoftDevice and a
 //! UF2 bootloader rather than from address zero.
 
+// Re-exported so images can report where they were linked; a mismatch with
+// what the bootloader expects is otherwise invisible until nothing boots.
 include!(concat!(env!("OUT_DIR"), "/app_flash_origin.rs"));
 
 /// Point the CPU's vector table at *our* vector table.
