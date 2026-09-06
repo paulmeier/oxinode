@@ -2,8 +2,12 @@
 //!
 //! Currently at step 4: it configures the SPI bus, reports what the peripheral
 //! actually claimed, pulses NRESET and reports what BUSY did about it, asks the
-//! chip what it is, then starts its 32 MHz oscillator off the board's TCXO.
-//! See `docs/phase-3-radio.md` for what each step adds.
+//! chip what it is, starts its 32 MHz oscillator off the board's TCXO, and
+//! tells it which of its own DIOs drive the antenna switch. See
+//! `docs/phase-3-radio.md` for what each step adds.
+//!
+//! **Nothing here transmits.** No carrier, no packet, no antenna port
+//! energised.
 //!
 //! Unlike `usb-cdc`, this image exposes a **single** CDC-ACM port, and it is a
 //! log port. That is not a simplification for its own sake: DTR is only visible
@@ -30,11 +34,11 @@ use embassy_nrf::{bind_interrupts, peripherals, spim};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config as UsbConfig};
-use lr11xx::ops::{Calibrate, TcxoMode, TcxoTune};
+use lr11xx::ops::{Calibrate, RfSwitchConfig, TcxoMode, TcxoTune};
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::{tcxo, ResetVerdict};
+use oxinode_core::lr1121::{rf_switch, tcxo, ResetVerdict};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -235,7 +239,9 @@ async fn main(_spawner: Spawner) {
                                     Err(e) => defmt::error!("lr11xx: GetErrors failed, {}", e),
                                 }
                                 defmt::info!("step 3 done");
-                                start_tcxo(&mut dev).await;
+                                if start_tcxo(&mut dev).await {
+                                    configure_rf_switch(&mut dev).await;
+                                }
                                 radio = Some(dev);
                             }
                             Err(e) => defmt::error!("lr11xx: {}", e),
@@ -278,7 +284,7 @@ async fn main(_spawner: Spawner) {
 /// failure step 2 exists to prevent. A cancelled SPI transaction leaves the
 /// driver in an undefined state, which is why nothing is attempted afterwards
 /// except saying so.
-async fn start_tcxo<S, B>(dev: &mut Lr11xx<S, B>)
+async fn start_tcxo<S, B>(dev: &mut Lr11xx<S, B>) -> bool
 where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
@@ -318,13 +324,19 @@ where
 
     // Generous against a few milliseconds of oscillator startup and
     // calibration, and still far short of a board that has gone quiet.
-    match with_timeout(Duration::from_millis(500), sequence).await {
-        Err(_) => defmt::error!(
-            "tcxo: no reply within 500 ms -- a command left BUSY high and the \
+    let ok = match with_timeout(Duration::from_millis(500), sequence).await {
+        Err(_) => {
+            defmt::error!(
+                "tcxo: no reply within 500 ms -- a command left BUSY high and the \
              driver has no timeout of its own. The radio is now in an unknown \
-             state; reflash rather than trusting anything after this"
-        ),
-        Ok(Err(e)) => defmt::error!("tcxo: {}", e),
+                 state; reflash rather than trusting anything after this"
+            );
+            false
+        }
+        Ok(Err(e)) => {
+            defmt::error!("tcxo: {}", e);
+            false
+        }
         Ok(Ok((errors, temp, vbat, tcxo_us, calib_us))) => {
             if errors.raw_value() == 0 {
                 defmt::info!("tcxo: errors clear -- the 32 MHz oscillator started");
@@ -363,8 +375,57 @@ where
                 tcxo::us_for_steps(tcxo::STARTUP_STEPS),
                 calib_us
             );
+
+            errors.raw_value() == 0 && tcxo::temperature_is_plausible(temp)
         }
-    }
+    };
 
     defmt::info!("step 4 done");
+    ok
+}
+
+/// Step 5: tell the chip which of its own DIOs drive the antenna switch.
+///
+/// This step cannot check itself, and the way it fails is the reason it is
+/// worth being careful about. A wrong configuration produces a clean `TxDone`
+/// while nothing reaches the connector: the chip is doing exactly what it was
+/// told, and what it was told is a fact about copper it cannot see. The only
+/// instrument that can disagree is a receiver, which is step 7a.
+///
+/// So all this reports is that the command was accepted, and it says so in
+/// those words rather than in words that sound like success.
+async fn configure_rf_switch<S, B>(dev: &mut Lr11xx<S, B>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let masks = rf_switch::BASE_DUO;
+    let raw = masks.to_raw();
+
+    defmt::info!(
+        "rfsw: enable {=u8:#04x}, standby {=u8:#04x}, rx {=u8:#04x}, tx {=u8:#04x}, tx_hp {=u8:#04x}, tx_hf {=u8:#04x} (word {=u64:#018x})",
+        masks.enable,
+        masks.standby,
+        masks.rx,
+        masks.tx,
+        masks.tx_hp,
+        masks.tx_hf,
+        raw
+    );
+
+    // Built from the packed word rather than through `RfSwitchConfig`'s
+    // builder: the builder has no field for bits 16..=23, the high-frequency TX
+    // state. See `oxinode_core::lr1121::rf_switch` for why that is harmless
+    // here and would not be on a different board.
+    let cfg = RfSwitchConfig::new_with_raw_value(raw);
+
+    match with_timeout(Duration::from_millis(200), dev.set_dio_as_rf_switch(cfg)).await {
+        Err(_) => defmt::error!("rfsw: no reply within 200 ms; the radio is in an unknown state"),
+        Ok(Err(e)) => defmt::error!("rfsw: {}", e),
+        Ok(Ok(_)) => defmt::info!(
+            "rfsw: command accepted -- which is NOT proof that anything reaches the antenna. A wrong switch mask gives a clean TxDone into a dead port. Only step 7a, on an SDR, can tell the difference"
+        ),
+    }
+
+    defmt::info!("step 5 done");
 }

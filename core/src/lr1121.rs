@@ -10,8 +10,11 @@
 //!   that is not working.
 //! * [`tcxo`] — the oscillator startup delay, and what a temperature reading
 //!   has to look like to be believed.
+//! * [`rf_switch`] — which DIOs drive the antenna switch, and what each does
+//!   in each mode.
 
 pub mod reset;
+pub mod rf_switch;
 pub mod tcxo;
 pub mod version;
 

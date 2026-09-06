@@ -336,12 +336,12 @@ recurring cost on XOSC startup rather than an unused safety margin, which is why
 the constant stays at the 5 ms every reference implementation uses and the
 margin goes on the evidence instead.
 
-### 5. RF switch
+### 5. RF switch — configured, unproven
 
 `set_dio_as_rf_switch` is the equivalent of RadioLib's
 `LR11X0_DIO_AS_RF_SWITCH`. It tells the chip which of **its own** DIOs (DIO5,
 DIO6, DIO7, DIO8, DIO10) drive the antenna switch, and what state each should
-take in standby / RX / TX / TX-high-power / GNSS / WiFi.
+take in standby / RX / TX / TX-high-power / TX-high-frequency / GNSS / WiFi.
 
 The mask values are board-specific, and this board's are known. Only **DIO5 and
 DIO6** are used:
@@ -362,12 +362,41 @@ all. The schematic gives the sub-GHz output its own SMA connector and the
 2.4 GHz output a separate u.FL, so the switch only ever arbitrates the sub-GHz
 RX/TX pair.
 
-**This step still cannot be validated on its own.** A wrong switch
-configuration produces a clean `TxDone` while nothing reaches the antenna. That
-is the entire reason step 7 requires an SDR — knowing the table is not the same
-as having sent the command correctly.
+That table packs to `0x0300_0102_0200_0000`, and the packing lives in
+`oxinode_core::lr1121::rf_switch` with tests that pin every byte to its own
+field. The masks are a property of the copper, not of the chip; there is
+nothing to discover them from and nothing to check them against, which is
+exactly why they are written down once and asserted rather than assembled at
+the call site.
 
-*Done when:* the command is accepted. Real validation is deferred to step 7.
+*Done when:* the command is accepted. **Accepted, on hardware:**
+
+```
+INFO  rfsw: enable 0x03, standby 0x00, rx 0x01, tx 0x02, tx_hp 0x02, tx_hf 0x00
+      (word 0x0300010202000000)
+INFO  rfsw: command accepted -- which is NOT proof that anything reaches the antenna
+```
+
+**This step still cannot be validated on its own.** A wrong switch
+configuration produces a clean `TxDone` while nothing reaches the antenna: the
+chip does exactly what it was told, and what it was told is a fact about copper
+it cannot see. That is the entire reason step 7 requires an SDR — knowing the
+table is not the same as having sent the command correctly.
+
+#### `lr11xx` cannot express the high-frequency TX state
+
+`RfSwitchConfig` maps bits 56..=63 (enable), 48..=55 (standby), 40..=47 (rx),
+32..=39 (tx), 24..=31 (tx_hp), 8..=15 (gnss) and 0..=7 (wifi). **Bits 16..=23 —
+the high-frequency TX state — have no field.** A configuration assembled
+through the crate's builder leaves that byte zero with no way to say otherwise.
+
+On this board that is harmless, and harmless by coincidence rather than by
+design: the 2.4 GHz output bypasses the switch, so its correct state *is*
+all-low. A board that routed 2.4 GHz through the same switch could not be
+configured with this crate at all. oxinode therefore packs the word itself and
+passes it via `RfSwitchConfig::new_with_raw_value`, which keeps the coincidence
+visible instead of load-bearing — and matters directly here, since this board
+is meant to use its 2.4 GHz path.
 
 ### 6. Interrupts
 
