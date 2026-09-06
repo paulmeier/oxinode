@@ -243,7 +243,7 @@ async fn main(_spawner: Spawner) {
                                     Err(e) => defmt::error!("lr11xx: GetErrors failed, {}", e),
                                 }
                                 defmt::info!("step 3 done");
-                                if start_tcxo(&mut dev).await {
+                                if start_tcxo(&mut dev, tcxo::TUNE_3V0, true).await {
                                     configure_rf_switch(&mut dev).await;
                                 }
                                 radio = Some(dev);
@@ -270,13 +270,16 @@ async fn main(_spawner: Spawner) {
 /// failure step 2 exists to prevent. A cancelled SPI transaction leaves the
 /// driver in an undefined state, which is why nothing is attempted afterwards
 /// except saying so.
-async fn start_tcxo<S, B>(dev: &mut Lr11xx<S, B>) -> bool
+async fn start_tcxo<S, B>(dev: &mut Lr11xx<S, B>, tune_code: u8, use_tcxo: bool) -> bool
 where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
+    let millivolts = tcxo::tune_millivolts(tune_code).unwrap_or(0);
     defmt::info!(
-        "tcxo: 3.0 V, delay {=u32} steps ({=u32} us at 30.52 us per step)",
+        "tcxo: tune code {=u8:#04x} = {=u16} mV, delay {=u32} steps ({=u32} us at 30.52 us per step)",
+        tune_code,
+        millivolts,
         tcxo::STARTUP_STEPS,
         tcxo::us_for_steps(tcxo::STARTUP_STEPS)
     );
@@ -290,9 +293,19 @@ where
         let started = Instant::now();
         let cfg = TcxoMode::builder()
             .with_delay(u24::new(tcxo::STARTUP_STEPS))
-            .with_tune(TcxoTune::V3p0)
+            .with_tune(tune_from_code(tune_code))
             .build();
-        dev.set_tcxo_mode(cfg).await?;
+        // Skippable on purpose. The module's reference oscillator starts at
+        // every supply voltage `SetTcxoMode` can select, from 1.6 V to 3.3 V,
+        // with no measurable effect on frequency -- which is not how a TCXO fed
+        // from DIO3 would behave. So the question becomes whether the chip
+        // needs to be told about an external oscillator at all, or whether
+        // there is a crystal here being driven in the wrong mode.
+        if use_tcxo {
+            dev.set_tcxo_mode(cfg).await?;
+        } else {
+            defmt::info!("tcxo: SKIPPED -- letting the chip drive a crystal instead");
+        }
         let tcxo_us = started.elapsed().as_micros() as u32;
 
         // The calibrations that ran at boot did so without a working 32 MHz
@@ -447,7 +460,7 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot radio, ? = status, b = bootloader",
+        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, ? = status, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
         CW_LEVELS[2],
@@ -457,6 +470,7 @@ where
 
     let mut buf = [0u8; 64];
     let mut cw_until: Option<Instant> = None;
+    let mut tune_code = tcxo::TUNE_3V0;
     let mut ticks: u32 = 0;
 
     loop {
@@ -511,7 +525,30 @@ where
                         b'r' => {
                             if let Some(dev) = radio.as_mut() {
                                 cw_until = None;
-                                reinit(dev).await;
+                                reinit(dev, tune_code, true).await;
+                            }
+                        }
+                        // Restart the radio WITHOUT telling it there is an
+                        // external oscillator, so the chip tries to drive a
+                        // crystal instead. If the oscillator starts anyway,
+                        // TCXO mode was never the right configuration.
+                        b'x' => {
+                            if let Some(dev) = radio.as_mut() {
+                                cw_until = None;
+                                reinit(dev, tune_code, false).await;
+                            }
+                        }
+                        // Step to the next TCXO supply voltage and restart the
+                        // radio on it. The transmitter is 73 ppm low, which is
+                        // far outside what a TCXO should do, and 3.0 V was
+                        // taken from the plan rather than from the board -- so
+                        // the voltage is swept against a receiver instead of
+                        // being assumed.
+                        b'g' => {
+                            if let Some(dev) = radio.as_mut() {
+                                cw_until = None;
+                                tune_code = (tune_code + 1) % tcxo::TUNE_CODES.len() as u8;
+                                reinit(dev, tune_code, true).await;
                             }
                         }
                         // The frequency-error experiment. The receiver stays
@@ -710,7 +747,7 @@ where
 /// persist until the radio is reset, so once an experiment has succeeded every
 /// later experiment succeeds too — for the wrong reason. Without a way back to
 /// a virgin chip, a bisect measures nothing.
-async fn reinit<S, B>(dev: &mut Lr11xx<S, B>)
+async fn reinit<S, B>(dev: &mut Lr11xx<S, B>, tune_code: u8, use_tcxo: bool)
 where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
@@ -731,8 +768,25 @@ where
     // speaking to it again.
     Timer::after(Duration::from_millis(300)).await;
 
-    if start_tcxo(dev).await {
+    if start_tcxo(dev, tune_code, use_tcxo).await {
         configure_rf_switch(dev).await;
     }
     defmt::info!("reinit: back to the step 5 state");
+}
+
+/// Map a `SetTcxoMode` tune code to the crate's enum.
+///
+/// The codes are the chip's and are dense from 0 to 7; `oxinode_core` holds the
+/// table and tests that it stays that way, so this is only the translation.
+fn tune_from_code(code: u8) -> TcxoTune {
+    match code {
+        0x00 => TcxoTune::V1p6,
+        0x01 => TcxoTune::V1p7,
+        0x02 => TcxoTune::V1p8,
+        0x03 => TcxoTune::V2p2,
+        0x04 => TcxoTune::V2p4,
+        0x05 => TcxoTune::V2p7,
+        0x07 => TcxoTune::V3p3,
+        _ => TcxoTune::V3p0,
+    }
 }

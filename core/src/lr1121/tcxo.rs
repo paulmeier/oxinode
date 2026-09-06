@@ -23,8 +23,55 @@
 /// 80 µs.
 pub const STEP_NS: u32 = 30_520;
 
-/// `tune` code for a 3.0 V TCXO supply — what this board fits.
+/// `tune` code for a 3.0 V TCXO supply.
+///
+/// **Chosen from the phase-3 plan, not from the board.** Nobody has established
+/// what the Base Duo's TCXO actually wants, and the transmitter is 73 ppm low —
+/// far outside what a TCXO should manage, which points at it being driven wrong
+/// rather than at a bad part. See [`TUNE_CODES`].
 pub const TUNE_3V0: u8 = 0x06;
+
+/// Every supply voltage `SetTcxoMode` can select, in the order the chip codes
+/// them, with the voltage in millivolts.
+///
+/// Kept because the sweep is worth repeating on another board, and because the
+/// result was not the expected one.
+///
+/// **Swept, and the voltage makes no difference.** The oscillator starts at
+/// every code from 1.6 V to 3.3 V, and the transmit frequency across all eight
+/// varied by 902 Hz — every hertz of which was warm-up drift, not voltage: a
+/// control run holding 3.0 V for all eight measurements produced an 811 Hz
+/// spread with the same shape, correlating with the sweep at +0.992. The 1.6 V
+/// point, measured last, sits at the *top* of the trend rather than back down
+/// beside 1.7 V.
+///
+/// An oscillator indifferent to its own supply is not being fed by it, so DIO3
+/// is not powering this one. `SetTcxoMode` is still required — without it the
+/// oscillator does not start at all and `hf_xosc_start` latches — so what the
+/// command achieves here is telling the chip to expect an external clock rather
+/// than drive a crystal.
+pub const TUNE_CODES: [(u8, u16); 8] = [
+    (0x00, 1600),
+    (0x01, 1700),
+    (0x02, 1800),
+    (0x03, 2200),
+    (0x04, 2400),
+    (0x05, 2700),
+    (0x06, 3000),
+    (0x07, 3300),
+];
+
+/// The supply voltage a `tune` code selects, in millivolts.
+pub const fn tune_millivolts(code: u8) -> Option<u16> {
+    let mut i = 0;
+    while i < TUNE_CODES.len() {
+        if TUNE_CODES[i].0 == code {
+            return Some(TUNE_CODES[i].1);
+        }
+        i += 1;
+    }
+    None
+}
 
 /// How long the LR1121 is given for its 32 MHz oscillator to start.
 ///
@@ -78,6 +125,32 @@ const _: () = assert!(
     "a zero delay disables TCXO mode rather than configuring it"
 );
 
+/// How far the reference drifts with die temperature, in ppm per °C.
+///
+/// **Measured, roughly, and the roughness is the point.** Eight identical
+/// carrier bursts at a fixed TCXO supply, over 25 s of warm-up: the die went
+/// from 18.85 °C to 20.01 °C and the carrier moved +787 Hz at 913.7 MHz. That
+/// is ≈0.65 ppm/°C, from 1.2 °C of range read by a sensor quantised at
+/// 0.39 °C — an order of magnitude, not a specification.
+///
+/// The order of magnitude is enough. A TCXO holds ±0.5 to ±2 ppm across its
+/// *entire* rated temperature range, call it 0.03 ppm/°C. This part is roughly
+/// twenty times worse, which is uncompensated-crystal behaviour.
+///
+/// The practical consequence: the 73 ppm the transmitter is out by cannot be
+/// dismissed as a one-off trim. A static correction would fix the bulk of it,
+/// but the residual moves with temperature, so anything relying on it needs to
+/// know that.
+pub const MEASURED_TEMPCO_PPM_PER_C: f32 = 0.65;
+
+// The whole reason this constant is recorded: it is far outside TCXO territory.
+// If it ever drops to something a TCXO could manage, the measurement behind it
+// has been replaced by an assumption.
+const _: () = assert!(
+    MEASURED_TEMPCO_PPM_PER_C > 0.1,
+    "a reference this stable would be a TCXO, and the bench board's is not"
+);
+
 /// Coldest die temperature worth believing from a board on a bench.
 pub const PLAUSIBLE_MIN_C: f32 = -20.0;
 /// Warmest die temperature worth believing from a board on a bench.
@@ -115,6 +188,27 @@ mod tests {
 
     /// The number the crate and the reference implementations use for 5 ms, so
     /// this conversion agreeing with them is worth pinning.
+    /// The codes are the chip's, so their order and values are not ours to
+    /// choose. Pinned because a sweep that mislabels which voltage it applied
+    /// produces a confident and completely wrong conclusion.
+    #[test]
+    fn the_tune_codes_are_dense_ordered_and_correctly_labelled() {
+        for (i, (code, mv)) in TUNE_CODES.iter().enumerate() {
+            assert_eq!(*code as usize, i, "codes must be 0..8 in order");
+            assert_eq!(tune_millivolts(*code), Some(*mv));
+        }
+        let volts: Vec<u16> = TUNE_CODES.iter().map(|(_, mv)| *mv).collect();
+        let mut sorted = volts.clone();
+        sorted.sort_unstable();
+        assert_eq!(volts, sorted, "voltages must rise with the code");
+        assert_eq!(tune_millivolts(0x08), None);
+    }
+
+    #[test]
+    fn the_default_tune_is_three_volts_and_is_in_the_table() {
+        assert_eq!(tune_millivolts(TUNE_3V0), Some(3000));
+    }
+
     #[test]
     fn five_milliseconds_is_the_familiar_164_steps() {
         assert_eq!(steps_for_us(5_000), 164);

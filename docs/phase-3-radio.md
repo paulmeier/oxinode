@@ -457,13 +457,70 @@ drift-bracketed F2−F1 error difference:  -117.3 Hz +/- 0.8  (n=20)
 **Transmitter −73.3 ± 0.5 ppm. Receiver −1.4 ppm.** The RTL-SDR is essentially
 correct — unsurprising in hindsight, since NooElec fits a TCXO to these.
 
-That is a problem rather than a curiosity. 73 ppm is 67 kHz at 915 MHz, over
-half a 125 kHz LoRa channel, and it is far outside what a TCXO should manage —
-which points at the TCXO not being driven as it expects rather than at a bad
-part. Candidates, none tested: the `SetTcxoMode` tune voltage (3.0 V was chosen
-from the plan, and the board's part may want another), and the LR11x0's crystal
-trimming registers. Recorded as `MEASURED_TX_ERROR_PPM`, with a compile-time
-assertion so the magnitude cannot quietly shrink in someone's reasoning.
+That is a problem rather than a curiosity: 73 ppm is 67 kHz at 915 MHz, over
+half a 125 kHz LoRa channel. Recorded as `MEASURED_TX_ERROR_PPM`, with a
+compile-time assertion so the magnitude cannot quietly shrink in someone's
+reasoning.
+
+#### It is not the TCXO supply voltage, and it is not a mis-driven crystal
+
+Two hypotheses, both tested, both wrong.
+
+**The `SetTcxoMode` tune voltage.** oxinode used 3.0 V because the plan said so,
+not because anyone checked the part. Sweeping all eight codes — 1.6 V through
+3.3 V — with a carrier measured on each: the oscillator **starts at every one**,
+and the transmit frequency across all eight varied by 902 Hz.
+
+That 902 Hz is not a voltage effect. It is warm-up drift, and the giveaway is in
+the ordering: the codes are stepped 1.7, 1.8, 2.2, 2.4, 2.7, 3.0, 3.3, 1.6, and
+the frequency rises monotonically through that sequence — so 1.6 V, measured
+last, sits at the *top* of the trend rather than back beside 1.7 V. A control
+run holding 3.0 V for all eight measurements, with identical timing, produced an
+811 Hz spread of the same shape, **correlating with the sweep at +0.992**.
+
+An oscillator indifferent to its own supply is not being fed by it: DIO3 is not
+powering this one.
+
+**A crystal being driven in the wrong mode.** If the module carried a plain
+crystal, putting the chip in TCXO mode would run it as a single-ended clock
+input and could easily cost tens of ppm. Testing it is one command: restart the
+radio and skip `SetTcxoMode`.
+
+```
+INFO  tcxo: SKIPPED -- letting the chip drive a crystal instead
+INFO  cw: after set_tx_cw -- ... ErrorStat { hf_xosc_start }
+ERROR cw: chip is NOT in Tx; nothing is radiating
+```
+
+Without `SetTcxoMode` the oscillator does not start at all. There is a genuine
+external oscillator, and telling the chip about it is the right configuration —
+what the command achieves here is "expect an external clock", not "supply it".
+
+#### What is left: the reference itself, and it is not TCXO-grade
+
+Eliminating both leaves the module's own 32 MHz reference running ~73.5 ppm low,
+externally powered, with `SetTcxoMode` correctly telling the chip it exists.
+
+The control run also gives a temperature coefficient, for free. Over 25 s of
+warm-up the die went 18.85 → 20.01 °C and the carrier moved +787 Hz at
+913.7 MHz: **≈0.65 ppm/°C**. That is a rough number — 1.2 °C of range read by a
+sensor quantised at 0.39 °C — but the order of magnitude is the finding. A TCXO
+holds ±0.5 to ±2 ppm across its *entire* rated range, around 0.03 ppm/°C. This
+part is some twenty times worse, which is uncompensated-crystal behaviour.
+
+So the working conclusion is that the reference is not the TCXO the plan assumed
+it was. That matters for how phase 5 should respond:
+
+* a **static correction** — pre-distorting the commanded frequency by +73.5 ppm
+  — would remove the bulk of the error and is one line, but leaves a residual
+  that moves with temperature;
+* the drift measured here is ~1 ppm over a 1.2 °C warm-up, so across a real
+  outdoor range the residual would be far larger than the LoRa margin a static
+  correction buys back.
+
+Neither is a decision to take here. What is established is that no amount of
+configuration fixes this: the tune voltage does nothing, and the chip is already
+being told the truth about its oscillator.
 
 #### `lr11xx` cannot express the high-frequency TX state
 

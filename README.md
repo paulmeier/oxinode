@@ -76,7 +76,13 @@ interrupt handling yet.
 chopping between two carriers inside a single capture separates the
 transmitter's clock error from the receiver's, and puts −73.3 ± 0.5 ppm on the
 LR1121 and −1.4 ppm on the SDR. At 915 MHz that is 67 kHz — over half a 125 kHz
-LoRa channel — and it has to be understood before phase 5. There is no KISS framing and no display code
+LoRa channel — and it has to be understood before phase 5.
+
+It is **not** the TCXO supply voltage (swept all eight codes; the oscillator
+starts on every one and the frequency does not care) and **not** a crystal being
+driven in the wrong mode (without `SetTcxoMode` the oscillator does not start at
+all). What is left is the module's own reference, which also drifts ≈0.65 ppm/°C
+— roughly twenty times a TCXO's stability, so it probably is not one. There is no KISS framing and no display code
 either: not stubbed, not half-written, absent.
 
 ## Hardware
