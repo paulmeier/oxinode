@@ -479,7 +479,7 @@ where
         "console config: S = spreading factor, W = bandwidth, C = coding rate, P = power, [ / ] = frequency -/+ 100 kHz, R = reference correction, N = sync word, M = Meshtastic LongFast preset, D = oxinode default, A = apply, ? = show"
     );
     defmt::info!(
-        "console radio: p = send a packet, y = listen 20 s (h/i = -60/+60 kHz), z = frequency sweep"
+        "console radio: p = send a packet, y = listen 20 s (h/i = -60/+60 kHz), z = coarse frequency sweep, E = fine sweep of the window's upper edge"
     );
 
     let mut buf = [0u8; 64];
@@ -623,9 +623,14 @@ where
                                 .await;
                             }
                         }
-                        b'z' => {
+                        b'z' | b'E' => {
                             cw_until = None;
-                            rx_sweep(radio.as_mut(), irq, &cfg).await;
+                            let plan = if byte == b'z' {
+                                SWEEP_COARSE
+                            } else {
+                                SWEEP_EDGE
+                            };
+                            rx_sweep(radio.as_mut(), irq, &cfg, plan).await;
                         }
                         // The configuration editor. Each key cycles one
                         // parameter and prints the result; nothing reaches the
@@ -1197,6 +1202,16 @@ where
     let Some(shifted) = validate(&shifted) else {
         return 0;
     };
+    // Always, even when the caller is a sweep and wants one line per step. A
+    // sweep whose steps are labelled only by their offset is trusting that the
+    // offset reached the chip, which is the one thing the sweep exists to
+    // establish about everything else.
+    defmt::info!(
+        "rx: tuned {=u32} Hz wanted, {=u32} Hz commanded (offset {=i32} Hz)",
+        shifted.frequency_hz,
+        shifted.commanded_frequency_hz(),
+        offset_hz
+    );
     if verbose {
         log_config(&shifted);
     }
@@ -1263,6 +1278,7 @@ async fn rx_sweep<S, B>(
     dev: Option<&mut Lr11xx<S, B>>,
     irq: &mut radio::RadioIrq<'_>,
     config: &RadioConfig,
+    plan: SweepPlan,
 ) where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
@@ -1272,32 +1288,88 @@ async fn rx_sweep<S, B>(
     };
     log_config(&valid);
     defmt::info!(
-        "sweep: 13 steps of {=i32} Hz, 8 s each; keep the peer transmitting",
-        SWEEP_STEP_HZ
+        "sweep: {=u32} steps of {=i32} Hz from {=i32} Hz, {=u64} s each; keep the peer transmitting",
+        plan.steps,
+        plan.step_hz,
+        plan.start_hz,
+        plan.dwell_s
     );
     if valid.correct_reference {
         defmt::info!(
-            "sweep: the correction is ON, so against another nRFLR1121 the window should sit near {=i32} Hz, not 0",
+            "sweep: the correction is ON, so against another nRFLR1121 every edge should sit {=i32} Hz lower than with it off",
             -reference::correction_hz(valid.frequency_hz)
         );
     } else {
-        defmt::info!("sweep: the correction is OFF, so the window should sit near 0");
+        defmt::info!(
+            "sweep: the correction is OFF, so this is the baseline the other run moves against"
+        );
     }
-    for step in -6i32..=6 {
-        let offset = step * SWEEP_STEP_HZ;
-        let heard = rx_listen(dev, irq, &valid, offset, Duration::from_secs(8), false).await;
+    for step in 0..plan.steps {
+        let offset = plan.start_hz + step as i32 * plan.step_hz;
+        let heard = rx_listen(
+            dev,
+            irq,
+            &valid,
+            offset,
+            Duration::from_secs(plan.dwell_s),
+            false,
+        )
+        .await;
         defmt::info!("sweep: {=i32} Hz -> {=u32} packets", offset, heard);
     }
     defmt::info!("sweep: done");
 }
 
-/// How far apart the sweep's steps are, in hertz.
+/// Where a sweep starts, how far it steps, and for how long.
+#[derive(Clone, Copy)]
+struct SweepPlan {
+    start_hz: i32,
+    step_hz: i32,
+    steps: u32,
+    dwell_s: u64,
+}
+
+/// The reconnaissance sweep: ±700 kHz in 100 kHz steps.
 ///
-/// 40 kHz across thirteen steps covers ±240 kHz, which brackets both the
-/// ±120 kHz window phase 3 measured at SF11/250 kHz and the 67 kHz the
-/// correction is expected to move it by. Coarse enough that a run takes under
-/// two minutes and fine enough that a 67 kHz shift is not a rounding error.
-const SWEEP_STEP_HZ: i32 = 40_000;
+/// Phase 3 swept ±240 kHz in 40 kHz steps and found both edges inside it. On
+/// this bench it no longer does — the boards have moved apart, the peer arrives
+/// at −69 dBm rather than −45 dBm, and the window is wider than ±300 kHz. That
+/// is a fact about how much frequency error a LoRa receiver tolerates when it
+/// has 60 dB of margin over its sensitivity, and it means a sweep that assumes
+/// phase 3's answer measures nothing.
+///
+/// So this one is for finding where the edges *are*. [`SWEEP_EDGE`] is for
+/// measuring one once it has been found.
+const SWEEP_COARSE: SweepPlan = SweepPlan {
+    start_hz: -700_000,
+    step_hz: 100_000,
+    steps: 15,
+    dwell_s: 8,
+};
+
+/// The fine sweep: the window's upper edge, in 20 kHz steps.
+///
+/// The coarse sweep cannot answer phase 4's question. LoRa's frequency
+/// tolerance at SF11 and 250 kHz is wider than the 67 kHz correction, so both
+/// runs receive at every offset in the middle and the tables come out looking
+/// identical. What moves is not whether the middle works — it is where the
+/// window *ends*.
+///
+/// So this sweeps only the upper edge, at a fifth of the reconnaissance step.
+/// The prediction has a sign and a magnitude: with the correction on, the edge
+/// must sit 66.5 kHz *lower*, because the correction moves this board away from
+/// a peer that carries the same error. An edge that does not move, or moves the
+/// other way, falsifies the correction rather than being explained away.
+///
+/// The range starts at +200 kHz because that is where the reconnaissance sweep
+/// put the edge: alive at +300 kHz and dead at +400 kHz with the correction
+/// off. Sweeping the middle of a window measures nothing.
+const SWEEP_EDGE: SweepPlan = SweepPlan {
+    start_hz: 200_000,
+    step_hz: 20_000,
+    steps: 13,
+    dwell_s: 8,
+};
 
 /// Apply one console key to the configuration.
 ///

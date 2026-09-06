@@ -51,3 +51,221 @@ Two consequences follow from *one at a time*, and both shape the design:
    exercised against real hardware rather than argued about.
 5. **Hardware validation** — the acceptance tests, on the bench, against the
    second board.
+
+---
+
+## Step 1 — `RadioConfig`
+
+`oxinode_core::lr1121::config`. Two types, because a host holds invalid
+configurations as a matter of course:
+
+* `RadioConfig` is plain data with no invariants — the thing a host mutates one
+  field at a time.
+* `ValidConfig` can only be built by passing `check()`, and is the only thing
+  the modem accepts. "Did anybody validate this?" becomes a question the
+  compiler answers rather than one for code review.
+
+`check()` names each limit separately — `FrequencyOutOfBand`,
+`UnsupportedBandwidth`, `SpreadingFactorOutOfRange`, `CodingRateOutOfRange`,
+`PowerAboveModuleRating`, `PowerUnreachable`, `PreambleTooShort` — because a
+host on the far end of a serial line has nothing else to go on. A single
+"invalid" would be unactionable.
+
+What it deliberately does *not* check is whether an RNode host could express
+the configuration. SF5 and SF6 are outside the protocol's 7–12 and are still
+valid here: what the chip can do and what a protocol can say are separate
+questions, and conflating them would make the bench console unable to reach
+hardware that works. `is_rnode_representable()` answers the other question.
+
+### The coding rate is the one that would have been silent
+
+The host's coding rate is the denominator of 4/n, so 5 to 8. The chip's is 1 to
+4. Passing the host's number straight through does not produce an error — it
+selects `CodingRate::Long45` through `Long48`, the **long interleaver** at the
+wrong rate. The radio would transmit happily and nothing else would hear it.
+`coding_rate_code` and its inverse are tested in both directions.
+
+### Power
+
+`pa::pa_config_for` picks a PA. It prefers the low-power one throughout its
+range, including the −9 to +14 dBm it shares with the high-power one, and that
+preference is a decision rather than arithmetic: the low-power PA draws less,
+and it is the only one this project has ever measured. Phase 3 keyed carriers
+at −17, 0 and +14 dBm and watched them on an SDR; nothing has ever come out of
+the high-power PA on this board.
+
+Above 14 dBm the internal regulator cannot supply the PA, so `pa::high_power`
+switches to VBAT at exactly that boundary. Getting this wrong is not an error
+the chip reports — it is a brown-out. The pre-existing `HIGH_POWER` constant
+hard-codes the internal regulator because it was written as a one-off
+diagnostic, which is why a layer taking an arbitrary power could not use it.
+
+Nothing clamps. A host that asks for 21 dBm is refused, not quietly given 20:
+a clamp is a lie that the host cannot detect.
+
+## Step 2 — the 73 ppm correction
+
+`oxinode_core::lr1121::reference`. Phase 3 measured this board's transmitter at
+−73.3 ppm and then proved the number belongs to the module rather than the
+board, so the error is a stable property of the part and cancelling it is
+arithmetic rather than a workaround.
+
+It is carried in **tenths of a ppm as an integer**. The measurement has a tenth
+of a ppm of resolution and the correction is not a whole number of ppm; a float
+would be a different number on the host than on the target, for no benefit, at
+a frequency near 2³⁰ where that difference is tens of hertz.
+
+The first-order form (`f × (1 + p)` rather than `f / (1 − p)`) is used
+deliberately. The two differ by 5 parts per billion — 5 Hz at 915 MHz — against
+a measurement uncertainty of 0.5 ppm, or 460 Hz. That is an approximation two
+orders of magnitude below the noise, not a shortcut.
+
+**Whether to apply it is a configuration field, not a constant.** Corrected,
+this board is right in absolute terms and 73 ppm away from every other
+nRFLR1121 — including the second Base Duo on the bench. Uncorrected, it is
+wrong in absolute terms and agrees with them exactly. Which is right depends on
+who is listening, and the firmware is not entitled to decide that. The default
+is corrected, because an RNode's peers are other RNodes.
+
+The compile-time assertions check the round trip: correcting 902, 915 and
+928 MHz and then applying the measured error must land back within 100 Hz.
+
+## Step 3 — `Modem`
+
+`src/modem.rs`. One `apply`, one `transmit`, one `start_rx`/`receive`. It takes
+a `ValidConfig` and nothing else.
+
+Both of phase 3's hard-won habits are kept, and both are load-bearing:
+
+* **Every await is bounded and named.** `lr11xx` waits on BUSY with no timeout,
+  so a command that leaves BUSY high hangs the driver, and on a board with no
+  debug probe a hang and a crash look identical. `ModemError::Timeout` carries
+  which step expired.
+* **Every sequence ends by asking for a status.** The LR11xx protocol returns
+  the status of the *previous* command, so a driver returning `Ok` has told you
+  about the command before the one you care about.
+
+Two failures phase 3 got right by hand are now structural:
+
+* `transmit` returns `WrongInterrupt` rather than a report when something other
+  than `TxDone` fired. That is precisely the case a bare timeout on the
+  interrupt line reports as success.
+* The chip's transmit timeout **saturates** at the field's 24-bit width rather
+  than wrapping. Three airtimes at SF12 and 62.5 kHz is over eight minutes and
+  does not fit; a wrap would have become a few-millisecond timeout on the
+  slowest configuration the chip offers — a transmitter that gives up mid-packet
+  only at the settings nobody tests.
+
+`SetPacketType` still goes first and is still not optional. Phase 3 spent a
+bisection establishing that, against documentation which says otherwise.
+
+## Step 4 — the console
+
+The bring-up image now holds a configuration instead of constants. `S`, `W`,
+`C` and `P` cycle spreading factor, bandwidth, coding rate and power; `[` and
+`]` step the frequency by 100 kHz, saturating at the band edges rather than
+wrapping; `R` toggles the reference correction; `N` switches sync word between
+the private-network `0x12` and Meshtastic's `0x2b`; `M` loads the peer board's
+LongFast settings and `D` the default; `A` applies without transmitting.
+
+Cycling rather than typing, because this console reads raw bytes off a serial
+port with no line editing, and a key that always does something is easier to
+use and much easier to read back in a log.
+
+An invalid intermediate state is **kept and reported**, not reverted. A host
+setting one parameter at a time is entitled to hold one.
+
+Every step of a sweep logs the frequency it actually tuned to. A sweep whose
+steps are labelled only by their offset is assuming the offset reached the chip,
+which is the one thing the sweep exists to establish about everything else.
+
+## Step 5 — what the hardware says
+
+### The configuration reaches the chip, and every parameter matters
+
+Configured at runtime to the peer's channel by pressing `M`, then `y`:
+
+```
+config: 906875000 Hz wanted, 906875000 Hz commanded (uncorrected), SF11 BW250000 CR4/5, 14 dBm
+config: preamble 16, sync 0x2b, crc true, explicit header, 1074 bps, 354304 us airtime for 16 bytes
+rx: PACKET 1: 37 bytes, RSSI -69 dBm, SNR 12 dB
+rx: bytes [ff, ff, ff, ff, 5c, a1, 3d, ba, ...]
+rx: done at 0 Hz offset -- 9 packets
+```
+
+Nine real Meshtastic packets from `0xba3da15c`, reached entirely by keys at
+runtime rather than by a rebuild.
+
+Two negative controls, both from the same starting point:
+
+| change | packets |
+|---|---|
+| none | 9 |
+| SF11 → SF12 (one press of `S`) | **0** |
+| sync `0x2b` → `0x12` (one press of `N`) | **0** |
+
+and a third: tuned 2 MHz away with twenty presses of `[`, **0 packets**; back
+at 906.875 MHz, **9 packets**. So spreading factor, sync word and frequency each
+demonstrably reach the chip. Without these, "it received something" is equally
+consistent with a configuration layer that does nothing at all.
+
+### The airtime prediction tracks the configuration
+
+Four configurations, four transmissions, `TxDone` timed against the airtime
+computed from the configuration:
+
+| SF | BW | CR | computed | measured | difference |
+|---|---|---|---|---|---|
+| 8 | 125 kHz | 4/5 | 92,672 µs | 93,109 µs | +437 µs |
+| 10 | 125 kHz | 4/5 | 329,728 µs | 330,169 µs | +441 µs |
+| 10 | 250 kHz | 4/5 | 164,864 µs | 165,313 µs | +449 µs |
+| 10 | 250 kHz | 4/8 | 214,016 µs | 214,477 µs | +461 µs |
+
+The residual is not merely small — it is **constant** across a 3.5× range of
+airtimes. A fixed 440–460 µs is what the `SetTx` transaction, the PLL lock and
+the PA ramp cost; a wrong symbol-time formula would scale with the airtime and
+a wrong coding-rate translation would move between rows. Neither does. That is
+a much stronger statement than "within tolerance".
+
+### The frequency correction moves the receive window, in the predicted direction
+
+This is the phase 3 open item, and it needed care, because the instrument phase
+3 used for it — the SDR, good to 0.5 ppm — has been removed from the bench.
+
+What is left is the peer board, and the peer board is a blunt instrument here.
+Phase 3 measured a reception window of ±120 kHz at SF11/250 kHz; on this bench
+the peer now arrives at −69 dBm rather than −45 dBm and the window is wider
+than ±300 kHz. That is not a contradiction — a LoRa receiver with 60 dB of
+margin over its sensitivity tolerates far more frequency error than one at the
+limit — but it does mean a sweep built on phase 3's numbers measures nothing,
+because every offset in the middle receives in both configurations.
+
+So: find the edges first. A reconnaissance sweep of ±700 kHz in 100 kHz steps,
+then the same sweep three times as **off / on / off**, so that drift shows up
+as a difference between the two runs that share a setting.
+
+| offset (kHz) | −700 | −600 | −500 | −400 | −300 | −200 | −100 | 0 | +100 | +200 | +300 | +400 | +500 | +600 | +700 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| correction **off** | 0 | 0 | 0 | 0 | 1 | 0 | 3 | 4 | 4 | 3 | 2 | 0 | 0 | 0 | 0 |
+| correction **on** | 0 | 0 | 0 | 1 | 2 | **4** | 3 | 3 | 2 | 2 | **0** | 0 | 0 | 0 | 0 |
+| correction **off** | 0 | 0 | 0 | 0 | 2 | 0 | 4 | 4 | 3 | 2 | 3 | 0 | 0 | 0 | 0 |
+
+Two cells do the work, and they do it in opposite directions:
+
+* **+300 kHz**: 2 packets, then **0**, then 3. Alive, dead, alive.
+* **−200 kHz**: 0 packets, then **4**, then 0. Dead, alive, dead.
+
+The window moved **down** by about one 100 kHz step and moved back again. The
+prediction was −66.5 kHz, and the sign is what the arithmetic demands: the
+correction moves this board away from a peer that carries the same error, so
+every edge must fall. The two `off` runs agree with each other closely enough —
+including a reproducible oddity at −300/−200 kHz — that the difference cannot be
+drift.
+
+The magnitude is consistent with 66.5 kHz but is only resolved to the 100 kHz
+step. A 20 kHz sweep of the upper edge would turn that into a number.
+
+**What this does and does not establish.** It establishes that the correction is
+applied, that it is applied in the right direction, and that its size is of the
+right order. It does not re-measure the 73.3 ppm itself to phase 3's precision;
+that needed the SDR, and phase 3 already did it.

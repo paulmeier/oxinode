@@ -53,14 +53,23 @@ found — SPI pin selection read back from the peripheral, the reset and BUSY
 trace, the chip's identity and firmware version, oscillator startup, the RF
 switch masks, and the interrupt line.
 
-It then takes single-character commands on the same port:
+It then takes single-character commands on the same port. The radio's
+parameters are settable at runtime, so this is also how a configuration gets
+tried before phase 5 gives a host any way to ask for one:
 
 | Key | What it does |
 |---|---|
 | \`1\` \`2\` \`3\` | Continuous carrier at −17, 0 and +14 dBm |
-| \`p\` \`o\` | Send one LoRa packet, from standby-XOSC or standby-RC |
 | \`0\` | Stop transmitting |
-| \`t\` \`?\` | Die temperature and supply; chip status |
+| \`S\` \`W\` \`C\` \`P\` | Cycle spreading factor, bandwidth, coding rate, power |
+| \`[\` \`]\` | Step the frequency down or up by 100 kHz |
+| \`R\` | Toggle the correction for the module's 73 ppm reference error |
+| \`N\` | Switch sync word between 0x12 (RNode) and 0x2b (Meshtastic) |
+| \`M\` \`D\` | Load the Meshtastic LongFast preset, or the default |
+| \`A\` | Apply the current configuration without transmitting |
+| \`p\` | Send one LoRa packet with the current configuration |
+| \`y\` \`z\` \`E\` | Listen; sweep the frequency coarsely; sweep the window's edge |
+| \`t\` \`?\` | Die temperature and supply; chip status and configuration |
 | \`r\` | Reboot the radio and redo the bring-up |
 | \`b\` | Reboot into the bootloader |
 

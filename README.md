@@ -9,9 +9,9 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: nothing works yet
+## Status: it is a radio, but not yet a modem a host can drive
 
-This is phase 1 of 7. Being precise about that:
+Being precise about that:
 
 | Phase | What it is | State |
 |---|---|---|
@@ -19,7 +19,7 @@ This is phase 1 of 7. Being precise about that:
 | 1 | Blink an LED, prove flashing | **running on hardware** |
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
 | 3 | LR1121 bring-up over SPI, read chip ID, basic TX | **done** — verified on hardware, [notes](docs/phase-3-radio.md) |
-| 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | not started |
+| 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | **done** — verified on hardware, [notes](docs/phase-4-config.md) |
 | 5 | RNode KISS protocol + command set, over USB | not started |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
 | 7 | SH1107 OLED status display | not started |
@@ -35,7 +35,11 @@ The same crate's low-level API is complete, and an RNode wants raw LoRa PHY
 rather than LoRaWAN, so oxinode builds on that directly. See
 [docs/phase-3-radio.md](docs/phase-3-radio.md).
 
-Phases 1, 2 and 3 are confirmed on hardware.
+Phase 4 turned every radio parameter into a value a host can set, and cancelled
+the 73 ppm reference error phase 3 measured. See
+[docs/phase-4-config.md](docs/phase-4-config.md).
+
+Phases 1 to 4 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -83,12 +87,36 @@ What that actually establishes:
   demodulates real packets — the broadcast header and the peer's own node
   number, RSSI −45 dBm, SNR 11 dB.
 
+* **it can be configured while it is running.** Frequency, bandwidth, spreading
+  factor, coding rate, power, preamble and sync word are a value rather than
+  constants, validated before they reach the chip. Pressing one key retunes the
+  board to the peer's Meshtastic channel and it demodulates real packets;
+  changing the spreading factor by one step, or the sync word, drops it to zero
+  — which is what shows the settings are reaching the radio rather than the
+  reception being a coincidence.
+
+* **the airtime it predicts is the airtime it takes.** Across four
+  configurations spanning a 3.5× range, measured `TxDone` exceeds computed
+  airtime by a *constant* 437–461 µs, which is the `SetTx` transaction, PLL lock
+  and PA ramp. A wrong formula would scale; this does not.
+
+* **the 73 ppm is corrected, and the correction is visible.** Turning it on
+  moves the receive window against the peer board down by about 100 kHz — the
+  predicted direction, and the right order of magnitude for 66.5 kHz — and
+  turning it off moves it back.
+
 **The 73 ppm error belongs to the module, not to this board.** Sweeping the
-receive frequency against the second board gives a reception window of −120 to
-+120 kHz, symmetric about zero — so both boards are off by the same amount.
-Replacing the board would not fix it. At 250 kHz bandwidth it does not matter
-and the hardware meshes happily; at the narrower bandwidths an RNode would use,
-it still wants a fix.
+receive frequency against the second board gives a reception window symmetric
+about zero — so both boards are off by the same amount, and replacing the board
+would not fix it.
+
+That is exactly what makes a software correction the right answer rather than a
+workaround: the error is a stable property of the part. **Phase 4 corrects it**,
+in `oxinode_core::lr1121::reference`, as integer arithmetic in tenths of a ppm.
+Whether to apply it is a configuration field and not a constant, because
+corrected this board is right in absolute terms and 73 ppm away from every other
+nRFLR1121 — including the one on the bench next to it. The default is corrected,
+because an RNode's peers are other RNodes.
 
 **The transmitter is 73 ppm low**, and that is measured rather than suspected:
 chopping between two carriers inside a single capture separates the
@@ -100,8 +128,12 @@ It is **not** the TCXO supply voltage (swept all eight codes; the oscillator
 starts on every one and the frequency does not care) and **not** a crystal being
 driven in the wrong mode (without `SetTcxoMode` the oscillator does not start at
 all). What is left is the module's own reference, which also drifts ≈0.65 ppm/°C
-— roughly twenty times a TCXO's stability, so it probably is not one. There is no KISS framing and no display code
-either: not stubbed, not half-written, absent.
+— roughly twenty times a TCXO's stability, so it probably is not one. That drift
+bounds what a static correction can do: 20 °C of temperature swing is 13 ppm, a
+fifth of what is being corrected.
+
+There is no KISS framing and no display code either: not stubbed, not
+half-written, absent.
 
 ## Hardware
 
@@ -203,7 +235,9 @@ bring-up means charging, not a fault in anything oxinode did.
   follows from DIO3 being occupied by the 3.0 V TCXO reference.
 * **The module is rated below the chip.** 20 dBm max sub-GHz and 11.5 dBm max
   at 2.4 GHz, against the LR1121's headline 22/13 dBm and Meshtastic's 22/13
-  clamps. Phase 4's power table should clamp to the module's numbers.
+  clamps. `oxinode_core::lr1121::config` clamps to the module's numbers, and
+  refuses rather than clamping quietly: a host that asks for 21 dBm is told no,
+  because a silent clamp is a lie it cannot detect.
 * **There is no DFU button and never was.** The bootloader's `BUTTON_1` and
   `BUTTON_2` are both P0.05, commented "Unconnected pin", and P0.05 is indeed
   unconnected on the schematic. Double-tap reset and the GPREGRET software path
@@ -404,11 +438,15 @@ Two nearby numbers are worth not being misled by:
 memory.x              flash/RAM layout; the single source of truth for the load address
 build.rs              installs memory.x and re-exports its FLASH origin to Rust
 core/                 oxinode-core: logic with no hardware dependency, unit tested on the host
+core/src/lr1121/config.rs     phase 4: the settable parameters, validated before they reach the chip
+core/src/lr1121/reference.rs  phase 4: the module's 73 ppm error, and the arithmetic that cancels it
+src/modem.rs          phase 4: the one place that programs a configuration, transmits and receives
 src/lib.rs            firmware crate root; panic handler
 src/board.rs          board facts: clock config, LED polarity
 src/boot.rs           VTOR relocation, reboot-into-bootloader
 src/bin/blink.rs      phase 1
 src/bin/usb_cdc.rs    phase 2
+src/bin/radio.rs      phases 3 and 4: radio bring-up and the configuration console
 tools/test.sh         every check that does not need a board
 tools/dfu-flash.sh    cargo runner: ELF -> DFU package -> serial (primary)
 tools/verify_flash.py compares the chip's actual contents against a built image
