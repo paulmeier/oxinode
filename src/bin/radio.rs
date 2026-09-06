@@ -38,12 +38,13 @@ use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use lr11xx::ops::Interrupt;
 use lr11xx::ops::{
-    Calibrate, PaConfig, PacketType, RampTime, RfSwitchConfig, TcxoMode, TcxoTune, TxParams,
+    Calibrate, CodingRate, LoRaBandwidth, LoRaModulation, LoRaPacket, PaConfig, PacketType,
+    RampTime, RfSwitchConfig, SpreadingFactor, TcxoMode, TcxoTune, TxParams,
 };
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::{irq as irq_bits, pa, rf_switch, tcxo, ResetVerdict};
+use oxinode_core::lr1121::{irq as irq_bits, lora, pa, rf_switch, tcxo, ResetVerdict};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -464,7 +465,7 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
+        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, p/o = send a LoRa packet warm/cold, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
         CW_LEVELS[2],
@@ -568,6 +569,11 @@ where
                                         + Duration::from_millis(pa::CW_MAX_BURST_MS as u64),
                                 );
                             }
+                        }
+                        // Step 7b: a real LoRa packet, awaiting TxDone.
+                        b'p' | b'o' => {
+                            send_packet(radio.as_mut(), irq, byte == b'p').await;
+                            cw_until = None;
                         }
                         // Step 6: provoke an interrupt with no RF at all.
                         b'j' => provoke_irq(radio.as_mut(), irq).await,
@@ -949,4 +955,199 @@ where
         },
         _ => defmt::error!("irq: could not clear afterwards"),
     }
+}
+
+/// Step 7b: transmit one LoRa packet and wait for `TxDone` on the interrupt
+/// line.
+///
+/// The airtime is computed beforehand, in `oxinode_core::lr1121::lora`, and
+/// used two ways: as the chip's own transmit timeout, and as the number the
+/// measured `TxDone` latency is checked against. That second use is the point.
+/// A `TxDone` that arrives immediately, or after some unrelated interval, would
+/// otherwise look exactly like a successful transmission — and this board has
+/// already shown once that a command can report success while nothing happens.
+async fn send_packet<S, B>(
+    dev: Option<&mut Lr11xx<S, B>>,
+    irq: &mut radio::RadioIrq<'_>,
+    warm: bool,
+) where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::error!("tx: no radio attached");
+        return;
+    };
+
+    let airtime_us = lora::bench::AIRTIME_US;
+    defmt::info!(
+        "tx: SF{=u8} BW{=u32} CR4/5, {=u8}-byte payload, {=u16}-symbol preamble, sync {=u8:#04x}",
+        lora::bench::SF,
+        lora::bench::BANDWIDTH_HZ,
+        lora::bench::PAYLOAD_LEN,
+        lora::bench::PREAMBLE,
+        lora::bench::SYNC_WORD
+    );
+    defmt::info!("tx: computed airtime {=u32} us", airtime_us);
+
+    // Recognisable on a receiver, and exactly PAYLOAD_LEN bytes.
+    let payload: [u8; lora::bench::PAYLOAD_LEN as usize] = *b"oxinode 7b test\n";
+
+    // The chip's own timeout, in 32.768 kHz ticks. Three times the airtime:
+    // long enough that a healthy packet never trips it, short enough that a
+    // stuck transmitter gives up rather than holding the channel.
+    let ticks = (airtime_us as u64 * 3 * 32_768 / 1_000_000) as u32;
+
+    let configure = async {
+        dev.set_packet_type(PacketType::LoRa).await?;
+        dev.set_rf_frequency(pa::CW_TEST_HZ).await?;
+        dev.set_lora_modulation(
+            LoRaModulation::builder()
+                .with_sf(SpreadingFactor::SF7)
+                .with_bwl(LoRaBandwidth::KHz125)
+                .with_cr(CodingRate::Short45)
+                .with_low_data_rate_optimize(lora::low_data_rate_optimize(
+                    lora::bench::SF,
+                    lora::bench::BANDWIDTH_HZ,
+                ))
+                .build(),
+        )
+        .await?;
+        dev.set_lora_packet(
+            LoRaPacket::builder()
+                .with_preamble_length(lora::bench::PREAMBLE)
+                .with_header_implicit(false)
+                .with_payload_length(lora::bench::PAYLOAD_LEN)
+                .with_crc(true)
+                .with_invert_iq(false)
+                .build(),
+        )
+        .await?;
+        dev.set_lora_sync_word(lora::bench::SYNC_WORD).await?;
+        dev.set_pa_config(PaConfig::new_with_raw_value(pa::LOW_POWER.to_raw()))
+            .await?;
+        dev.set_tx_params(
+            TxParams::builder()
+                .with_ramp_time(RampTime::Us48)
+                .with_tx_power(pa::LP_MAX_DBM)
+                .build(),
+        )
+        .await?;
+        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED))
+            .await?;
+        dev.write_buffer8(&payload).await?;
+        if warm {
+            // Standby on the crystal rather than the RC oscillator, so the
+            // 32 MHz reference is already running when SetTx is issued. See
+            // below: it is worth 5 ms.
+            dev.standby(true).await?;
+        }
+        Ok::<(), lr11xx::Error>(())
+    };
+
+    match with_timeout(Duration::from_millis(500), configure).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            defmt::error!("tx: configuration failed, {}", e);
+            return;
+        }
+        Err(_) => {
+            defmt::error!("tx: configuration did not complete within 500 ms");
+            return;
+        }
+    }
+
+    if irq.is_asserted() {
+        defmt::error!("tx: the interrupt line is high before transmitting; aborting");
+        return;
+    }
+
+    let started = Instant::now();
+    match with_timeout(Duration::from_millis(200), dev.set_tx(u24::new(ticks))).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            defmt::error!("tx: SetTx rejected, {}", e);
+            return;
+        }
+        Err(_) => {
+            defmt::error!("tx: SetTx did not complete");
+            return;
+        }
+    }
+
+    // Generously past the airtime, so a late TxDone is still caught and
+    // reported as late rather than as missing.
+    let deadline = Duration::from_micros(airtime_us as u64 * 4);
+    match irq.wait_asserted(deadline).await {
+        Ok(()) => {
+            let elapsed = started.elapsed().as_micros() as u32;
+            defmt::info!(
+                "tx: interrupt after {=u32} us against {=u32} us of computed airtime",
+                elapsed,
+                airtime_us
+            );
+            // What the latency should be, rather than just the airtime.
+            //
+            // Transmitting from Standby RC pays the TCXO startup delay inside
+            // the measurement, because step 4 established that the delay is a
+            // fixed wait charged to the first operation that needs the
+            // oscillator -- and SetTx is that operation. From Standby XOSC the
+            // reference is already running and the delay is not paid at all.
+            //
+            // Predicting it rather than widening the tolerance is what makes
+            // this check worth having: a 5 ms discrepancy that is explained is
+            // evidence, and a 5 ms tolerance that hides it is not.
+            let startup = if warm { 0 } else { tcxo::STARTUP_US };
+            let expected = airtime_us + startup;
+            defmt::info!(
+                "tx: expected {=u32} us = {=u32} airtime + {=u32} oscillator startup ({=str})",
+                expected,
+                airtime_us,
+                startup,
+                if warm { "standby XOSC" } else { "standby RC" }
+            );
+            // Five percent of the airtime, plus a millisecond for the SetTx
+            // transaction, the PLL lock and the PA ramp.
+            let slack = airtime_us / 20 + 1_000;
+            if elapsed + slack >= expected && elapsed <= expected + slack {
+                defmt::info!("tx: within {=u32} us of prediction", slack);
+            } else {
+                defmt::error!(
+                    "tx: {=u32} us off prediction, outside the {=u32} us allowance",
+                    elapsed.abs_diff(expected),
+                    slack
+                );
+            }
+        }
+        Err(_) => {
+            defmt::error!(
+                "tx: no interrupt within {=u32} us",
+                deadline.as_micros() as u32
+            );
+        }
+    }
+
+    match with_timeout(Duration::from_millis(200), dev.status()).await {
+        Ok(Ok((status, pending))) => {
+            let raw = pending.raw_value();
+            defmt::info!("tx: pending {=u32:#010x}, {}", raw, status);
+            for (b, name) in irq_bits::NAMES {
+                if raw & b != 0 {
+                    defmt::info!("tx:   {=str}", name);
+                }
+            }
+            if raw & irq_bits::bit::TX_DONE != 0 {
+                defmt::info!("tx: TxDone -- a packet went out");
+            } else {
+                defmt::error!("tx: TxDone is NOT set; whatever raised the line, it was not this");
+            }
+        }
+        _ => defmt::error!("tx: could not read what fired"),
+    }
+
+    let _ = with_timeout(
+        Duration::from_millis(200),
+        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED)),
+    )
+    .await;
 }

@@ -16,8 +16,10 @@
 //!   damaging anything.
 //! * [`irq`] — which interrupts are routed to the one line that reaches the
 //!   MCU.
+//! * [`lora`] — modulation parameters, and how long a packet takes to send.
 
 pub mod irq;
+pub mod lora;
 pub mod pa;
 pub mod reset;
 pub mod rf_switch;

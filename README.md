@@ -18,7 +18,7 @@ This is phase 1 of 7. Being precise about that:
 | 0 | Pin/hardware recon | done, verified against upstream |
 | 1 | Blink an LED, prove flashing | **running on hardware** |
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
-| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–6 and 7a of 8 done, [plan](docs/phase-3-radio.md) |
+| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–7 of 8 done, [plan](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | not started |
 | 5 | RNode KISS protocol + command set, over USB | not started |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
@@ -35,7 +35,7 @@ The same crate's low-level API is complete, and an RNode wants raw LoRa PHY
 rather than LoRaWAN, so oxinode builds on that directly. See
 [docs/phase-3-radio.md](docs/phase-3-radio.md).
 
-Phases 1 and 2 are confirmed on hardware, and phase 3 has reached step 6 of 8.
+Phases 1 and 2 are confirmed on hardware, and phase 3 has reached step 7 of 8.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -75,8 +75,15 @@ What that actually establishes:
   same interrupt fires inside the chip and the pin stays down, which is what
   shows the mask is doing the work.
 
-**No packet has been sent.** A carrier is not a modulation, and `TxDone` — the
-interrupt that actually matters — has not been seen.
+* **it sends LoRa packets.** SF7/125 kHz/CR 4/5, 16-byte payload: `TxDone`
+  arrives on the interrupt line 51910 µs after `SetTx` against 51456 µs of
+  computed airtime, and the SDR sees a 52.00 ms burst in the channel.
+
+**Nothing has demodulated a packet.** A burst of the right length in the right
+channel says the modulation is what was asked for; it is not a receiver
+recovering a payload. And there is reason to expect one would fail: 73 ppm puts
+this packet 67 kHz below 915.000 MHz, where LoRa tolerates roughly ±31 kHz at
+125 kHz bandwidth.
 
 **The transmitter is 73 ppm low**, and that is measured rather than suspected:
 chopping between two carriers inside a single capture separates the

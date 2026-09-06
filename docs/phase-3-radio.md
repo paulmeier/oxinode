@@ -628,12 +628,71 @@ type it keys every time, without one it never does. `SetStandby(XOSC)`,
 `SetFs`, `CalibImage`, `SetRegMode`, `ClearIrq` and `ClearErrors` were each
 tested alone and none of them helps.
 
-**7b — a real LoRa packet.** `set_packet_type(LoRa)`, `set_lora_modulation`
-(SF/BW/CR), `set_lora_packet`, `set_lora_sync_word`, `set_pa_config`,
-`set_tx_params`, write the buffer, `set_tx`, await `TxDone`.
+**7b — a real LoRa packet. Done.** SF7, 125 kHz, CR 4/5, 8-symbol preamble,
+16-byte payload, explicit header, CRC on, sync word `0x12` (private — `0x34`
+would announce this as LoRaWAN, which it is not).
 
-*Done when:* ~~the SDR sees the carrier at 7a~~ (done — see step 5), and
-`TxDone` arrives within the expected airtime at 7b.
+```
+INFO  tx: computed airtime 51456 us
+INFO  tx: interrupt after 51910 us against 51456 us of computed airtime
+INFO  tx: pending 0x00000004
+INFO  tx:   tx_done
+INFO  tx: TxDone -- a packet went out
+```
+
+Three independent confirmations, which is the point of doing it this way:
+
+* **`TxDone` on the real interrupt line.** `pending` reads `0x00000004` and
+  nothing else — bit 2, and no `timeout`, no `error`.
+* **The latency matches the airtime**: 51910 µs against 51456 µs computed, 0.88%
+  out. Airtime is computed in `oxinode_core::lr1121::lora` from Semtech's
+  formula, hand-checked in a test that shows its working. A `TxDone` arriving
+  immediately, or after some unrelated interval, would look exactly like success
+  otherwise — and this board has already demonstrated once that a command can
+  report success while nothing happens.
+* **The SDR sees it**: a 52.00 ms burst in the 125 kHz channel, against 51.456 ms
+  expected — inside the 0.5 ms resolution of the envelope measurement.
+
+#### The 5 ms that were missing, and where they went
+
+The first attempt measured 56976 µs against 51456 µs computed — 10.7% out, and
+the check flagged it. The gap was **5520 µs**, and step 4 had already predicted
+it: the TCXO delay is not a timeout but a fixed wait, charged to the first
+operation that needs the oscillator. Transmitting from Standby RC makes `SetTx`
+that operation.
+
+Transmitting from Standby XOSC instead, with the reference already running:
+
+| | measured | predicted | difference |
+|---|---|---|---|
+| from Standby RC | 56976 µs | 51456 + 5000 | +520 µs |
+| from Standby XOSC | 51910 µs | 51456 | +454 µs |
+
+Cold minus warm is **5066 µs**, against the 5005 µs delay programmed at step 4.
+That is the step-4 finding confirmed a second time, by a completely different
+measurement, and it is why the check now predicts the startup cost rather than
+widening its tolerance to hide it. The residual ~500 µs, consistent across both,
+is the `SetTx` transaction, the PLL lock and the PA ramp.
+
+The practical consequence for phase 5: **a transmitter that idles in Standby RC
+pays 5 ms on every packet.** At SF7 that is a tenth of the airtime.
+
+#### What this does not show
+
+Nothing has demodulated the packet. A burst of the right length in the right
+channel is strong evidence that the modulation is what was asked for — a wrong
+spreading factor would be out by a factor of two, not 1%. It is not the same as
+a receiver recovering the payload.
+
+And there is a specific reason to expect a receiver would struggle: the
+transmitter is 73 ppm low, so this packet is centred 67 kHz below 915.000 MHz.
+LoRa reception tolerates roughly a quarter of the bandwidth in frequency offset,
+about ±31 kHz at 125 kHz. **A standard receiver tuned to 915.000 would probably
+not decode this.** The frequency error stops being a curiosity here and becomes
+the thing standing between this board and interoperating with anything.
+
+*Done when:* ~~the SDR sees the carrier at 7a~~ and ~~`TxDone` arrives within
+the expected airtime at 7b~~ — both done.
 
 > **Before transmitting.** A LoRa antenna must be attached to the sub-GHz port —
 > the SMA connector, not the 2.4 GHz u.FL. Transmitting into an open port can
@@ -651,10 +710,13 @@ tested alone and none of them helps.
   LR1110-family board does; it is one command and it matters for TX current.
 * A separate `radio` binary. Keep it apart from `usb-cdc` until phase 5 merges
   the transports — with no probe, a bisectable failure is worth a lot.
-* Push everything decidable without hardware into `oxinode-core`, with tests:
+* ~~Push everything decidable without hardware into `oxinode-core`, with tests:
   `RfSwitchConfig` construction, the TCXO delay ↔ microseconds conversion,
-  `Version` decoding, and LoRa airtime calculation (needed for step 7's timeout,
-  and again in phase 5).
+  `Version` decoding, and LoRa airtime calculation.~~ Done as each step needed
+  it, which worked better than saving it for the end: the airtime calculation
+  earned its keep immediately as the thing step 7b's `TxDone` was checked
+  against.
+* Still open from the frequency investigation: what to do about 73 ppm.
 
 ## Open questions
 
