@@ -8,6 +8,7 @@
 pub mod board;
 pub mod boot;
 pub mod logger;
+pub mod modem;
 pub mod radio;
 pub mod usb_log;
 

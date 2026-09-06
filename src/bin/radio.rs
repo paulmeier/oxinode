@@ -37,15 +37,15 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use lr11xx::ops::Interrupt;
-use lr11xx::ops::Interrupt as Irq;
 use lr11xx::ops::{
-    Calibrate, CodingRate, LoRaBandwidth, LoRaModulation, LoRaPacket, PaConfig, PacketType,
-    RampTime, RfSwitchConfig, SpreadingFactor, TcxoMode, TcxoTune, TxParams,
+    Calibrate, PaConfig, PacketType, RampTime, RfSwitchConfig, TcxoMode, TcxoTune, TxParams,
 };
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
+use oxinode::modem::Modem;
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::{irq as irq_bits, lora, pa, rf_switch, tcxo, ResetVerdict};
+use oxinode_core::lr1121::config::{self, RadioConfig, ValidConfig};
+use oxinode_core::lr1121::{irq as irq_bits, lora, pa, reference, rf_switch, tcxo, ResetVerdict};
 use oxinode_core::meshtastic;
 use static_cell::StaticCell;
 
@@ -468,18 +468,27 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, p/o = send a LoRa packet warm/cold, m/u = DC-DC/LDO, t = temperature, y = listen (h/i = -60/+60 kHz), z = sweep, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
+        "console bench: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot radio, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, k/l = route nothing/normal to DIO9, m/u = DC-DC/LDO, t = temperature, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
         CW_LEVELS[2],
         pa::CW_SWEEP_HZ[0],
         pa::CW_SWEEP_HZ[1]
     );
+    defmt::info!(
+        "console config: S = spreading factor, W = bandwidth, C = coding rate, P = power, [ / ] = frequency -/+ 100 kHz, R = reference correction, N = sync word, M = Meshtastic LongFast preset, D = oxinode default, A = apply, ? = show"
+    );
+    defmt::info!(
+        "console radio: p = send a packet, y = listen 20 s (h/i = -60/+60 kHz), z = frequency sweep"
+    );
 
     let mut buf = [0u8; 64];
     let mut cw_until: Option<Instant> = None;
     let mut tune_code = tcxo::TUNE_3V0;
     let mut ticks: u32 = 0;
+    // Phase 4's whole point: the radio's parameters are a value that lives
+    // here and changes, not constants compiled into the transmit path.
+    let mut cfg = config::DEFAULT;
 
     loop {
         let event = select3(
@@ -573,10 +582,11 @@ where
                                 );
                             }
                         }
-                        // Step 7b: a real LoRa packet, awaiting TxDone.
-                        b'p' | b'o' => {
-                            send_packet(radio.as_mut(), irq, byte == b'p').await;
+                        // A real LoRa packet, with whatever the config keys
+                        // below have been set to.
+                        b'p' => {
                             cw_until = None;
+                            tx_packet(radio.as_mut(), irq, &cfg).await;
                         }
                         // Step 6: provoke an interrupt with no RF at all.
                         b'j' => provoke_irq(radio.as_mut(), irq).await,
@@ -591,18 +601,61 @@ where
                                 route_interrupts(dev, irq, mask).await;
                             }
                         }
-                        // Listen on the second bench board's channel. The
-                        // offset argument steps the commanded frequency, which
-                        // is how the two boards' clocks get compared.
+                        // Listen with the current configuration. The offset
+                        // moves the wanted frequency, so it composes with the
+                        // reference correction rather than replacing it.
                         b'y' | b'h' | b'i' => {
                             let offset_hz: i32 = match byte {
                                 b'h' => -60_000,
                                 b'i' => 60_000,
                                 _ => 0,
                             };
-                            receive(radio.as_mut(), irq, offset_hz).await;
+                            cw_until = None;
+                            if let (Some(dev), Some(valid)) = (radio.as_mut(), validate(&cfg)) {
+                                rx_listen(
+                                    dev,
+                                    irq,
+                                    &valid,
+                                    offset_hz,
+                                    Duration::from_secs(20),
+                                    true,
+                                )
+                                .await;
+                            }
                         }
-                        b'z' => sweep_rx(radio.as_mut(), irq).await,
+                        b'z' => {
+                            cw_until = None;
+                            rx_sweep(radio.as_mut(), irq, &cfg).await;
+                        }
+                        // The configuration editor. Each key cycles one
+                        // parameter and prints the result; nothing reaches the
+                        // chip until a transmit, a receive, or `A`.
+                        b'S' | b'W' | b'C' | b'P' | b'[' | b']' | b'R' | b'N' | b'M' | b'D' => {
+                            edit_config(&mut cfg, byte);
+                            match validate(&cfg) {
+                                Some(valid) => log_config(&valid),
+                                // `validate` has already said which limit was
+                                // hit. Reported and kept rather than reverted:
+                                // a host sets one parameter at a time and is
+                                // entitled to pass through invalid states.
+                                None => defmt::warn!("config: held, but not usable as it stands"),
+                            }
+                        }
+                        // Program the current configuration into the chip
+                        // without transmitting or receiving, so that a
+                        // configuration can be checked on its own.
+                        b'A' => {
+                            if let (Some(dev), Some(valid)) = (radio.as_mut(), validate(&cfg)) {
+                                let mut modem = Modem::new(dev, irq);
+                                match modem.apply(&valid).await {
+                                    Ok(()) => {
+                                        log_config(&valid);
+                                        defmt::info!("config: applied");
+                                    }
+                                    Err(e) => defmt::error!("config: apply failed, {}", e),
+                                }
+                            }
+                        }
                         // Step 8: the regulator, and a way to compare the two.
                         b'm' | b'u' => {
                             if let Some(dev) = radio.as_mut() {
@@ -611,7 +664,12 @@ where
                             }
                         }
                         b't' => sample_thermals(radio.as_mut()).await,
-                        b'?' => report(radio.as_mut(), cw_until.is_some()).await,
+                        b'?' => {
+                            if let Some(valid) = validate(&cfg) {
+                                log_config(&valid);
+                            }
+                            report(radio.as_mut(), cw_until.is_some()).await;
+                        }
                         b'b' => boot::reboot_to_bootloader(),
                         b'\r' | b'\n' => {}
                         other => defmt::warn!("console: unknown command {=u8:#04x}", other),
@@ -981,199 +1039,68 @@ where
     }
 }
 
-/// Step 7b: transmit one LoRa packet and wait for `TxDone` on the interrupt
-/// line.
+/// Phase 4: transmit one LoRa packet with whatever the console is configured
+/// for, and check the `TxDone` latency against what that configuration predicts.
 ///
-/// The airtime is computed beforehand, in `oxinode_core::lr1121::lora`, and
-/// used two ways: as the chip's own transmit timeout, and as the number the
-/// measured `TxDone` latency is checked against. That second use is the point.
-/// A `TxDone` that arrives immediately, or after some unrelated interval, would
-/// otherwise look exactly like a successful transmission — and this board has
-/// already shown once that a command can report success while nothing happens.
-async fn send_packet<S, B>(
+/// Phase 3 did this with the parameters compiled in. The check is the same and
+/// the point of it is the same — a `TxDone` that arrives immediately, or after
+/// some unrelated interval, is a `TxDone` that did not come from a packet — but
+/// now the prediction comes from the configuration rather than from a constant,
+/// which means it also tests that the configuration reached the chip.
+///
+/// The tolerance is a prediction rather than a widened window. Transmitting is
+/// always done from Standby XOSC here, so the 5 ms oscillator startup phase 3
+/// measured is paid before `SetTx` rather than inside the measurement.
+async fn tx_packet<S, B>(
     dev: Option<&mut Lr11xx<S, B>>,
     irq: &mut radio::RadioIrq<'_>,
-    warm: bool,
+    config: &RadioConfig,
 ) where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
-    let Some(dev) = dev else {
-        defmt::error!("tx: no radio attached");
+    let (Some(dev), Some(valid)) = (dev, validate(config)) else {
         return;
     };
 
-    let airtime_us = lora::bench::AIRTIME_US;
+    // Recognisable on a receiver, and short enough for any spreading factor.
+    let payload = b"oxinode phase 4";
+    let airtime_us = valid.airtime_us(payload.len() as u8);
+    log_config(&valid);
     defmt::info!(
-        "tx: SF{=u8} BW{=u32} CR4/5, {=u8}-byte payload, {=u16}-symbol preamble, sync {=u8:#04x}",
-        lora::bench::SF,
-        lora::bench::BANDWIDTH_HZ,
-        lora::bench::PAYLOAD_LEN,
-        lora::bench::PREAMBLE,
-        lora::bench::SYNC_WORD
+        "tx: {=usize}-byte payload, computed airtime {=u32} us",
+        payload.len(),
+        airtime_us
     );
-    defmt::info!("tx: computed airtime {=u32} us", airtime_us);
 
-    // Recognisable on a receiver, and exactly PAYLOAD_LEN bytes.
-    let payload: [u8; lora::bench::PAYLOAD_LEN as usize] = *b"oxinode 7b test\n";
-
-    // The chip's own timeout, in 32.768 kHz ticks. Three times the airtime:
-    // long enough that a healthy packet never trips it, short enough that a
-    // stuck transmitter gives up rather than holding the channel.
-    let ticks = (airtime_us as u64 * 3 * 32_768 / 1_000_000) as u32;
-
-    let configure = async {
-        dev.set_packet_type(PacketType::LoRa).await?;
-        dev.set_rf_frequency(pa::CW_TEST_HZ).await?;
-        dev.set_lora_modulation(
-            LoRaModulation::builder()
-                .with_sf(SpreadingFactor::SF7)
-                .with_bwl(LoRaBandwidth::KHz125)
-                .with_cr(CodingRate::Short45)
-                .with_low_data_rate_optimize(lora::low_data_rate_optimize(
-                    lora::bench::SF,
-                    lora::bench::BANDWIDTH_HZ,
-                ))
-                .build(),
-        )
-        .await?;
-        dev.set_lora_packet(
-            LoRaPacket::builder()
-                .with_preamble_length(lora::bench::PREAMBLE)
-                .with_header_implicit(false)
-                .with_payload_length(lora::bench::PAYLOAD_LEN)
-                .with_crc(true)
-                .with_invert_iq(false)
-                .build(),
-        )
-        .await?;
-        dev.set_lora_sync_word(lora::bench::SYNC_WORD).await?;
-        dev.set_pa_config(PaConfig::new_with_raw_value(pa::LOW_POWER.to_raw()))
-            .await?;
-        dev.set_tx_params(
-            TxParams::builder()
-                .with_ramp_time(RampTime::Us48)
-                .with_tx_power(pa::LP_MAX_DBM)
-                .build(),
-        )
-        .await?;
-        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED))
-            .await?;
-        dev.write_buffer8(&payload).await?;
-        if warm {
-            // Standby on the crystal rather than the RC oscillator, so the
-            // 32 MHz reference is already running when SetTx is issued. See
-            // below: it is worth 5 ms.
-            dev.standby(true).await?;
-        }
-        Ok::<(), lr11xx::Error>(())
-    };
-
-    match with_timeout(Duration::from_millis(500), configure).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            defmt::error!("tx: configuration failed, {}", e);
-            return;
-        }
-        Err(_) => {
-            defmt::error!("tx: configuration did not complete within 500 ms");
-            return;
-        }
-    }
-
-    if irq.is_asserted() {
-        defmt::error!("tx: the interrupt line is high before transmitting; aborting");
+    let mut modem = Modem::new(dev, irq);
+    if let Err(e) = modem.apply(&valid).await {
+        defmt::error!("tx: apply failed, {}", e);
         return;
     }
-
-    let started = Instant::now();
-    match with_timeout(Duration::from_millis(200), dev.set_tx(u24::new(ticks))).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            defmt::error!("tx: SetTx rejected, {}", e);
-            return;
-        }
-        Err(_) => {
-            defmt::error!("tx: SetTx did not complete");
-            return;
-        }
-    }
-
-    // Generously past the airtime, so a late TxDone is still caught and
-    // reported as late rather than as missing.
-    let deadline = Duration::from_micros(airtime_us as u64 * 4);
-    match irq.wait_asserted(deadline).await {
-        Ok(()) => {
-            let elapsed = started.elapsed().as_micros() as u32;
+    match modem.transmit(&valid, payload).await {
+        Err(e) => defmt::error!("tx: {}", e),
+        Ok(report) => {
             defmt::info!(
-                "tx: interrupt after {=u32} us against {=u32} us of computed airtime",
-                elapsed,
-                airtime_us
-            );
-            // What the latency should be, rather than just the airtime.
-            //
-            // Transmitting from Standby RC pays the TCXO startup delay inside
-            // the measurement, because step 4 established that the delay is a
-            // fixed wait charged to the first operation that needs the
-            // oscillator -- and SetTx is that operation. From Standby XOSC the
-            // reference is already running and the delay is not paid at all.
-            //
-            // Predicting it rather than widening the tolerance is what makes
-            // this check worth having: a 5 ms discrepancy that is explained is
-            // evidence, and a 5 ms tolerance that hides it is not.
-            let startup = if warm { 0 } else { tcxo::STARTUP_US };
-            let expected = airtime_us + startup;
-            defmt::info!(
-                "tx: expected {=u32} us = {=u32} airtime + {=u32} oscillator startup ({=str})",
-                expected,
-                airtime_us,
-                startup,
-                if warm { "standby XOSC" } else { "standby RC" }
+                "tx: interrupt after {=u32} us against {=u32} us of computed airtime, pending {=u32:#010x}",
+                report.elapsed_us,
+                report.airtime_us,
+                report.pending
             );
             // Five percent of the airtime, plus a millisecond for the SetTx
             // transaction, the PLL lock and the PA ramp.
-            let slack = airtime_us / 20 + 1_000;
-            if elapsed + slack >= expected && elapsed <= expected + slack {
-                defmt::info!("tx: within {=u32} us of prediction", slack);
+            let slack = report.airtime_us / 20 + 1_000;
+            if report.elapsed_us.abs_diff(report.airtime_us) <= slack {
+                defmt::info!("tx: TxDone within {=u32} us of prediction", slack);
             } else {
                 defmt::error!(
                     "tx: {=u32} us off prediction, outside the {=u32} us allowance",
-                    elapsed.abs_diff(expected),
+                    report.elapsed_us.abs_diff(report.airtime_us),
                     slack
                 );
             }
         }
-        Err(_) => {
-            defmt::error!(
-                "tx: no interrupt within {=u32} us",
-                deadline.as_micros() as u32
-            );
-        }
     }
-
-    match with_timeout(Duration::from_millis(200), dev.status()).await {
-        Ok(Ok((status, pending))) => {
-            let raw = pending.raw_value();
-            defmt::info!("tx: pending {=u32:#010x}, {}", raw, status);
-            for (b, name) in irq_bits::NAMES {
-                if raw & b != 0 {
-                    defmt::info!("tx:   {=str}", name);
-                }
-            }
-            if raw & irq_bits::bit::TX_DONE != 0 {
-                defmt::info!("tx: TxDone -- a packet went out");
-            } else {
-                defmt::error!("tx: TxDone is NOT set; whatever raised the line, it was not this");
-            }
-        }
-        _ => defmt::error!("tx: could not read what fired"),
-    }
-
-    let _ = with_timeout(
-        Duration::from_millis(200),
-        dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED)),
-    )
-    .await;
 }
 
 /// Step 8: choose the switching regulator over the LDO.
@@ -1245,68 +1172,14 @@ where
     }
 }
 
-/// Listen on the second bench board's Meshtastic channel for a few seconds.
+/// Listen with the current configuration for a fixed dwell, counting packets.
 ///
-/// This is the first time anything in oxinode has receive. It exists because
-/// the only radio peer available is a Base Duo running stock Meshtastic, and
-/// hearing it answers a question the SDR could not: **is the 73 ppm error this
-/// board, or the design?**
-///
-/// The two boards carry the same module, so if the error is a property of the
-/// design they share it, and each will hear the other at the frequency both
-/// were told to use. If instead this board is uniquely bad, it will only hear
-/// the other one when commanded roughly 66 kHz away from where the other one
-/// thinks it is transmitting. `offset_hz` is what makes that measurable.
-async fn receive<S, B>(
-    dev: Option<&mut Lr11xx<S, B>>,
-    irq: &mut radio::RadioIrq<'_>,
-    offset_hz: i32,
-) where
-    S: embedded_hal_async::spi::SpiDevice<u8>,
-    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
-{
-    let Some(dev) = dev else {
-        defmt::error!("rx: no radio attached");
-        return;
-    };
-    listen(dev, irq, offset_hz, Duration::from_secs(20), true).await;
-}
-
-/// Step the receive frequency across a range and count what arrives at each.
-///
-/// Three fixed offsets could not answer the question. At 250 kHz bandwidth LoRa
-/// tolerates so much frequency error that 0 and ±60 kHz all receive perfectly,
-/// so the measurement said nothing at all.
-///
-/// What does answer it is the **centre** of the window: find where reception
-/// dies on each side, and the midpoint is where the two boards' clocks agree.
-/// If the 73 ppm error belongs to the module design, both boards share it, they
-/// agree at zero offset, and the window is centred on 0. If instead this board
-/// is uniquely bad, the window is centred near +66 kHz — the amount this board
-/// must be told to add to land where the other one actually is.
-async fn sweep_rx<S, B>(dev: Option<&mut Lr11xx<S, B>>, irq: &mut radio::RadioIrq<'_>)
-where
-    S: embedded_hal_async::spi::SpiDevice<u8>,
-    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
-{
-    let Some(dev) = dev else {
-        defmt::error!("rx: no radio attached");
-        return;
-    };
-    defmt::info!("sweep: 13 steps of 40 kHz, 8 s each; keep the peer transmitting");
-    for step in -6i32..=6 {
-        let offset = step * 40_000;
-        let heard = listen(dev, irq, offset, Duration::from_secs(8), false).await;
-        defmt::info!("sweep: {=i32} Hz -> {=u32} packets", offset, heard);
-    }
-    defmt::info!("sweep: done");
-}
-
-/// Configure for the peer's channel at `offset_hz` and count packets for
-/// `dwell`. Returns how many arrived.
-async fn listen<S, B>(
+/// Returns how many arrived, so the sweep below can use it as a measurement
+/// rather than as a log line.
+async fn rx_listen<S, B>(
     dev: &mut Lr11xx<S, B>,
     irq: &mut radio::RadioIrq<'_>,
+    config: &ValidConfig,
     offset_hz: i32,
     dwell: Duration,
     verbose: bool,
@@ -1315,67 +1188,27 @@ where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
-    let tuned = (meshtastic::US_LONG_FAST_HZ as i64 + offset_hz as i64) as u32;
+    // The offset moves the *wanted* frequency, so it composes with the
+    // reference correction rather than fighting it: sweeping a corrected
+    // configuration sweeps around the corrected centre, which is the whole
+    // measurement in step 5.
+    let mut shifted = **config;
+    shifted.frequency_hz = (shifted.frequency_hz as i64 + offset_hz as i64) as u32;
+    let Some(shifted) = validate(&shifted) else {
+        return 0;
+    };
     if verbose {
-        defmt::info!(
-            "rx: {=u32} Hz ({=i32} Hz off Meshtastic US LongFast), SF{=u8} BW{=u32} CR4/5, sync {=u8:#04x}",
-            tuned,
-            offset_hz,
-            meshtastic::long_fast::SF,
-            meshtastic::long_fast::BANDWIDTH_HZ,
-            meshtastic::long_fast::SYNC_WORD
-        );
+        log_config(&shifted);
     }
 
-    let configure = async {
-        dev.set_packet_type(PacketType::LoRa).await?;
-        dev.set_rf_frequency(tuned).await?;
-        dev.set_lora_modulation(
-            LoRaModulation::builder()
-                .with_sf(SpreadingFactor::SF11)
-                .with_bwl(LoRaBandwidth::KHz250)
-                .with_cr(CodingRate::Short45)
-                .with_low_data_rate_optimize(lora::low_data_rate_optimize(
-                    meshtastic::long_fast::SF,
-                    meshtastic::long_fast::BANDWIDTH_HZ,
-                ))
-                .build(),
-        )
-        .await?;
-        dev.set_lora_packet(
-            LoRaPacket::builder()
-                .with_preamble_length(meshtastic::long_fast::PREAMBLE)
-                .with_header_implicit(false)
-                // Explicit header: the length comes off the air, and this is
-                // the ceiling rather than the expected size.
-                .with_payload_length(255)
-                .with_crc(true)
-                .with_invert_iq(false)
-                .build(),
-        )
-        .await?;
-        dev.set_lora_sync_word(meshtastic::long_fast::SYNC_WORD)
-            .await?;
-        // Sensitivity matters more than current here, and it is what the peer
-        // is using.
-        dev.set_rx_boosted(true).await?;
-        dev.clear_irq(Irq::new_with_raw_value(irq_bits::ALL_NAMED))
-            .await?;
-        // 0xFFFFFF: stay in RX until told otherwise, receiving repeatedly.
-        dev.set_rx(u24::new(0xff_ffff)).await?;
-        Ok::<(), lr11xx::Error>(())
-    };
-
-    match with_timeout(Duration::from_millis(500), configure).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            defmt::error!("rx: configuration failed, {}", e);
-            return 0;
-        }
-        Err(_) => {
-            defmt::error!("rx: configuration did not complete");
-            return 0;
-        }
+    let mut modem = Modem::new(dev, irq);
+    if let Err(e) = modem.apply(&shifted).await {
+        defmt::error!("rx: apply failed, {}", e);
+        return 0;
+    }
+    if let Err(e) = modem.start_rx(&shifted).await {
+        defmt::error!("rx: {}", e);
+        return 0;
     }
     if verbose {
         defmt::info!("rx: listening");
@@ -1383,59 +1216,27 @@ where
 
     let until = Instant::now() + dwell;
     let mut heard = 0u32;
+    let mut buf = [0u8; 64];
     while Instant::now() < until {
-        if irq.wait_asserted(Duration::from_millis(500)).await.is_err() {
-            continue;
-        }
-        let report = async {
-            let (_, pending) = dev.status().await?;
-            let raw = pending.raw_value();
-            let mut buf = [0u8; 64];
-            let mut len = 0usize;
-            let mut rssi = 0i16;
-            let mut snr = 0i16;
-            if raw & irq_bits::bit::RX_DONE != 0 {
-                let status = dev.rx_buffer_status().await?;
-                len = (status.payload_length() as usize).min(buf.len());
-                dev.read_buffer8(status.offset(), &mut buf[..len]).await?;
-                let pkt = dev.lora_packet_status().await?;
-                // RSSI in dBm is -RssiPkt/2; SNR in dB is SnrPkt/4.
-                rssi = -(pkt.rssi() as i16) / 2;
-                snr = (pkt.snr() as i16 + 2) / 4;
-            }
-            dev.clear_irq(Irq::new_with_raw_value(irq_bits::ALL_NAMED))
-                .await?;
-            Ok::<_, lr11xx::Error>((raw, buf, len, rssi, snr))
-        };
-        match with_timeout(Duration::from_millis(300), report).await {
-            Ok(Ok((raw, buf, len, rssi, snr))) => {
+        match modem.receive(&mut buf, Duration::from_millis(500)).await {
+            Err(e) => defmt::error!("rx: {}", e),
+            Ok(None) => {}
+            Ok(Some(report)) => {
+                heard += 1;
                 if verbose {
-                    for (b, name) in irq_bits::NAMES {
-                        if raw & b != 0 {
-                            defmt::info!("rx: irq {=str}", name);
-                        }
-                    }
-                }
-                if raw & irq_bits::bit::RX_DONE != 0 {
-                    heard += 1;
-                    if verbose {
-                        defmt::info!(
-                            "rx: PACKET {=u32}: {=usize} bytes, RSSI {=i16} dBm, SNR {=i16} dB",
-                            heard,
-                            len,
-                            rssi,
-                            snr
-                        );
-                        defmt::info!("rx: bytes {=[u8]:02x}", buf[..len.min(32)]);
-                    }
+                    defmt::info!(
+                        "rx: PACKET {=u32}: {=usize} bytes, RSSI {=i16} dBm, SNR {=i16} dB",
+                        heard,
+                        report.len,
+                        report.rssi_dbm,
+                        report.snr_db
+                    );
+                    defmt::info!("rx: bytes {=[u8]:02x}", buf[..report.len.min(32)]);
                 }
             }
-            Ok(Err(e)) => defmt::error!("rx: {}", e),
-            Err(_) => defmt::error!("rx: read timed out"),
         }
     }
-
-    let _ = with_timeout(Duration::from_millis(200), dev.standby(false)).await;
+    let _ = modem.standby().await;
     if verbose {
         defmt::info!(
             "rx: done at {=i32} Hz offset -- {=u32} packets",
@@ -1444,4 +1245,213 @@ where
         );
     }
     heard
+}
+
+/// Step the receive frequency across a range and count what arrives at each.
+///
+/// Phase 3 used this to establish that the 73 ppm error belongs to the module:
+/// against a second Base Duo the window came out centred on zero, which it
+/// could not be if only one of the two boards were wrong.
+///
+/// Phase 4 uses the same sweep for the opposite purpose. With the reference
+/// correction on, this board is deliberately 73 ppm away from the peer, so the
+/// window must move *down* by about 67 kHz. That is a prediction with a sign
+/// and a magnitude, and it is the only check available that the correction does
+/// what the arithmetic says — the alternative would be believing a number
+/// because it was derived carefully.
+async fn rx_sweep<S, B>(
+    dev: Option<&mut Lr11xx<S, B>>,
+    irq: &mut radio::RadioIrq<'_>,
+    config: &RadioConfig,
+) where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let (Some(dev), Some(valid)) = (dev, validate(config)) else {
+        return;
+    };
+    log_config(&valid);
+    defmt::info!(
+        "sweep: 13 steps of {=i32} Hz, 8 s each; keep the peer transmitting",
+        SWEEP_STEP_HZ
+    );
+    if valid.correct_reference {
+        defmt::info!(
+            "sweep: the correction is ON, so against another nRFLR1121 the window should sit near {=i32} Hz, not 0",
+            -reference::correction_hz(valid.frequency_hz)
+        );
+    } else {
+        defmt::info!("sweep: the correction is OFF, so the window should sit near 0");
+    }
+    for step in -6i32..=6 {
+        let offset = step * SWEEP_STEP_HZ;
+        let heard = rx_listen(dev, irq, &valid, offset, Duration::from_secs(8), false).await;
+        defmt::info!("sweep: {=i32} Hz -> {=u32} packets", offset, heard);
+    }
+    defmt::info!("sweep: done");
+}
+
+/// How far apart the sweep's steps are, in hertz.
+///
+/// 40 kHz across thirteen steps covers ±240 kHz, which brackets both the
+/// ±120 kHz window phase 3 measured at SF11/250 kHz and the 67 kHz the
+/// correction is expected to move it by. Coarse enough that a run takes under
+/// two minutes and fine enough that a 67 kHz shift is not a rounding error.
+const SWEEP_STEP_HZ: i32 = 40_000;
+
+/// Apply one console key to the configuration.
+///
+/// Every parameter with a small domain cycles rather than being typed, because
+/// this console reads raw bytes off a serial port with no line editing, and a
+/// key that always does something is easier to use — and much easier to
+/// describe in a bring-up log — than a number that has to be parsed and might
+/// not be.
+///
+/// Frequency is the exception, since its domain is 26 MHz wide, so it steps.
+fn edit_config(config: &mut RadioConfig, key: u8) {
+    match key {
+        b'S' => {
+            config.spreading_factor = if config.spreading_factor >= lora::SF_MAX {
+                lora::SF_MIN
+            } else {
+                config.spreading_factor + 1
+            };
+        }
+        b'W' => {
+            let next = lora::BANDWIDTHS
+                .iter()
+                .position(|(_, hz)| *hz == config.bandwidth_hz)
+                .map_or(0, |i| (i + 1) % lora::BANDWIDTHS.len());
+            config.bandwidth_hz = lora::BANDWIDTHS[next].1;
+        }
+        b'C' => {
+            config.coding_rate = if config.coding_rate >= config::CR_MAX {
+                config::CR_MIN
+            } else {
+                config.coding_rate + 1
+            };
+        }
+        b'P' => {
+            let next = POWER_LADDER
+                .iter()
+                .position(|dbm| *dbm == config.tx_power_dbm)
+                .map_or(0, |i| (i + 1) % POWER_LADDER.len());
+            config.tx_power_dbm = POWER_LADDER[next];
+        }
+        // Saturating at the band edges rather than wrapping. A frequency key
+        // held down should stop at 928 MHz, not reappear at 902.
+        b'[' => {
+            config.frequency_hz = config
+                .frequency_hz
+                .saturating_sub(FREQUENCY_STEP_HZ)
+                .max(pa::US915_MIN_HZ);
+        }
+        b']' => {
+            config.frequency_hz = config
+                .frequency_hz
+                .saturating_add(FREQUENCY_STEP_HZ)
+                .min(pa::US915_MAX_HZ);
+        }
+        b'R' => config.correct_reference = !config.correct_reference,
+        // Two sync words, because there are two things on this bench worth
+        // talking to: an RNode uses the private-network value and the
+        // Meshtastic board next to it does not.
+        b'N' => {
+            config.sync_word = if config.sync_word == config::SYNC_WORD_PRIVATE {
+                meshtastic::long_fast::SYNC_WORD
+            } else {
+                config::SYNC_WORD_PRIVATE
+            };
+        }
+        // The peer board's settings, in one key.
+        //
+        // The correction goes *off* with this preset, and that is the whole
+        // point of it being a preset: the peer carries the same 73 ppm error
+        // this board does, so correcting for it would move this board 67 kHz
+        // away from the only radio on the bench that answers.
+        b'M' => {
+            *config = RadioConfig {
+                frequency_hz: meshtastic::US_LONG_FAST_HZ,
+                bandwidth_hz: meshtastic::long_fast::BANDWIDTH_HZ,
+                spreading_factor: meshtastic::long_fast::SF,
+                coding_rate: 5,
+                preamble_symbols: meshtastic::long_fast::PREAMBLE,
+                sync_word: meshtastic::long_fast::SYNC_WORD,
+                correct_reference: false,
+                ..config::DEFAULT
+            };
+        }
+        b'D' => *config = config::DEFAULT,
+        _ => {}
+    }
+}
+
+/// Output powers the `P` key steps through.
+///
+/// The last two are above what the low-power PA can produce, so they select the
+/// high-power one — which nothing on this board has ever measured. They are
+/// included because the module is rated for 20 dBm and a modem that can only
+/// reach 14 is not using the hardware, and [`log_config`] says loudly when one
+/// of them is selected.
+const POWER_LADDER: [i8; 7] = [pa::LP_MIN_DBM, -10, 0, 7, pa::LP_MAX_DBM, 17, 20];
+
+/// How far the `[` and `]` keys move the frequency.
+const FREQUENCY_STEP_HZ: u32 = 100_000;
+
+/// Validate a configuration, logging why not.
+fn validate(config: &RadioConfig) -> Option<ValidConfig> {
+    match ValidConfig::new(*config) {
+        Ok(valid) => Some(valid),
+        Err(e) => {
+            defmt::error!("config: refused -- {=str}", e.message());
+            None
+        }
+    }
+}
+
+/// Print a configuration in the units a person reasons in.
+///
+/// Both frequencies, always. The commanded one is what the chip is told and the
+/// wanted one is what should come out of the antenna; phase 3 spent a long time
+/// on the 73 ppm between them, and a status line that showed only one of the two
+/// would make that distinction invisible again.
+fn log_config(config: &ValidConfig) {
+    defmt::info!(
+        "config: {=u32} Hz wanted, {=u32} Hz commanded ({=str}), SF{=u8} BW{=u32} CR4/{=u8}, {=i8} dBm",
+        config.frequency_hz,
+        config.commanded_frequency_hz(),
+        if config.correct_reference {
+            "corrected"
+        } else {
+            "uncorrected"
+        },
+        config.spreading_factor,
+        config.bandwidth_hz,
+        config.coding_rate,
+        config.tx_power_dbm
+    );
+    defmt::info!(
+        "config: preamble {=u16}, sync {=u8:#04x}, crc {=bool}, {=str} header, {=u32} bps, {=u32} us airtime for 16 bytes",
+        config.preamble_symbols,
+        config.sync_word,
+        config.crc,
+        if config.implicit_header {
+            "implicit"
+        } else {
+            "explicit"
+        },
+        config.bitrate_bps(),
+        config.airtime_us(16)
+    );
+    if !config.is_rnode_representable() {
+        defmt::warn!(
+            "config: an RNode host could not ask for this; SF must be 7-12 and power >= 0"
+        );
+    }
+    if config.pa_config().pa_sel != 0 {
+        defmt::warn!(
+            "config: {=i8} dBm selects the HIGH-POWER PA, which nothing on this board has ever measured. Phase 3 only ever keyed the low-power one. Attach an antenna and expect a number you have not seen before",
+            config.tx_power_dbm
+        );
+    }
 }
