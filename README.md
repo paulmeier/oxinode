@@ -18,7 +18,7 @@ This is phase 1 of 7. Being precise about that:
 | 0 | Pin/hardware recon | done, verified against upstream |
 | 1 | Blink an LED, prove flashing | **running on hardware** |
 | 2 | USB CDC-ACM enumeration | **running on hardware** |
-| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | in progress — steps 0–7 of 8 done, [plan](docs/phase-3-radio.md) |
+| 3 | LR1121 bring-up over SPI, read chip ID, basic TX | **done** — verified on hardware, [notes](docs/phase-3-radio.md) |
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | not started |
 | 5 | RNode KISS protocol + command set, over USB | not started |
 | 6 | `rnodeconf` / `rnsd` integration against real hardware | not started |
@@ -35,7 +35,7 @@ The same crate's low-level API is complete, and an RNode wants raw LoRa PHY
 rather than LoRaWAN, so oxinode builds on that directly. See
 [docs/phase-3-radio.md](docs/phase-3-radio.md).
 
-Phases 1 and 2 are confirmed on hardware, and phase 3 has reached step 7 of 8.
+Phases 1, 2 and 3 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to

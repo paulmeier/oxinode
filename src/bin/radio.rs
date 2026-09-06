@@ -246,6 +246,7 @@ async fn main(_spawner: Spawner) {
                                     Err(e) => defmt::error!("lr11xx: GetErrors failed, {}", e),
                                 }
                                 defmt::info!("step 3 done");
+                                set_regulator(&mut dev, true).await;
                                 if start_tcxo(&mut dev, tcxo::TUNE_3V0, true).await {
                                     configure_rf_switch(&mut dev).await;
                                     route_interrupts(&mut dev, &mut irq, irq_bits::DIO9_MASK).await;
@@ -465,7 +466,7 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, p/o = send a LoRa packet warm/cold, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
+        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot, g = next TCXO voltage, x = restart without TCXO mode, j = provoke IRQ, p/o = send a LoRa packet warm/cold, m/u = DC-DC/LDO, t = temperature, k/l = route nothing/normal to DIO9, ? = status, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
         CW_LEVELS[2],
@@ -588,6 +589,14 @@ where
                                 route_interrupts(dev, irq, mask).await;
                             }
                         }
+                        // Step 8: the regulator, and a way to compare the two.
+                        b'm' | b'u' => {
+                            if let Some(dev) = radio.as_mut() {
+                                cw_until = None;
+                                set_regulator(dev, byte == b'm').await;
+                            }
+                        }
+                        b't' => sample_thermals(radio.as_mut()).await,
                         b'?' => report(radio.as_mut(), cw_until.is_some()).await,
                         b'b' => boot::reboot_to_bootloader(),
                         b'\r' | b'\n' => {}
@@ -791,6 +800,7 @@ where
     // speaking to it again.
     Timer::after(Duration::from_millis(300)).await;
 
+    set_regulator(dev, true).await;
     if start_tcxo(dev, tune_code, use_tcxo).await {
         configure_rf_switch(dev).await;
     }
@@ -1150,4 +1160,73 @@ async fn send_packet<S, B>(
         dev.clear_irq(Interrupt::new_with_raw_value(irq_bits::ALL_NAMED)),
     )
     .await;
+}
+
+/// Step 8: choose the switching regulator over the LDO.
+///
+/// Every LR1110-family design does this, and the reasoning given is always
+/// transmit current: the LDO burns the difference between the supply and what
+/// the PA needs as heat, and a DC-DC converter does not. One command.
+///
+/// It only works in Standby RC — in any other mode the chip accepts it and
+/// then reports `CMD_FAIL` on the next `GetStatus`, which is the same silent
+/// failure `SetTxCw` produced at step 7a. So the mode is forced first rather
+/// than assumed, and the result is read back rather than trusted.
+async fn set_regulator<S, B>(dev: &mut Lr11xx<S, B>, dcdc: bool)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let sequence = async {
+        dev.standby(false).await?;
+        dev.set_reg_mode(dcdc).await?;
+        let (status, _) = dev.status().await?;
+        Ok::<_, lr11xx::Error>(status)
+    };
+    match with_timeout(Duration::from_millis(200), sequence).await {
+        Ok(Ok(status)) => {
+            let accepted = status.stat1().command_status() != Ok(lr11xx::ops::CommandStatus::Fail);
+            if accepted {
+                defmt::info!(
+                    "reg: {=str}",
+                    if dcdc {
+                        "DC-DC converter selected"
+                    } else {
+                        "LDO selected"
+                    }
+                );
+            } else {
+                defmt::error!("reg: SetRegMode was refused; the chip was not in standby RC");
+            }
+        }
+        Ok(Err(e)) => defmt::error!("reg: {}", e),
+        Err(_) => defmt::error!("reg: no reply within 200 ms"),
+    }
+}
+
+/// Read the die temperature and supply voltage.
+///
+/// The only two things this board can say about its own power, and therefore
+/// the only evidence available for whether the regulator choice does anything.
+/// `GetTemp` quantises to about 0.39 °C, which is worth knowing before drawing
+/// conclusions from small differences.
+async fn sample_thermals<S, B>(dev: Option<&mut Lr11xx<S, B>>)
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    let Some(dev) = dev else {
+        defmt::error!("thermal: no radio attached");
+        return;
+    };
+    let sequence = async {
+        let temp = dev.temp().await?;
+        let vbat = dev.vbat().await?;
+        Ok::<_, lr11xx::Error>((temp, vbat))
+    };
+    match with_timeout(Duration::from_millis(200), sequence).await {
+        Ok(Ok((temp, vbat))) => defmt::info!("thermal: die {=f32} C, vbat {=f32} V", temp, vbat),
+        Ok(Err(e)) => defmt::error!("thermal: {}", e),
+        Err(_) => defmt::error!("thermal: no reply within 200 ms"),
+    }
 }

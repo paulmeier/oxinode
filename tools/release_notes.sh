@@ -13,10 +13,12 @@ version="${1:?usage: release_notes.sh vX.Y.Z}"
 base="$(tools/layout.py memory.x --field FLASH.origin)"
 
 cat <<MSG
-> **This firmware does not do anything useful yet.** oxinode is an in-progress
-> RNode-compatible LoRa modem for the muzi.works Base Duo. There is no radio
-> support, no RNode/KISS protocol, and no display. See the README for which
-> phase this is. Do not expect Reticulum to talk to it.
+> **This firmware is not an RNode yet.** oxinode is an in-progress
+> RNode-compatible LoRa modem for the muzi.works Base Duo. The radio works —
+> it identifies itself, transmits carriers and sends LoRa packets — but there
+> is **no RNode/KISS protocol and no display**, so nothing here answers
+> \`rnodeconf\` and Reticulum will not talk to it. See the README for which
+> phase this is.
 
 ## Files
 
@@ -24,6 +26,7 @@ cat <<MSG
 |---|---|
 | \`oxinode-blink-$version.uf2\` | Blinks the green LED. Proves flashing works. |
 | \`oxinode-usb-cdc-$version.uf2\` | Enumerates as a USB serial port and echoes. |
+| \`oxinode-radio-$version.uf2\` | LR1121 bring-up: identifies the radio, starts its oscillator, and offers a console for carriers and test packets. |
 
 \`.elf\` files are the exact binaries the images were built from, kept so a fault
 address can be resolved later. \`SHA256SUMS\` covers every asset.
@@ -41,6 +44,30 @@ Recovery is always another double-tap of reset: the bootloader sits above the
 application and is never overwritten. Once \`usb-cdc\` is running, opening its
 serial port at 1200 baud and closing it puts the board back in the bootloader
 without touching the button.
+
+## The radio image
+
+\`radio\` is a diagnostic, not a product. It enumerates one serial port, waits
+for a terminal to open it, then walks the whole radio bring-up and says what it
+found — SPI pin selection read back from the peripheral, the reset and BUSY
+trace, the chip's identity and firmware version, oscillator startup, the RF
+switch masks, and the interrupt line.
+
+It then takes single-character commands on the same port:
+
+| Key | What it does |
+|---|---|
+| \`1\` \`2\` \`3\` | Continuous carrier at −17, 0 and +14 dBm |
+| \`p\` \`o\` | Send one LoRa packet, from standby-XOSC or standby-RC |
+| \`0\` | Stop transmitting |
+| \`t\` \`?\` | Die temperature and supply; chip status |
+| \`r\` | Reboot the radio and redo the bring-up |
+| \`b\` | Reboot into the bootloader |
+
+**Attach an antenna to the sub-GHz SMA before pressing anything that transmits.**
+Transmitting into an open port can damage the power amplifier. Every carrier
+stops itself after ten seconds; an unmodulated carrier is a bench diagnostic and
+not something FCC Part 15.247 contemplates.
 
 MSG
 

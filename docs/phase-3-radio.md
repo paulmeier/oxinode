@@ -704,7 +704,7 @@ the expected airtime at 7b~~ — both done.
 > mode that satisfies FCC Part 15.247, which expects digital modulation or
 > frequency hopping in 902–928 MHz.
 
-### 8. Lock it in
+### 8. Lock it in — done
 
 * **Select the DC-DC regulator** rather than leaving the chip in LDO mode. Every
   LR1110-family board does; it is one command and it matters for TX current.
@@ -714,23 +714,87 @@ the expected airtime at 7b~~ — both done.
   `RfSwitchConfig` construction, the TCXO delay ↔ microseconds conversion,
   `Version` decoding, and LoRa airtime calculation.~~ Done as each step needed
   it, which worked better than saving it for the end: the airtime calculation
-  earned its keep immediately as the thing step 7b's `TxDone` was checked
+  earned its keep immediately, as the thing step 7b's `TxDone` was checked
   against.
-* Still open from the frequency investigation: what to do about 73 ppm.
+
+#### The regulator claim, tested rather than repeated
+
+"It matters for TX current" is the reason everyone gives, and this board has no
+ammeter. It does have a die temperature sensor, and dissipated power has to go
+somewhere: an LDO burns the difference between the supply and what the PA needs
+as heat, and a converter does not.
+
+Six seconds of +14 dBm carrier per trial, temperature read before and after,
+**ABBA and then BAAB** so that cumulative warming falls equally on both modes:
+
+| mode | temperature rise per trial | mean |
+|---|---|---|
+| LDO | 1.55, 1.16, 1.55, 1.16 °C | **1.36 °C** |
+| DC-DC | 0.39, 0.78, 0.78, 0.39 °C | **0.58 °C** |
+
+Eight trials, both orderings, and **the two groups do not overlap**: LDO is
+always three or four quanta of the sensor's 0.388 °C step, DC-DC always one or
+two. The LDO dissipates about 2.3× as much for the same output power.
+
+That is a real difference, but it is worth being precise about what it is not.
+`GetVbat` did not move at all — 3.361765 V on every one of the sixteen readings,
+which is the quantisation, not a measurement of stability. And n is 4 per mode
+on one board at room temperature. The claim supported is "the regulator choice
+is measurable and goes the direction everyone says", not a figure for current
+draw, which this board cannot produce.
+
+`SetRegMode` only works in Standby RC — in any other mode the chip accepts it
+and then reports `CMD_FAIL` on the next `GetStatus`, the same silent failure
+`SetTxCw` produced at step 7a. So the mode is forced first and the result read
+back rather than trusted.
+
+#### The `radio` image ships
+
+It was deliberately held back from releases until it did something worth
+downloading. It now walks the entire bring-up and reports what it found, then
+offers a console for carriers, test packets, interrupt provocation and a radio
+reboot. It is a diagnostic rather than a product, and the release notes say so —
+along with the warning to attach an antenna before pressing anything that
+transmits.
+
+## Phase 3 is done
+
+Every step verified on hardware. What it establishes, and what it does not:
+
+**Established.** The radio is an LR1121 (hardware `0x22`, firmware 1.1) on a SPI
+bus whose pins the peripheral confirms; it resets in a repeatable 191 ms; its
+oscillator starts; its antenna switch is configured and *proved* by a receiver;
+its interrupts reach P1.08 and the mask demonstrably gates them; and it sends
+LoRa packets whose `TxDone` arrives within 0.9% of a computed airtime and whose
+burst an SDR sees at the expected length.
+
+**Not established.** Nothing has demodulated a packet. And the transmitter is
+73 ppm low, which is not a configuration error — the tune voltage does nothing
+and the oscillator is correctly declared — so a packet sits 67 kHz below where
+it was commanded, outside what a LoRa receiver at 125 kHz tolerates. **That is
+the open item phase 4 or 5 has to answer**, because a modem that cannot be
+received is not a modem.
 
 ## Open questions
 
 Two of the three original unknowns were closed by the Rev 01 schematic and the
 Elecrow module datasheet, both of which are now on hand:
 
-* ~~Which LR1121 DIO reaches nRF P1.08.~~ **DIO9**, over the `IRQ_JUMPER` net.
+* ~~Which LR1121 DIO reaches nRF P1.08.~~ **DIO9**, over the `IRQ_JUMPER` net,
+  and confirmed in operation at step 6.
 * ~~The RF switch masks for this board, including the 2.4 GHz path.~~ DIO5/DIO6
   only, table in step 5; the 2.4 GHz path bypasses the switch entirely.
 
 What remains:
 
+* **The 73 ppm transmit error.** The largest open item in the project. Not the
+  TCXO tune voltage, not a mis-driven crystal; the module's own reference, which
+  also drifts ≈0.65 ppm/°C. Untried: the LR11x0's crystal trimming registers,
+  whose addresses are not known here.
 * Whether the attached GPS antenna feeds the LR1121's own GNSS input or the
   separate UART GPS module on P0.19/P0.20. The board does hang a UART GPS off
   the expansion connector behind a load switch, and the switch's GNSS state is
   low/low regardless, so this is now a question about what the antenna is
   *for* rather than about what to configure.
+* The chip reports its last reset as `Analog` rather than `External` after an
+  NRESET pulse (step 3). Recorded, not resolved.
