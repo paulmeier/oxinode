@@ -25,11 +25,27 @@ ELF = os.path.join(REPO, "target/thumbv7em-none-eabihf/release/blink")
 STUB = """#!/usr/bin/env bash
 # Stub adafruit-nrfutil: record the invocation, and for genpkg create the file
 # the real tool would have produced so the rest of the script can proceed.
+#
+# NRFUTIL_FAIL_SERIAL: how many `dfu serial` calls to fail before succeeding.
+# That is how the touch race is reproduced -- the real tool reboots the board
+# and then cannot reopen the port in time.
 set -euo pipefail
 printf '%s\\n' "$*" >> "$NRFUTIL_LOG"
 if [[ "${1:-}" == "dfu" && "${2:-}" == "genpkg" ]]; then
     for arg in "$@"; do :; done
     : > "$arg"
+fi
+if [[ "$*" == *"dfu serial"* ]]; then
+    fail="${NRFUTIL_FAIL_SERIAL:-0}"
+    done_file="$NRFUTIL_LOG.serial"
+    n=0
+    [[ -f "$done_file" ]] && n="$(cat "$done_file")"
+    n=$((n + 1))
+    echo "$n" > "$done_file"
+    if (( n <= fail )); then
+        echo "Target is not in DFU mode." >&2
+        exit 1
+    fi
 fi
 exit 0
 """
@@ -128,6 +144,61 @@ class TestDfuFlash(unittest.TestCase):
         self.assertFalse(
             any("dfu serial" in c for c in calls), f"attempted a flash: {calls}"
         )
+
+    def test_a_lost_touch_race_is_retried_rather_than_reported(self):
+        """The failure this fixes cost three trips to the reset button.
+
+        `--touch 1200` reboots the board into its bootloader and then reopens
+        the port -- but the board has to re-enumerate first, and the tool can
+        get there before the bootloader does. It gives up, having already
+        removed the application it would have touched, and the operator has to
+        re-run the same command with OXINODE_DFU_IN_DFU=1 by hand.
+
+        Since the bootloader announces itself by mounting a drive, the script
+        can see that state and finish the job.
+        """
+        proc, calls = self.run_script(
+            OXINODE_DFU_IN_DFU="0",
+            OXINODE_DFU_BOOTLOADER="1",
+            OXINODE_DFU_RETRY_DELAY="0",
+            NRFUTIL_FAIL_SERIAL="1",
+        )
+        self.assertEqual(proc.returncode, 0, f"stderr:\n{proc.stderr}")
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertEqual(len(serial), 2, f"expected one retry, got {calls}")
+        # The first attempt touches; the retry must not, because by then there
+        # is no application left to reboot.
+        self.assertIn("--touch", serial[0])
+        self.assertNotIn("--touch", serial[1])
+
+    def test_no_bootloader_means_no_retry(self):
+        """A failure with no bootloader in sight is a real failure. Retrying it
+        would just be three more of the same error, two seconds apart."""
+        proc, calls = self.run_script(
+            OXINODE_DFU_IN_DFU="0",
+            OXINODE_DFU_BOOTLOADER="0",
+            OXINODE_DFU_RETRY_DELAY="0",
+            NRFUTIL_FAIL_SERIAL="9",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertEqual(len(serial), 1, f"should not retry: {calls}")
+        self.assertIn("Double-tap the reset button", proc.stderr)
+
+    def test_a_bootloader_that_never_answers_gives_up_and_says_how_to_recover(self):
+        """The state this board actually gets into: the bootloader is running
+        and mounts its drive, but its serial DFU service does not answer. There
+        is no software route out of it, so the message has to say so."""
+        proc, calls = self.run_script(
+            OXINODE_DFU_IN_DFU="0",
+            OXINODE_DFU_BOOTLOADER="1",
+            OXINODE_DFU_RETRY_DELAY="0",
+            NRFUTIL_FAIL_SERIAL="99",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertEqual(len(serial), 4, f"one attempt plus three retries: {calls}")
+        self.assertIn("Double-tap the reset button", proc.stderr)
 
     def test_runs_to_completion_in_dfu_mode(self):
         proc, calls = self.run_script(OXINODE_DFU_IN_DFU="1")

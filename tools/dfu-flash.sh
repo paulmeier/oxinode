@@ -13,8 +13,10 @@
 #
 # Environment overrides, mostly so tools/test_dfu_flash.py can exercise this
 # without a board attached:
-#   OXINODE_DFU_PORT   use this serial port instead of searching
-#   OXINODE_DFU_IN_DFU 1/0 to assert bootloader state instead of detecting it
+#   OXINODE_DFU_PORT       use this serial port instead of searching
+#   OXINODE_DFU_IN_DFU     1/0 to assert bootloader state instead of detecting it
+#   OXINODE_DFU_BOOTLOADER 1/0 to answer the bootloader probe directly
+#   OXINODE_DFU_RETRY_DELAY seconds to wait between retries (default 2)
 set -euo pipefail
 
 elf="${1:?usage: dfu-flash.sh <elf>}"
@@ -77,14 +79,25 @@ fi
 # Is the board already in its bootloader? If so, do not ask the tool to perform
 # a 1200-baud touch: there is no application to reset, and it would sit waiting
 # for a re-enumeration that never comes.
-in_dfu="${OXINODE_DFU_IN_DFU:-}"
-if [[ -z "$in_dfu" ]]; then
-    in_dfu=0
+# Named because the retry below asks the same question again, after the touch
+# has had a chance to do its work.
+bootloader_present() {
+    if [[ -n "${OXINODE_DFU_BOOTLOADER:-}" ]]; then
+        echo "${OXINODE_DFU_BOOTLOADER}"
+        return
+    fi
+    local found=0
     shopt -s nullglob
     for d in /Volumes/* /media/"${USER:-}"/* /run/media/"${USER:-}"/*; do
-        if [[ -f "$d/INFO_UF2.TXT" ]]; then in_dfu=1; fi
+        if [[ -f "$d/INFO_UF2.TXT" ]]; then found=1; fi
     done
     shopt -u nullglob
+    echo "$found"
+}
+
+in_dfu="${OXINODE_DFU_IN_DFU:-}"
+if [[ -z "$in_dfu" ]]; then
+    in_dfu="$(bootloader_present)"
 fi
 
 hex="${elf}.hex"
@@ -109,13 +122,54 @@ rm -f "$pkg"
 # Assemble the whole argument list in one array rather than keeping a separate
 # array of extras: macOS ships bash 3.2, where expanding an *empty* array trips
 # `set -u`. Built here, after $pkg exists -- for the same reason.
-dfu_args=(--verbose dfu serial -pkg "$pkg" -p "$port" -b 115200 --singlebank)
-if [[ "$in_dfu" -eq 0 ]]; then
-    # A running oxinode image reboots into the bootloader on a 1200-baud open,
-    # so flashing needs no button press. See src/bin/usb_cdc.rs.
-    dfu_args+=(--touch 1200)
-fi
+run_dfu() {
+    local args=(--verbose dfu serial -pkg "$pkg" -p "$port" -b 115200 --singlebank)
+    if [[ "$1" -eq 0 ]]; then
+        # A running oxinode image reboots into the bootloader on a 1200-baud
+        # open, so flashing needs no button press. See src/bin/usb_cdc.rs.
+        args+=(--touch 1200)
+    fi
+    "$nrfutil" "${args[@]}"
+}
 
 size="$(wc -c < "$bin" | tr -d ' ')"
 echo "dfu-flash: $port  ($size bytes at $base)"
-"$nrfutil" "${dfu_args[@]}"
+
+if run_dfu "$in_dfu"; then
+    exit 0
+fi
+
+# The touch is a race, and losing it used to mean doing this by hand.
+#
+# `--touch 1200` opens the port at 1200 baud, the running image reboots into
+# its bootloader, and the tool then reopens the port -- but the board has to
+# re-enumerate first, and on a slow host the tool gets there before the
+# bootloader does. It gives up, and leaves the board sitting in DFU with the
+# application already gone.
+#
+# That state is recoverable and obvious: the bootloader mounts a drive with
+# INFO_UF2.TXT on it. So rather than reporting a failure that needs a human to
+# re-run the same command with OXINODE_DFU_IN_DFU=1, look for the bootloader
+# and finish the job. The touch is not repeated, because there is no longer an
+# application to touch.
+for attempt in 1 2 3; do
+    sleep "${OXINODE_DFU_RETRY_DELAY:-2}"
+    if [[ "$(bootloader_present)" != "1" ]]; then
+        continue
+    fi
+    echo "dfu-flash: the board is in its bootloader; retrying (attempt $attempt)" >&2
+    if run_dfu 1; then
+        exit 0
+    fi
+done
+
+cat >&2 <<'MSG'
+
+dfu-flash: could not reach the bootloader.
+
+  If a drive with INFO_UF2.TXT is mounted, the bootloader is running but its
+  serial DFU service is not answering. Double-tap the reset button and try
+  again -- that is the only recovery, since this board has no DFU button and a
+  1200-baud touch needs a port that opens.
+MSG
+exit 1

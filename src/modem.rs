@@ -139,8 +139,28 @@ where
     /// bisection discovering that: without it `SetTxCw` is rejected with
     /// `cmd_error` while `GetErrors` stays clean, and the crate's own
     /// documentation says only frequency and PA config are needed.
+    ///
+    /// Standby goes first of all, for a related reason -- see the comment on
+    /// the sequence below. Configuration from receive is refused, and refused
+    /// quietly.
     pub async fn apply(&mut self, config: &ValidConfig) -> Result<(), ModemError> {
         let sequence = async {
+            // Standby first, and this is not tidiness.
+            //
+            // The LR1121 only accepts its configuration commands in standby. In
+            // receive it takes them and then reports `CMD_FAIL` on the next
+            // status read -- the same silent refusal phase 3 met with
+            // `SetRegMode` and `SetTxCw`. So the first configuration after boot
+            // works, because the chip is already in standby, and every
+            // *re*-configuration fails: a host that reconnects, or changes one
+            // parameter while running, gets a modem that quietly keeps the
+            // settings it had.
+            //
+            // XOSC rather than RC, so the 32 MHz reference is already running.
+            // Phase 3 measured the startup as a fixed 5 ms charged to the first
+            // operation that needs it, which is a tenth of the airtime at SF7
+            // if it is paid once per packet.
+            self.dev.standby(true).await?;
             self.dev.set_packet_type(PacketType::LoRa).await?;
             self.dev
                 .set_rf_frequency(config.commanded_frequency_hz())
@@ -267,6 +287,14 @@ where
     /// second packet rather than the first.
     pub async fn start_rx(&mut self, config: &ValidConfig) -> Result<(), ModemError> {
         let sequence = async {
+            // Standby for the same reason as in `apply`: `SetPacketParams` is a
+            // configuration command, and issuing it from receive is refused
+            // silently. Insurance rather than a necessity on the paths that
+            // exist today -- `apply` always precedes this, and a finished
+            // transmission leaves the chip in standby anyway -- but it makes
+            // `start_rx` safe to call from any state rather than only from the
+            // two it happens to be called from now.
+            self.dev.standby(true).await?;
             // Back to the receive ceiling, in case a transmit narrowed it.
             self.dev
                 .set_lora_packet(packet(config, MAX_PAYLOAD))
