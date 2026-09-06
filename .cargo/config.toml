@@ -1,0 +1,29 @@
+[build]
+target = "thumbv7em-none-eabihf"   # nRF52840: Cortex-M4F
+
+[target.thumbv7em-none-eabihf]
+# `cargo run --bin blink` flashes over the bootloader's serial DFU interface.
+#
+# Not the UF2 drive: on macOS 26 that route silently does nothing, because FAT
+# volumes are now served by FSKit and the bootloader's drive is a synthetic FAT
+# that FSKit never actually writes through to. tools/uf2-flash.sh is still there
+# for hosts where dropping a .uf2 on the drive works.
+#
+# There is no debug probe on this setup, so there is deliberately no probe-rs
+# runner here. If you later attach SWD, replace the line below with:
+#     runner = "probe-rs run --chip nRF52840_xxAA"
+# and drop `--connect-under-reset` in if the chip is asleep. Note that probe-rs
+# flashing at 0x26000 leaves the UF2 bootloader intact; erasing the whole chip
+# does not, and you would need a probe forever after.
+runner = "tools/dfu-flash.sh"
+
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+
+    # The nRF52840 is a Cortex-M4F. Without this, the FPU is present but the
+    # compiler will not use it.
+    "-C", "target-cpu=cortex-m4",
+]
+
+[env]
+# Nothing yet. When defmt-over-USB lands, DEFMT_LOG goes here.

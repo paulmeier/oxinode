@@ -19,3 +19,19 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Build outputs from the UF2 flashing path
+*.uf2
+*.bin
+
+# Python bytecode from the host-side tooling
+__pycache__/
+*.pyc
+
+# Release artifacts staged by tools/package.sh
+/dist/
+
+# Bootstrapped by tools/dfu-flash.sh when adafruit-nrfutil is not on PATH
+/tools/.venv/
+*.hex
+*.zip

@@ -1,0 +1,66 @@
+[package]
+name = "oxinode"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "RNode-compatible LoRa modem firmware for the muzi.works Base Duo (nRF52840 + LR1121)"
+repository = "https://github.com/paulmeier/oxinode"
+publish = false
+
+[workspace]
+members = ["core"]
+
+[dependencies]
+oxinode-core = { path = "core" }
+cortex-m = { version = "0.7.7", features = [
+    "inline-asm",
+    # Single-core Cortex-M: interrupt-masking is a sufficient critical section.
+    "critical-section-single-core",
+] }
+cortex-m-rt = "0.7.6"
+
+embassy-executor = { version = "0.10", features = [
+    "platform-cortex-m",
+    "executor-thread",
+] }
+embassy-time = "0.5"
+embassy-futures = "0.1"
+embassy-nrf = { version = "0.11", features = [
+    "nrf52840",
+    "time-driver-rtc1",
+    "gpiote",
+    "time",
+    "unstable-pac",   # POWER.GPREGRET, for reboot-into-bootloader
+] }
+embassy-usb = "0.6"
+static_cell = "2.1"
+
+[build-dependencies]
+# Shares the memory.x parser with the firmware, so the address baked into the
+# image and the address in the linker script cannot disagree.
+oxinode-core = { path = "core" }
+
+[[bin]]
+name = "blink"
+path = "src/bin/blink.rs"
+
+[[bin]]
+name = "usb-cdc"
+path = "src/bin/usb_cdc.rs"
+
+# Debug builds of this still have to fit in 824K of flash and run at 64 MHz,
+# so keep some optimisation on even in dev.
+[profile.dev]
+opt-level = "s"
+debug = 2
+lto = false
+incremental = true
+
+[profile.release]
+opt-level = "s"
+debug = 2          # kept: costs nothing in flash, makes backtraces readable
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
