@@ -19,5 +19,6 @@ pub mod ble;
 pub mod gpio;
 pub mod linker_script;
 pub mod logbuf;
+pub mod lr1121;
 pub mod serial;
 pub mod usb;

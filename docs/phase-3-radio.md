@@ -136,7 +136,7 @@ reset button.
 `usb-cdc` keeps its two ports and its continuous heartbeat; the drain loop is
 now shared between both images (`src/usb_log.rs`), with the DTR gate passed in.
 
-### 2. Reset and BUSY
+### 2. Reset and BUSY — done
 
 `Lr11xx::new(spi, busy)` takes **no reset pin**, so NRESET (P1.10) is ours: hold
 low ≥100 µs, release, then wait for BUSY (P1.11) to fall. BUSY needs
@@ -153,6 +153,61 @@ distinguish rather than silently waiting.
 
 *Done when:* BUSY is observed high then low within a bounded time, and a timeout
 logs a clear error instead of hanging forever.
+
+#### The startup takes 191 ms, not "milliseconds"
+
+**This step's original timing assumption was wrong, and the board said so on the
+first run.** The plan above says LR1121 startup is milliseconds — the figure the
+SX126x family trains you to expect — so the first timeout was 100 ms. It fired:
+
+```
+ERROR busy: still high after 100000 us
+ERROR reset: BUSY never fell
+```
+
+Widening the timeout and repeating the reset eight times gave 191101, 191162,
+191131, 191162, 191101, 191131, 191162 and 191131 µs. That is a spread of 61 µs,
+or two ticks of the 32.768 kHz crystal doing the measuring — so **191.1 ms,
+deterministic to the limit of what oxinode can observe**, and nearly two hundred
+times longer than assumed.
+
+Why it takes that long is *not* established. The LR11x0 family carries its own
+on-chip transceiver firmware, so a boot that verifies or loads an image is the
+obvious guess — but it is a guess, and the datasheet was not on hand to check
+it. The number is not a guess. It lives in `oxinode_core::lr1121` as
+`STARTUP_MEASURED_US`, with the timeout set to 5× it and a compile-time
+assertion that stops anyone quietly reverting it towards "milliseconds".
+
+The consequence for later steps: step 4's "allow ~10 ms after power-on" is
+dwarfed by this. Anything that resets the radio pays a fifth of a second, which
+matters for a phase-5 `rnodeconf` interaction that expects a prompt reply.
+
+#### What the trace can and cannot rule out
+
+`ResetVerdict` reads a `BusyTrace` rather than returning a bare bool, because
+the interesting distinctions are the ones a bool destroys:
+
+* **BUSY never fell** — a dead part, a reset that never released, a BUSY line
+  that is not the pin we think it is, and a chip in its own bootloader all
+  produce this one symptom, and all four are inside the module.
+* **BUSY was low throughout and never rose** — either the chip finished before
+  the first sample, or the pin does not follow BUSY at all. This one is a trap
+  worth naming: `wait_for_low()` returns *immediately* on a pin stuck low, so
+  the obvious implementation reports success loudest exactly when it is most
+  wrong.
+* **BUSY rose and fell** — says the pin behaved, and nothing at all about
+  whether the chip on the other end is an LR1121.
+
+Sampling BUSY *before* touching NRESET turned out to be worth more than
+expected. The run reports `before reset false, during reset true`: BUSY was low,
+driving P1.10 low drove P1.11 high, and releasing P1.10 let it fall. That causal
+link confirms **both** pins at once — a GPIO that was not NRESET would not move
+a pin that was not BUSY. The plan expected step 3 to be the first real evidence;
+this arrives a step earlier.
+
+The level during reset is recorded and logged but deliberately never judged: the
+datasheet on hand does not say what BUSY must do while the chip is held in
+reset, and inventing a requirement would turn a guess into a failing check.
 
 ### 3. GetVersion
 

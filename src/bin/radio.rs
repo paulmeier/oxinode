@@ -1,8 +1,9 @@
 //! Phase 3 bring-up image for the LR1121.
 //!
-//! Currently at step 1: it configures the SPI bus and reports what the
-//! peripheral actually claimed. Nothing has been said to the radio yet — see
-//! `docs/phase-3-radio.md` for what each step adds.
+//! Currently at step 2: it configures the SPI bus, reports what the peripheral
+//! actually claimed, then pulses NRESET and reports what BUSY did about it.
+//! Nothing has been *said* to the radio yet — no SPI transaction has been
+//! issued. See `docs/phase-3-radio.md` for what each step adds.
 //!
 //! Unlike `usb-cdc`, this image exposes a **single** CDC-ACM port, and it is a
 //! log port. That is not a simplification for its own sake: DTR is only visible
@@ -30,6 +31,7 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
+use oxinode_core::lr1121::ResetVerdict;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -56,6 +58,7 @@ async fn main(_spawner: Spawner) {
     // Configure the radio bus first, so the register readback below has
     // something to read. Nothing is transmitted by doing this.
     let _spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
+    let mut reset = radio::RadioReset::new(p.P1_10, p.P1_11);
 
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
     let serial = board::take_device_serial();
@@ -125,14 +128,48 @@ async fn main(_spawner: Spawner) {
         } else {
             defmt::error!("spi: peripheral did not claim the pins we asked for");
         }
-        defmt::info!("step 1 done; the LR1121 has not been addressed yet");
+        // Step 2. Nothing here transmits; it only drives NRESET and watches
+        // BUSY. Both waits are bounded -- a chip whose BUSY never falls must
+        // produce a log line, not a silent board.
+        let trace = reset.cycle().await;
+        defmt::info!(
+            "busy: before reset {=bool}, during reset {=bool}, rose {=bool}",
+            trace.before_reset,
+            trace.during_reset,
+            trace.rose
+        );
+        match trace.fell_after_us {
+            Some(us) => defmt::info!(
+                "busy: fell {=u32} us after NRESET released (measured norm {=u32})",
+                us,
+                oxinode_core::lr1121::STARTUP_MEASURED_US
+            ),
+            None => defmt::error!(
+                "busy: still high after {=u32} us",
+                oxinode_core::lr1121::BUSY_TIMEOUT_US
+            ),
+        }
+
+        let verdict = ResetVerdict::of(&trace);
+        if verdict.can_proceed() {
+            defmt::info!("reset: {=str}", verdict.summary());
+        } else {
+            defmt::error!("reset: {=str}", verdict.summary());
+        }
+        defmt::info!("reset: cannot distinguish {=str}", verdict.ambiguity());
+
+        defmt::info!("step 2 done; the LR1121 has still not been addressed");
 
         // Liveness, and something for a terminal that reconnects later.
         let mut ticks: u32 = 0;
         loop {
             Timer::after(Duration::from_millis(5000)).await;
             ticks += 1;
-            defmt::info!("idle, tick {=u32}", ticks);
+            defmt::info!(
+                "idle, tick {=u32}, busy {=bool}",
+                ticks,
+                reset.busy_is_high()
+            );
         }
     };
 
