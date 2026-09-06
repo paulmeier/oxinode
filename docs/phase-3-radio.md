@@ -209,31 +209,73 @@ The level during reset is recorded and logged but deliberately never judged: the
 datasheet on hand does not say what BUSY must do while the chip is held in
 reset, and inventing a requirement would turn a guess into a failing check.
 
-### 3. GetVersion
+### 3. GetVersion — done
 
-`Lr11xx::new` already issues `GetVersion` and logs the result. Assert
-`use_case == UseCase::Lr1121` (`0x03`).
+**Verified on hardware.** The chip is an LR1121, hardware `0x22`, transceiver
+firmware **1.1**:
 
-The check is cheap insurance rather than a live ambiguity. The Meshtastic
-variant defines **both** `USE_SX1262` and `USE_LR1121` because Elecrow ships two
-footprint-compatible modules — nRFLR1121 (LR1121) and nRFLR1262 (an SX1262,
-despite the name) — and one PCB accepts either. The Rev 01 schematic populates
-the LR1121 part, and on an SX1262 board the interrupt would arrive on P1.06
-instead. Assert rather than probe, but assert.
+```
+INFO  version: reply 0x22 0x03 0x01 0x01
+INFO  version: stat1 0x07 -- previous command ok, data follows
+INFO  chip: standby (RC), executing from flash true, last reset power-on or brown-out
+INFO  version: hw 0x22, use case 0x03, fw 1.1
+INFO  version: LR1121, as expected
+INFO  lr11xx: driver attached
+INFO  lr11xx: errors ErrorStat { hf_xosc_start }
+```
 
-Failure signatures worth recognising: `UseCase::Bootloader` (`0xDF`) means the
-chip is sitting in its own bootloader; all-`0x00` or all-`0xFF` means SPI is not
-working at all rather than the chip being wrong.
+`use_case == 0x03` settles the module ambiguity: this is the nRFLR1121, not the
+footprint-compatible nRFLR1262, so the pin map — including DIO9 on P1.08 — is
+the right one.
 
-**Log the firmware version, do not just check the use case.** The LR11x0 family
-carries its own on-chip transceiver firmware, and behaviour genuinely differs
-between images — RadioLib knows `0x0307`, `0x0401` and `0x0402`, and Meshtastic
-carries a whole opt-in update path for parts running old ones (~240 kB of flash
-per baked-in image, so oxinode wants no part of it). When an LR11x0 misbehaves
-in a way the datasheet does not explain, the transceiver firmware version is the
-first thing to look at, and it costs nothing to have it already in the log.
+#### The probe is raw on purpose
 
-*Done when:* the log says `Lr1121`, with hardware and firmware versions.
+`lr11xx` has a `version()` that does this, and it is the one used from here on.
+It is the wrong tool for the *first* transaction, because it validates the reply
+and returns `Error::Fail` — discarding the bytes at exactly the moment the bytes
+are the only evidence there is. An all-zeros reply and a healthy reply arrive by
+identical means; telling them apart is the entire job and cannot be done from an
+error enum. So `radio::probe_version` issues the command by hand, keeps every
+byte, and `oxinode_core::lr1121::version` reads them with host tests behind it.
+
+Two things that would otherwise have to be learned the hard way:
+
+* **The command and its reply are separate NSS cycles**, with BUSY high in
+  between. Done in one transaction you get the status of the *previous* command
+  and no reply at all — a failure that looks like broken hardware and is not.
+* **`lr11xx` waits for BUSY with no timeout of its own.** Handing the crate a
+  BUSY that never falls hangs the driver, which is precisely the silent board
+  step 2 exists to prevent. The bounded probe therefore goes first, and the
+  crate is only given the pins once BUSY has proved itself.
+
+#### The firmware-version check was wrong and has been replaced
+
+This step originally said to compare against versions "RadioLib knows" —
+`0x0307`, `0x0401`, `0x0402`. Implemented as written, it announced that the
+first real board was running firmware *"no reference implementation
+documents"*. The list is family-wide rather than per-part, it could not be
+checked against RadioLib from here, and its first act was to call healthy
+hardware suspect.
+
+It is now `OBSERVED_FIRMWARE`, a single measured value — the version on the
+bench board, 1.1 — and a mismatch means "this is not the board the behaviour in
+this repository was observed on", which is worth one log line and nothing more.
+The underlying advice stands: when an LR11x0 misbehaves in a way the datasheet
+does not explain, the transceiver firmware version is the first thing to look
+at.
+
+#### Open: the chip says the last reset was analog, not external
+
+`reset_status` reads `Analog` — power-on or brown-out — after a reset we drove
+on NRESET, where `External` is the value that means "the NRESET pin". Both the
+raw probe and `lr11xx` agree on the byte, so it is not a decoding error.
+
+Two readings, and the schematic does not settle it: either NRESET on this module
+drives the analog reset domain and is reported as such, or the field is
+reporting the board's power-on and our pulse did not register as a distinct
+reset. The second would be worrying, except that BUSY demonstrably answers the
+pulse (step 2) and the 191 ms startup is a full boot. Recorded rather than
+resolved.
 
 ### 4. TCXO
 
@@ -251,7 +293,20 @@ board jumpers DIO9 out to the MCU (step 6).
 `GetTemp` is a good smoke test — the crate's own docs note it runs off XOSC, so
 it exercises the TCXO path.
 
-*Done when:* no error status, and the temperature reads like a room.
+**Step 3 leaves this one already measurable.** With the driver attached and
+nothing yet done about the TCXO, `GetErrors` returns exactly one flag:
+
+```
+INFO  lr11xx: errors ErrorStat { hf_xosc_start }
+```
+
+"High frequency XOSC did not start correctly" — the chip tried, and DIO3 is not
+driving the TCXO yet because nothing has told it to. That makes step 4's success
+condition concrete rather than a judgement call: **`hf_xosc_start` clears.**
+Note the crate's own hint on that flag, which matches: redo a reset, *or* send
+`SetTcxoCmd` and redo calibrations.
+
+*Done when:* `hf_xosc_start` is clear, and the temperature reads like a room.
 
 ### 5. RF switch
 

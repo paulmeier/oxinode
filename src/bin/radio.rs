@@ -1,9 +1,9 @@
 //! Phase 3 bring-up image for the LR1121.
 //!
-//! Currently at step 2: it configures the SPI bus, reports what the peripheral
-//! actually claimed, then pulses NRESET and reports what BUSY did about it.
-//! Nothing has been *said* to the radio yet — no SPI transaction has been
-//! issued. See `docs/phase-3-radio.md` for what each step adds.
+//! Currently at step 3: it configures the SPI bus, reports what the peripheral
+//! actually claimed, pulses NRESET and reports what BUSY did about it, then
+//! asks the chip what it is. See `docs/phase-3-radio.md` for what each step
+//! adds.
 //!
 //! Unlike `usb-cdc`, this image exposes a **single** CDC-ACM port, and it is a
 //! log port. That is not a simplification for its own sake: DTR is only visible
@@ -29,6 +29,7 @@ use embassy_nrf::{bind_interrupts, peripherals, spim};
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config as UsbConfig};
+use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::{boot, radio, usb_log};
 use oxinode_core::lr1121::ResetVerdict;
@@ -57,7 +58,7 @@ async fn main(_spawner: Spawner) {
 
     // Configure the radio bus first, so the register readback below has
     // something to read. Nothing is transmitted by doing this.
-    let _spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
+    let mut spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
     let mut reset = radio::RadioReset::new(p.P1_10, p.P1_11);
 
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
@@ -158,18 +159,100 @@ async fn main(_spawner: Spawner) {
         }
         defmt::info!("reset: cannot distinguish {=str}", verdict.ambiguity());
 
-        defmt::info!("step 2 done; the LR1121 has still not been addressed");
+        // Step 3: the first thing ever said to the radio.
+        //
+        // Gated on the reset verdict, and not merely as tidiness. `lr11xx`
+        // waits for BUSY with no timeout of its own, so calling into the crate
+        // with a BUSY that never falls hangs the driver -- exactly the silent
+        // board step 2 was built to avoid. The bounded probe goes first, and
+        // the crate is only handed the pins once BUSY has proved itself.
+        let mut radio = None;
+        if !verdict.can_proceed() {
+            defmt::error!("skipping GetVersion: BUSY never reported the chip ready");
+        } else {
+            match radio::probe_version(&mut spi, &mut reset).await {
+                Ok(probe) => {
+                    defmt::info!(
+                        "version: reply {=u8:#04x} {=u8:#04x} {=u8:#04x} {=u8:#04x}",
+                        probe.reply[0],
+                        probe.reply[1],
+                        probe.reply[2],
+                        probe.reply[3]
+                    );
+                    defmt::info!(
+                        "version: stat1 {=u8:#04x} -- {=str}",
+                        probe.reply_status_raw,
+                        probe.reply_status.summary()
+                    );
+                    defmt::info!(
+                        "chip: {=str}, executing from flash {=bool}, last reset {=str} \
+                         (stat {=u8:#04x} {=u8:#04x})",
+                        probe.before.1.mode_summary(),
+                        probe.before.1.flash,
+                        probe.before.1.reset_summary(),
+                        probe.command_status[0],
+                        probe.command_status[1]
+                    );
+                    if let Some(v) = probe.verdict.version() {
+                        defmt::info!(
+                            "version: hw {=u8:#04x}, use case {=u8:#04x}, fw {=u8}.{=u8}{=str}",
+                            v.hardware,
+                            v.use_case,
+                            v.fw_major,
+                            v.fw_minor,
+                            if v.firmware_matches_bench() {
+                                ""
+                            } else {
+                                " -- differs from the board oxinode was brought up on"
+                            }
+                        );
+                    }
+                    if probe.verdict.is_expected() {
+                        defmt::info!("version: {=str}", probe.verdict.summary());
+                    } else {
+                        defmt::error!("version: {=str}", probe.verdict.summary());
+                    }
+                    defmt::info!("version: next -- {=str}", probe.verdict.next_step());
+
+                    if probe.verdict.is_expected() {
+                        // Hand the bus and BUSY to `lr11xx`, which owns them
+                        // from here. Its own `new` re-runs GetStatus and
+                        // GetVersion, so the crate agreeing is an independent
+                        // check on the probe above rather than a repeat of it.
+                        match Lr11xx::new(spi, reset.into_busy()).await {
+                            Ok(mut dev) => {
+                                defmt::info!("lr11xx: driver attached");
+                                // Whatever the chip has latched since power-on.
+                                // Expected to be non-empty here: nothing has
+                                // configured the TCXO yet, so the high-frequency
+                                // oscillator has had no chance to start. Step 4
+                                // is what should clear it, which makes this the
+                                // measurement step 4 is judged against.
+                                match dev.errors().await {
+                                    Ok(errors) => defmt::info!("lr11xx: errors {}", errors),
+                                    Err(e) => defmt::error!("lr11xx: GetErrors failed, {}", e),
+                                }
+                                radio = Some(dev);
+                            }
+                            Err(e) => defmt::error!("lr11xx: {}", e),
+                        }
+                    }
+                }
+                Err(e) => defmt::error!("version: probe failed, {}", e),
+            }
+        }
+
+        defmt::info!("step 3 done");
 
         // Liveness, and something for a terminal that reconnects later.
         let mut ticks: u32 = 0;
         loop {
             Timer::after(Duration::from_millis(5000)).await;
             ticks += 1;
-            defmt::info!(
-                "idle, tick {=u32}, busy {=bool}",
-                ticks,
-                reset.busy_is_high()
-            );
+            match radio.as_mut() {
+                Some(dev) => defmt::info!("idle, tick {=u32}, busy {}", ticks, dev.busy().ok()),
+                None => defmt::info!("idle, tick {=u32}, no radio attached", ticks),
+            }
         }
     };
 

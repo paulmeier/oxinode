@@ -25,7 +25,10 @@ use embassy_nrf::{interrupt, pac, Peri};
 use embassy_time::{with_timeout, Delay, Duration, Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use oxinode_core::gpio::{psel, psel_decode};
-use oxinode_core::lr1121::{BusyTrace, BUSY_TIMEOUT_US, RESET_PULSE_US, STARTUP_WINDOW_US};
+use oxinode_core::lr1121::{
+    BusyTrace, Stat1, Stat2, VersionVerdict, BUSY_TIMEOUT_US, COMMAND_TIMEOUT_US, GET_VERSION,
+    RESET_PULSE_US, STARTUP_WINDOW_US,
+};
 
 /// `(port, pin)` for each signal, in the order the datasheet names them.
 pub const NSS: (u8, u8) = (1, 12);
@@ -214,6 +217,20 @@ impl<'d> RadioReset<'d> {
         }
     }
 
+    /// Wait for BUSY to fall after a command, bounded.
+    ///
+    /// Separate from the reset wait because the two are three orders of
+    /// magnitude apart, and a single generous timeout covering both could not
+    /// tell a slow command from a chip that is still booting.
+    pub async fn wait_ready(&mut self) -> Result<(), BusyTimeout> {
+        with_timeout(
+            Duration::from_micros(COMMAND_TIMEOUT_US as u64),
+            self.busy.wait_for_low(),
+        )
+        .await
+        .map_err(|_| BusyTimeout)
+    }
+
     /// The current BUSY level, for sampling outside a reset cycle.
     pub fn busy_is_high(&self) -> bool {
         self.busy.is_high()
@@ -227,6 +244,94 @@ impl<'d> RadioReset<'d> {
     pub fn into_busy(self) -> Input<'d> {
         self.busy
     }
+}
+
+/// BUSY stayed high past the deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusyTimeout;
+
+/// What a raw `GetVersion` produced, bytes and all.
+pub struct VersionProbe {
+    /// The two status bytes returned during the command phase, raw.
+    pub command_status: [u8; 2],
+    /// The command phase's status bytes, decoded. These describe the state the
+    /// chip was in *before* `GetVersion` ran.
+    pub before: (Stat1, Stat2),
+    /// The status byte that preceded the reply, raw and decoded.
+    pub reply_status_raw: u8,
+    /// See [`VersionProbe::reply_status_raw`].
+    pub reply_status: Stat1,
+    /// The four reply bytes, exactly as they arrived.
+    pub reply: [u8; 4],
+    /// What to make of them.
+    pub verdict: VersionVerdict,
+}
+
+/// Ask the radio what it is, keeping every byte.
+///
+/// `lr11xx` has a `version()` that does this and is the one that will be used
+/// from here on. It is the wrong tool for the *first* transaction, because it
+/// validates the reply and returns `Error::Fail` — discarding the bytes at
+/// exactly the moment the bytes are the only evidence available. An all-zeros
+/// reply and a healthy reply reach this function by identical means; telling
+/// them apart is the whole job, and it cannot be done from an error enum.
+///
+/// The LR11xx protocol puts the command and its reply in **separate NSS
+/// cycles**, with BUSY high in between. Doing it in one transaction returns the
+/// status of the *previous* command and no reply at all — a failure that looks
+/// like a hardware fault and is not.
+pub async fn probe_version<S: embedded_hal_async::spi::SpiDevice<u8>>(
+    spi: &mut S,
+    reset: &mut RadioReset<'_>,
+) -> Result<VersionProbe, ProbeError> {
+    use embedded_hal_async::spi::Operation;
+
+    // Command phase. The bytes coming back are the status of whatever ran
+    // before this, which after a reset is nothing in particular -- recorded
+    // because it costs nothing and occasionally explains everything.
+    let mut command_status = [0u8; 2];
+    spi.transaction(&mut [Operation::Transfer(
+        &mut command_status,
+        &GET_VERSION.to_be_bytes(),
+    )])
+    .await
+    .map_err(|_| ProbeError::Spi)?;
+    reset.wait_ready().await.map_err(|_| ProbeError::Busy)?;
+
+    // Reply phase, in its own NSS cycle. The leading NOP clocks out Stat1;
+    // `Read` sends the over-read character, which is configured to 0x00 so MOSI
+    // stays low as the chip requires.
+    let mut reply_status = [0u8; 1];
+    let mut reply = [0u8; 4];
+    spi.transaction(&mut [
+        Operation::Transfer(&mut reply_status, &[0x00]),
+        Operation::Read(&mut reply),
+    ])
+    .await
+    .map_err(|_| ProbeError::Spi)?;
+    reset.wait_ready().await.map_err(|_| ProbeError::Busy)?;
+
+    Ok(VersionProbe {
+        before: (
+            Stat1::decode(command_status[0]),
+            Stat2::decode(command_status[1]),
+        ),
+        command_status,
+        reply_status_raw: reply_status[0],
+        reply_status: Stat1::decode(reply_status[0]),
+        reply,
+        verdict: VersionVerdict::of(reply),
+    })
+}
+
+/// Why a probe did not complete. Distinct from a probe that completed and
+/// returned nonsense, which is a [`VersionVerdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum ProbeError {
+    /// The SPI transfer itself failed.
+    Spi,
+    /// BUSY never came back down.
+    Busy,
 }
 
 /// `lr11xx::Lr11xx::new` takes an async `SpiDevice<u8>`. Proving that here means
