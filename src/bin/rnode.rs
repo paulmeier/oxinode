@@ -135,6 +135,29 @@ async fn main(_spawner: Spawner) {
             boot::APP_FLASH_ORIGIN
         );
 
+        // Let enumeration finish before the radio bring-up starts.
+        //
+        // `wait_connection` resolves at SET_CONFIGURATION -- when the host has
+        // enumerated the device, not when anybody opens the tty -- so this
+        // normally costs a hundred milliseconds. The radio's own bring-up takes
+        // 191 ms in the reset alone and a further 50 ms of calibration, and
+        // sharing the executor with enumeration for that long is a needless
+        // risk on a stack that has to answer control transfers promptly.
+        //
+        // The timeout is the other half. A board on battery with no host must
+        // still bring its radio up, so this waits for enumeration *or* two
+        // seconds, whichever comes first, and never depends on a host being
+        // there at all.
+        match select(
+            kiss_tx.wait_connection(),
+            Timer::after(Duration::from_secs(2)),
+        )
+        .await
+        {
+            Either::First(()) => defmt::info!("usb: enumerated"),
+            Either::Second(()) => defmt::info!("usb: not enumerated after 2 s; continuing anyway"),
+        }
+
         let mut dev = match bringup::bring_up(spi, reset, &mut irq).await {
             Ok(dev) => dev,
             Err(e) => {

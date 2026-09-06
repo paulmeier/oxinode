@@ -91,3 +91,130 @@ clamped deliberately, and the test says so.
 4. **The firmware image** — `rnode`, with the KISS stream on the first CDC port
    and the defmt log on the second, driving phase 4's modem.
 5. **Hardware validation** — `rnsd` against the real board.
+
+---
+
+## Step 1 — KISS framing
+
+`oxinode_core::rnode::kiss`. Escape, unescape, a streaming decoder, and a
+frame writer.
+
+The decoder takes one byte at a time because that is how the bytes arrive: USB
+delivers 64-byte packets with no relationship to frame boundaries, so a frame
+can span several and one packet can hold the tail of one frame and the head of
+the next. What it has to survive is not a well-formed stream — the port is open
+to whatever the host sends, including a terminal or a probe from an unrelated
+tool. So:
+
+* **an overlong frame is dropped whole**, because a truncated frame is a
+  well-formed frame with the wrong contents, which nothing downstream can
+  detect;
+* **`FEND` resynchronises from any state**, which is what lets a lost byte cost
+  one frame rather than the link;
+* **an empty frame is padding, not a frame** — and this is not a nicety. The
+  host writes its four detect commands in one burst, so each frame's closing
+  delimiter is the next one's opener, and a decoder that reported empty frames
+  would answer four commands with five.
+
+## Step 2 — the command set
+
+`oxinode_core::rnode::command`. Three things came out of reading the host's
+parser that were not obvious from the outside.
+
+### The host does not un-escape every frame
+
+Its reader has a branch per command. Multi-byte fields — data, frequency,
+bandwidth, firmware version, counters, airtime limits, statistics — accumulate
+through an unescaping step. Single-byte fields — TX power, spreading factor,
+coding rate, radio state, lock, RSSI, SNR, errors — are read straight out of
+the stream.
+
+So a device that escaped uniformly would corrupt any single-byte field whose
+value is `0xC0` or `0xDB`, and since every byte of such a frame overwrites the
+value, the host would keep the second byte of the escape sequence. It cannot
+bite on TX power or spreading factor, whose values are small. **It bites on
+SNR**, which is signed: `0xDB` is −9.25 dB, an entirely ordinary reading.
+
+`host_unescapes` is therefore a transcribed table rather than a rule, and
+`encode_response` is the single place that consults it — so "did we escape this
+one correctly?" is not a question that can be asked per call site.
+
+The asymmetry runs the other way too: the host writes those same four commands
+raw. This firmware's decoder un-escapes uniformly, which is wrong in principle
+and cannot bite in practice, because no legal spreading factor (5–12), coding
+rate (5–8), radio state (0, 1, 0xFF) or TX power reaches `0xC0` or `0xDB`.
+There is a test that walks every legal value of all four, so the simplification
+is bounded rather than unnoticed.
+
+### The firmware version is a gate
+
+`validate_firmware` calls `RNS.panic()` — it ends the host process — unless the
+reported version is at least 1.52. Reporting oxinode's own version would take
+down every host that connected. The constant therefore says "I speak what a
+1.52 RNode speaks", with a compile-time assertion against the requirement.
+
+### 915 MHz contains the frame delimiter
+
+Big-endian it is `36 89 CA C0`. The first thing a US host configures is a frame
+that must be escaped — a better place to have got escaping wrong than some rare
+packet months later. It has a test of its own, which found a hand-computed hex
+error in three others while it was at it.
+
+## Step 3 — the protocol
+
+`oxinode_core::rnode::protocol`. Commands in, responses and at most one radio
+action out, with no hardware anywhere near it. That shape makes the whole of
+`configure_device` — detect, five setters, power on, and the validation the
+host performs afterwards — a unit test that runs in microseconds.
+
+Phase 4 pays off twice.
+
+**The frequency reported is the wanted one, not the commanded one.** The host
+rejects a frequency that comes back more than 100 Hz from what it set; the
+correction phase 4 applies is 67 kHz at 915 MHz, or 670 times that. Reporting
+the commanded frequency would make every interface fail to come online, with a
+message pointing at a frequency the operator had configured correctly.
+
+**Nothing clamps.** A host asking for 22 dBm on a module rated for 20 is told
+22 dBm and then simply does not get a radio: the state comes back off, the host
+finds the mismatch, and prints *"make sure that your hardware actually supports
+the parameters specified in the configuration"* — which is what happened.
+`CMD_ERROR` would have said "hardware initialisation error": harsher, and less
+true. The specific limit goes to the log port, the only channel that can carry
+it.
+
+## Step 4 — the image
+
+`rnode`, with the KISS stream on the first CDC port and the log on the second.
+That order is forced twice: it decides which tty gets the lower number, and DTR
+is only visible on the first CDC function, which is where the 1200-baud
+bootloader touch has to land.
+
+Two bugs were caught before this reached hardware. The transmit path never
+called `transmitted`, so the counter never moved and `CMD_READY` was never sent
+— which works until somebody enables flow control and then stops after one
+packet. And the SNR was being rounded to whole decibels in the modem and
+multiplied back up for the protocol, throwing away up to half a decibel for
+nothing.
+
+### The first flash did not enumerate
+
+The board came up as `oxinode RNode`, macOS read its device and string
+descriptors, and then stopped: `!registered, !matched`, stable across minutes,
+so not a reset loop — a device that answered the first control transfers and
+then went quiet.
+
+The one structural difference from the two images that do enumerate is that
+both of those touch nothing until the host has finished. `usb-cdc` parks every
+task on `wait_connection`; `radio` waits for DTR before it goes near the radio.
+This image started a 250 ms bring-up — 191 ms of it the LR1121's reset —
+concurrently with enumeration.
+
+So the modem now waits for `wait_connection` **or two seconds, whichever comes
+first**. The first half is the fix; the second half is the part that keeps it
+honest, because a board on battery with no host must still bring its radio up,
+and a fix that depends on a host being present would have swapped one failure
+for a quieter one.
+
+This left the board with no serial port at all, and therefore no way to take
+the 1200-baud touch — recovery is a physical double-tap of the reset button.
