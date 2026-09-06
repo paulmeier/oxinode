@@ -70,6 +70,12 @@ path = "src/bin/usb_cdc.rs"
 name = "radio"
 path = "src/bin/radio.rs"
 
+# Phase 5: the product image. A Reticulum host opens the first serial port and
+# finds a modem; the second carries the log.
+[[bin]]
+name = "rnode"
+path = "src/bin/rnode.rs"
+
 # Debug builds of this still have to fit in 784K of flash and run at 64 MHz,
 # so keep some optimisation on even in dev.
 [profile.dev]

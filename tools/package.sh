@@ -54,7 +54,7 @@ cargo build --release --locked
 rm -rf "$outdir"
 mkdir -p "$outdir"
 
-for bin in blink usb-cdc radio; do
+for bin in blink usb-cdc radio rnode; do
     elf="$profile_dir/$bin"
     rust-objcopy -O binary "$elf" "$elf.bin"
     tools/uf2conv.py "$elf.bin" -o "$elf.uf2" -b "$base"

@@ -90,8 +90,15 @@ pub struct RxReport {
     pub len: usize,
     /// Packet RSSI in dBm.
     pub rssi_dbm: i16,
-    /// Packet SNR in dB.
+    /// Packet SNR in dB, rounded — for logs.
     pub snr_db: i16,
+    /// Packet SNR in quarter-dB, as the chip reports it.
+    ///
+    /// Carried alongside the rounded value rather than derived from it: the
+    /// RNode protocol also transports quarter-dB, so recovering it by
+    /// multiplying the rounded figure back up would throw away up to half a
+    /// decibel for nothing.
+    pub snr_quarter_db: i8,
     /// The interrupt word that was pending.
     pub pending: u32,
 }
@@ -312,6 +319,7 @@ where
                     // that looks obviously incorrect.
                     rssi_dbm: -(packet.rssi() as i16) / 2,
                     snr_db: (packet.snr() as i16 + 2) / 4,
+                    snr_quarter_db: packet.snr(),
                     pending,
                 });
             }
