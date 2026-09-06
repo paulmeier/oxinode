@@ -409,19 +409,61 @@ carrier by itself after 10 s — a bare carrier is a bench diagnostic, not
 something FCC Part 15.247 contemplates, and a crashed host must not be able to
 leave one up.
 
-#### The carrier is 66 kHz low, and it is not clear whose fault that is
+#### The carrier is 66 kHz low, and it is the transmitter
 
 Every measurement puts the carrier at 914.934 MHz against a commanded
-915.000 MHz: **−66.1 kHz, or −72 ppm**, repeatable across power levels to under
-a kilohertz.
+915.000 MHz: −66.1 kHz, or −72 ppm. The first guess recorded here was that this
+was the receiver's crystal — ordinary for a cheap RTL-SDR, implausible for a
+TCXO-locked LR1121. **That guess was wrong.**
 
-−72 ppm is ordinary for an uncalibrated RTL-SDR crystal and implausible for the
-LR1121, which is running off a TCXO. That makes the receiver the likely culprit,
-but "likely" is the honest word: there is no calibrated reference on this bench,
-and the test that would settle it — commanding several frequencies and checking
-whether the error stays constant in ppm or in hertz — has not been run. It
-matters before phase 5, because a transmitter 72 ppm off would eat a large part
-of a LoRa link's tolerance.
+**Designing the experiment is most of the work.** Writing `C` for the receiver's
+nominal centre, `F` for the true carrier, `e` for the receiver's clock error and
+`p` for the transmitter's:
+
+```text
+reported = F − C·e = F_commanded·(1 + p) − C·e
+```
+
+so the apparent error is `F_commanded·p − C·e`. The obvious experiment — sweep
+the transmitter across the band and watch the error — **cannot work**, because
+the receiver must be retuned to follow, `C` moves with `F_commanded`, and both
+terms scale together. The hypotheses are algebraically identical.
+
+`C` has to be held *fixed* while `F_commanded` moves. That confines the whole
+sweep to one 2.048 MHz capture window, and leaves a signal of only
+`(F₂ − F₁)·p` ≈ **116 Hz** at −72 ppm over the 1.6 MHz available. Small — but
+the term it must be separated from, `C·e`, cancels exactly, because it does not
+depend on `F_commanded` at all.
+
+Two things then get in the way, both visible in the data:
+
+* **Thermal transients.** Each keying warms the die, and the carrier moves
+  ~90 Hz over the following three seconds — comparable to the signal. A single
+  F₁/F₂ comparison three seconds apart is worthless.
+* **Contamination.** 902–928 MHz is busy; segments have to be gated on SNR and
+  on proximity to an expected carrier, or ambient traffic is averaged in.
+
+The measurement that works: chop between 913.7 and 915.3 MHz **22 times inside
+one continuous capture**, take only the last, most-settled 128 ms of each burst,
+and bracket every burst with the two either side so linear drift cancels.
+
+```
+drift-bracketed F2−F1 error difference:  -117.3 Hz +/- 0.8  (n=20)
+
+  transmitter at fault  -> -116 Hz     measured: -117.3 Hz
+  receiver at fault     ->    0 Hz
+```
+
+**Transmitter −73.3 ± 0.5 ppm. Receiver −1.4 ppm.** The RTL-SDR is essentially
+correct — unsurprising in hindsight, since NooElec fits a TCXO to these.
+
+That is a problem rather than a curiosity. 73 ppm is 67 kHz at 915 MHz, over
+half a 125 kHz LoRa channel, and it is far outside what a TCXO should manage —
+which points at the TCXO not being driven as it expects rather than at a bad
+part. Candidates, none tested: the `SetTcxoMode` tune voltage (3.0 V was chosen
+from the plan, and the board's part may want another), and the LR11x0's crystal
+trimming registers. Recorded as `MEASURED_TX_ERROR_PPM`, with a compile-time
+assertion so the magnitude cannot quietly shrink in someone's reasoning.
 
 #### `lr11xx` cannot express the high-frequency TX state
 

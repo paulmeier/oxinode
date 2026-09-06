@@ -69,10 +69,14 @@ What that actually establishes:
   of measured range, all at one frequency to within 0.6 kHz. That is what proves
   the RF switch masks, which a `TxDone` alone never could.
 
-**No packet has been sent.** A carrier is not a modulation, there is no
-interrupt handling yet, and the measured carrier sits 66 kHz (−72 ppm) below
-where it was commanded — probably the receiver's crystal rather than the
-board's TCXO, but that is not yet established. There is no KISS framing and no display code
+**No packet has been sent.** A carrier is not a modulation and there is no
+interrupt handling yet.
+
+**The transmitter is 73 ppm low**, and that is measured rather than suspected:
+chopping between two carriers inside a single capture separates the
+transmitter's clock error from the receiver's, and puts −73.3 ± 0.5 ppm on the
+LR1121 and −1.4 ppm on the SDR. At 915 MHz that is 67 kHz — over half a 125 kHz
+LoRa channel — and it has to be understood before phase 5. There is no KISS framing and no display code
 either: not stubbed, not half-written, absent.
 
 ## Hardware

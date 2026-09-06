@@ -111,6 +111,61 @@ pub const US915_MAX_HZ: u32 = 928_000_000;
 /// find on a receiver.
 pub const CW_TEST_HZ: u32 = 915_000_000;
 
+/// Two carriers for the frequency-error experiment, as far apart as one
+/// RTL-SDR capture window allows.
+///
+/// The question they answer: the measured carrier sits 66 kHz below where it
+/// was commanded, and that is either the transmitter's clock or the receiver's.
+/// The two are not distinguishable from a single measurement, and — less
+/// obviously — they are not distinguishable by sweeping the transmitter *with*
+/// the receiver either. Writing `C` for the receiver's nominal centre, `F` for
+/// the true carrier, `e` for the receiver's clock error and `p` for the
+/// transmitter's:
+///
+/// ```text
+/// reported = F - C·e = F_commanded·(1 + p) - C·e
+/// ```
+///
+/// so the apparent error is `F_commanded·p - C·e`. Move `C` along with
+/// `F_commanded` and both terms scale together — the experiment is degenerate.
+/// **`C` has to be held fixed while `F_commanded` moves**, which confines the
+/// sweep to one capture window, and makes the whole signal
+/// `(F₂ - F₁)·p` — about 115 Hz at −72 ppm over this 1.6 MHz span.
+///
+/// Small, but the term it has to be separated from cancels exactly: `C·e` does
+/// not depend on `F_commanded` at all.
+pub const CW_SWEEP_HZ: [u32; 2] = [913_700_000, 915_300_000];
+
+/// Receiver centre frequency the sweep assumes, in hertz.
+///
+/// Not used by the firmware — recorded here so the constant the host tunes to
+/// and the constants the firmware transmits on cannot drift apart. It sits
+/// between the two carriers so neither lands on the receiver's DC spike.
+pub const CW_SWEEP_CENTER_HZ: u32 = 914_500_000;
+
+/// How far the bench board's transmitter sits from where it is told to be, in
+/// parts per million. **Measured, and it is the transmitter, not the receiver.**
+///
+/// A commanded 915.000 MHz carrier lands at 914.934 MHz — 66 kHz low. That is
+/// either the LR1121's clock or the receiver's, and a single measurement cannot
+/// say which, because both produce exactly the same number.
+///
+/// The experiment that separates them is in [`CW_SWEEP_HZ`]: hold the receiver's
+/// tuning fixed, move the transmitter, and the receiver's contribution cancels
+/// in the difference. Chopping between 913.7 and 915.3 MHz 22 times inside one
+/// capture, with every measurement bracketed by its neighbours so thermal drift
+/// cancels, gave a difference of **−117.3 ± 0.8 Hz** across the 1.6 MHz span,
+/// against −116 Hz predicted if the transmitter is at fault and 0 Hz if the
+/// receiver is.
+///
+/// So: transmitter −73.3 ± 0.5 ppm, receiver −1.4 ppm. The RTL-SDR is fine.
+///
+/// **This is a problem, not a curiosity.** 73 ppm is 67 kHz at 915 MHz — over
+/// half of a 125 kHz LoRa channel — and it is far outside what a TCXO should
+/// do, which suggests the TCXO is not being driven as it expects rather than
+/// that it is simply a bad part. Phase 5 cannot ignore it.
+pub const MEASURED_TX_ERROR_PPM: f32 = -73.3;
+
 /// Whether a frequency is inside the US915 ISM band.
 pub const fn is_in_us915(hz: u32) -> bool {
     hz >= US915_MIN_HZ && hz <= US915_MAX_HZ
@@ -168,6 +223,36 @@ const _: () = assert!(
      safe default is not safe"
 );
 const _: () = assert!(is_in_us915(CW_TEST_HZ));
+const _: () = assert!(is_in_us915(CW_SWEEP_HZ[0]) && is_in_us915(CW_SWEEP_HZ[1]));
+// The span is the entire signal in the frequency-error experiment: the
+// receiver's contribution cancels, so what is left is (F2 - F1) x p. Too narrow
+// a span and there is nothing left to measure.
+const _: () = assert!(
+    CW_SWEEP_HZ[1] - CW_SWEEP_HZ[0] >= 1_500_000,
+    "the sweep span is too narrow to separate a transmitter error from a \
+     receiver one"
+);
+// And the measured error is not a rounding detail: at 915 MHz it is over a
+// third of a 125 kHz LoRa channel. Pinned so that "only a few tens of ppm"
+// cannot creep into anyone's reasoning later.
+const _: () = assert!(
+    (CW_TEST_HZ as f32) * MEASURED_TX_ERROR_PPM * 1e-6 < -60_000.0,
+    "the transmitter's measured frequency error is tens of kilohertz; anything \
+     that makes this assertion fail has lost that fact"
+);
+// Both carriers must fit inside one 2.048 MS/s capture window centred on
+// CW_SWEEP_CENTER_HZ, or the receiver cannot see them without retuning -- and
+// retuning is precisely what the experiment may not do.
+const _: () = assert!(
+    CW_SWEEP_HZ[0] > CW_SWEEP_CENTER_HZ - 1_000_000
+        && CW_SWEEP_HZ[1] < CW_SWEEP_CENTER_HZ + 1_000_000,
+    "a sweep carrier falls outside the receiver's capture window"
+);
+// Neither may land on the receiver's own DC spike.
+const _: () = assert!(
+    CW_SWEEP_HZ[0] + 100_000 < CW_SWEEP_CENTER_HZ && CW_SWEEP_HZ[1] > CW_SWEEP_CENTER_HZ + 100_000,
+    "a sweep carrier sits on the receiver's DC spike, where it cannot be measured"
+);
 const _: () = assert!(LP_MAX_DBM < MODULE_MAX_SUB_GHZ_DBM);
 
 #[cfg(test)]

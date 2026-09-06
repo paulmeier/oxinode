@@ -447,10 +447,12 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     defmt::info!(
-        "console: 1 = CW at {=i8} dBm, 2 = CW at {=i8} dBm, 3 = CW at {=i8} dBm, 0 = stop, r = reboot radio, ? = status, b = bootloader",
+        "console: 1/2/3 = CW at {=i8}/{=i8}/{=i8} dBm, v/n = CW at {=u32}/{=u32} Hz, 0 = stop, r = reboot radio, ? = status, b = bootloader",
         CW_LEVELS[0],
         CW_LEVELS[1],
-        CW_LEVELS[2]
+        CW_LEVELS[2],
+        pa::CW_SWEEP_HZ[0],
+        pa::CW_SWEEP_HZ[1]
     );
 
     let mut buf = [0u8; 64];
@@ -494,7 +496,7 @@ where
                         }
                         b'1' | b'2' | b'3' => {
                             let dbm = CW_LEVELS[(byte - b'1') as usize];
-                            if start_cw(radio.as_mut(), dbm).await {
+                            if start_cw(radio.as_mut(), dbm, pa::CW_TEST_HZ).await {
                                 cw_until = Some(
                                     Instant::now()
                                         + Duration::from_millis(pa::CW_MAX_BURST_MS as u64),
@@ -510,6 +512,20 @@ where
                             if let Some(dev) = radio.as_mut() {
                                 cw_until = None;
                                 reinit(dev).await;
+                            }
+                        }
+                        // The frequency-error experiment. The receiver stays
+                        // tuned to one centre for the whole run -- moving it
+                        // with the transmitter makes the two hypotheses
+                        // algebraically identical -- so these two carriers are
+                        // as far apart as one capture window allows.
+                        b'v' | b'n' => {
+                            let hz = pa::CW_SWEEP_HZ[usize::from(byte == b'n')];
+                            if start_cw(radio.as_mut(), pa::LP_MAX_DBM, hz).await {
+                                cw_until = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(pa::CW_MAX_BURST_MS as u64),
+                                );
                             }
                         }
                         b'?' => report(radio.as_mut(), cw_until.is_some()).await,
@@ -548,7 +564,7 @@ where
 const CW_LEVELS: [i8; 3] = [pa::LP_MIN_DBM, 0, pa::LP_MAX_DBM];
 
 /// Key an unmodulated carrier. Returns whether it started.
-async fn start_cw<S, B>(dev: Option<&mut Lr11xx<S, B>>, dbm: i8) -> bool
+async fn start_cw<S, B>(dev: Option<&mut Lr11xx<S, B>>, dbm: i8, hz: u32) -> bool
 where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
@@ -570,8 +586,8 @@ where
         );
         return false;
     }
-    if !pa::is_in_us915(pa::CW_TEST_HZ) {
-        defmt::error!("cw: {=u32} Hz is outside US915", pa::CW_TEST_HZ);
+    if !pa::is_in_us915(hz) {
+        defmt::error!("cw: {=u32} Hz is outside US915", hz);
         return false;
     }
 
@@ -597,10 +613,7 @@ where
             "cw: packet type -> {}",
             dev.set_packet_type(PacketType::LoRa).await?
         );
-        defmt::debug!(
-            "cw: freq -> {}",
-            dev.set_rf_frequency(pa::CW_TEST_HZ).await?
-        );
+        defmt::debug!("cw: freq -> {}", dev.set_rf_frequency(hz).await?);
         // The low-power PA on the internal regulator. Built from
         // `oxinode_core::lr1121::pa` rather than through `PaConfig`'s builder,
         // which declares `vbat` and `hp` at the same bit.
@@ -635,7 +648,7 @@ where
             );
             defmt::info!(
                 "cw: requested {=u32} Hz, {=i8} dBm, low-power PA (stops itself after {=u32} ms)",
-                pa::CW_TEST_HZ,
+                hz,
                 dbm,
                 pa::CW_MAX_BURST_MS
             );
