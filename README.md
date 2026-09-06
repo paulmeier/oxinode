@@ -100,10 +100,11 @@ What that actually establishes:
   airtime by a *constant* 437–461 µs, which is the `SetTx` transaction, PLL lock
   and PA ramp. A wrong formula would scale; this does not.
 
-* **the 73 ppm is corrected, and the correction is visible.** Turning it on
-  moves the receive window against the peer board down by about 100 kHz — the
-  predicted direction, and the right order of magnitude for 66.5 kHz — and
-  turning it off moves it back.
+* **the 73 ppm is corrected, by the amount it should be.** Turning the
+  correction on moves the receive window's edge against the peer board from
+  +328 kHz to +254 kHz — a shift of −74 ± 14 kHz against −66.5 kHz predicted —
+  and turning it off moves it back. A correction applied at half strength or
+  twice would have landed several uncertainties away.
 
 **The 73 ppm error belongs to the module, not to this board.** Sweeping the
 receive frequency against the second board gives a reception window symmetric

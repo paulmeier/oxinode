@@ -1361,14 +1361,23 @@ const SWEEP_COARSE: SweepPlan = SweepPlan {
 /// a peer that carries the same error. An edge that does not move, or moves the
 /// other way, falsifies the correction rather than being explained away.
 ///
-/// The range starts at +200 kHz because that is where the reconnaissance sweep
-/// put the edge: alive at +300 kHz and dead at +400 kHz with the correction
-/// off. Sweeping the middle of a window measures nothing.
+/// The range runs +220 kHz to +400 kHz because both edges have to be inside it
+/// — corrected at +254 kHz and uncorrected at +328 kHz, as measured. A range
+/// that brackets only one of them yields a bound rather than a number, which is
+/// how the first attempt at this went. Sweeping the middle of a window measures
+/// nothing at all.
+///
+/// The dwell is 24 seconds and not 8, which is the more important of the two
+/// numbers. A peer beaconing every two seconds gives three or four packets in
+/// eight seconds, and locating an edge from counts that small is guesswork —
+/// a first pass put two nominally identical runs a whole step apart. Twelve
+/// packets a point costs three times the wall clock and is the difference
+/// between an edge and an impression of one.
 const SWEEP_EDGE: SweepPlan = SweepPlan {
-    start_hz: 200_000,
+    start_hz: 220_000,
     step_hz: 20_000,
-    steps: 13,
-    dwell_s: 8,
+    steps: 10,
+    dwell_s: 24,
 };
 
 /// Apply one console key to the configuration.

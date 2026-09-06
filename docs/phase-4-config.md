@@ -262,10 +262,62 @@ every edge must fall. The two `off` runs agree with each other closely enough �
 including a reproducible oddity at −300/−200 kHz — that the difference cannot be
 drift.
 
-The magnitude is consistent with 66.5 kHz but is only resolved to the 100 kHz
-step. A 20 kHz sweep of the upper edge would turn that into a number.
+### ...and by the amount it should
 
-**What this does and does not establish.** It establishes that the correction is
-applied, that it is applied in the right direction, and that its size is of the
-right order. It does not re-measure the 73.3 ppm itself to phase 3's precision;
-that needed the SDR, and phase 3 already did it.
+One 100 kHz step is a direction, not a number. Turning it into one needed two
+changes to the method, and the second mattered more than the first.
+
+The obvious change is a finer step: 20 kHz instead of 100 kHz. On its own it did
+not help. Two nominally identical `off` runs put the edge a whole step apart,
+because a peer beaconing every two seconds delivers three or four packets in an
+eight-second dwell and an edge located from counts that small is an impression
+rather than a measurement.
+
+The change that mattered was **dwelling for 24 seconds instead of 8**. Twelve
+packets a point costs three times the wall clock and turns a ragged sequence
+into a monotonic roll-off:
+
+| offset (kHz) | +220 | +240 | +260 | +280 | +300 | +320 | +340 | +360 |
+|---|---|---|---|---|---|---|---|---|
+| correction **off** | 4 | 3 | 10 | 10 | 8 | 9 | 6 | — |
+| correction **on** | 11 | 9 | 4 | 1 | 0 | 0 | 0 | — |
+| correction **off**, again | 8 | 4 | 11 | 9 | 11 | 7 | 2 | — |
+| correction **off**, upper range | — | — | — | — | 9 | 7 | 2 | 0 |
+
+Taking the plateau as full and interpolating each half-power point:
+
+| | 50% edge |
+|---|---|
+| correction **off** | **+328 kHz** |
+| correction **on** | **+254 kHz** |
+| shift | **−74 kHz** |
+
+against a predicted **−66.5 kHz**. Each edge is located to roughly ±10 kHz at a
+20 kHz step, so their difference carries about ±14 kHz — the measurement is
+−74 ± 14 kHz, or −81 ± 15 ppm against 73.3 ppm predicted. The last run also
+reproduces the second `off` run exactly where they overlap (7 packets at
++320 kHz, 2 at +340 kHz), which is the evidence that the edge is stable between
+runs rather than the two agreeing by luck.
+
+The point of the precision is not the third significant figure. It is that a
+correction applied at half strength would put the shift at −33 kHz and one
+applied twice at −133 kHz, and both are several times the uncertainty away. The
+arithmetic is being applied once, at full strength, in the right direction.
+
+### One thing left unexplained
+
+Both `off` runs are *low* at +220 and +240 kHz — 4 and 3, then 8 and 4 — in the
+middle of a passband that gives 10 or 11 on either side. The `on` run is full
+there. That asymmetry is what a fixed-frequency artifact would look like rather
+than a property of the receiver's response: the correction shifts the commanded
+frequency by 66 kHz, so a spur sitting at a fixed frequency appears at different
+*offsets* in the two runs, and the offset it would appear at in the `on` run is
+below the bottom of the sweep. Consistent, but not established — recorded rather
+than resolved.
+
+### What this does and does not establish
+
+It establishes that the correction is applied, that it is applied once and in
+the right direction, and that its magnitude agrees with the arithmetic to within
+the resolution of a 20 kHz sweep. It does not re-measure the 73.3 ppm itself to
+phase 3's precision; that needed the SDR, and phase 3 already did it.
