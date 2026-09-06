@@ -3,6 +3,7 @@
 //!
 //! * [`kiss`] — the framing.
 //! * [`command`] — the command set, and which frames the host un-escapes.
+//! * [`protocol`] — the conversation: commands in, responses and actions out.
 //!
 //! # Provenance
 //!
@@ -21,3 +22,4 @@
 
 pub mod command;
 pub mod kiss;
+pub mod protocol;

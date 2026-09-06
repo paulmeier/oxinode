@@ -162,6 +162,20 @@ pub const fn host_unescapes(command: u8) -> bool {
     )
 }
 
+/// Frame a response, escaping it or not according to [`host_unescapes`].
+///
+/// The single place that decision is made. Every response goes through here,
+/// so "did we escape this one correctly?" is not a question that can be asked
+/// per call site, and cannot be answered wrongly at one of them.
+pub fn encode_response(command: u8, payload: &[u8], out: &mut [u8]) -> Option<usize> {
+    super::kiss::encode(command, payload, host_unescapes(command), out)
+}
+
+/// The length [`encode_response`] will produce.
+pub fn response_len(command: u8, payload: &[u8]) -> usize {
+    super::kiss::encoded_len(payload, host_unescapes(command))
+}
+
 /// Radio power state, as [`cmd::RADIO_STATE`] carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadioState {
