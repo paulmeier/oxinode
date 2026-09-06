@@ -1,0 +1,72 @@
+name: release
+
+# Tags only. A release is a claim that a specific commit was built and checked,
+# so it must not be possible to produce one from a branch push or a manual run
+# that happens to be pointing somewhere else.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the release notes list commits since the previous tag.
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt,clippy,llvm-tools
+          rustup target add thumbv7em-none-eabihf
+
+      - name: Install cargo-binutils
+        run: cargo install cargo-binutils --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Nothing gets published that would not have passed CI. A broken release
+      # is worse than a missing one: it gets flashed to a board.
+      - name: Run all checks
+        run: tools/test.sh
+
+      - name: Build release artifacts
+        run: tools/package.sh --version "${GITHUB_REF_NAME}" --out dist
+
+      - name: Generate release notes
+        run: tools/release_notes.sh "${GITHUB_REF_NAME}" > dist/NOTES.md
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Anything with a suffix -- v0.2.0-rc1, v0.1.0-alpha -- is a
+          # pre-release. Plain vX.Y.Z is not.
+          prerelease=""
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            prerelease="--prerelease"
+          fi
+
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "oxinode ${GITHUB_REF_NAME}" \
+            --notes-file dist/NOTES.md \
+            --verify-tag \
+            $prerelease \
+            dist/*.uf2 dist/*.elf dist/SHA256SUMS
+
+      # Keeps the exact bytes that were published attached to the run, so a
+      # deleted or edited release can still be audited.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxinode-${{ github.ref_name }}
+          path: dist/
+          retention-days: 90

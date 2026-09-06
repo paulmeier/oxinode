@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt,clippy,llvm-tools
+          rustup target add thumbv7em-none-eabihf
+
+      # rust-objcopy, used to turn the ELF into the raw binary the UF2 wraps.
+      - name: Install cargo-binutils
+        run: cargo install cargo-binutils --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Runs the same script a developer runs locally, so CI cannot drift from
+      # what people actually check before pushing.
+      - name: Run all checks
+        run: tools/test.sh
+
+      # Untagged builds are not releases, but a downloadable image off a branch
+      # is useful for trying a change on a board before tagging anything.
+      - name: Build artifacts
+        run: tools/package.sh --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxinode-${{ github.sha }}
+          path: dist/
+          retention-days: 14
