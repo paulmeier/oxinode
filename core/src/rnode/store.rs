@@ -1,8 +1,9 @@
 //! Everything about this device that has to survive a power cycle, and the
 //! record it is written to flash as.
 //!
-//! Three things persist: the [`Eeprom`] image, the device signature
-//! `rnodeconf --sign` produces, and the firmware hash `--firmware-hash` sets.
+//! Four things persist: the [`Eeprom`] image, the device signature
+//! `rnodeconf --sign` produces, the firmware hash `--firmware-hash` sets, and
+//! — since phase 8 — the Bluetooth bonds a phone has made with this board.
 //! The EEPROM is the only one the host can read back byte for byte; the other
 //! two are answered through their own commands. They are stored together
 //! because they are written together, by the same tool, in the same minute.
@@ -33,7 +34,14 @@ pub const MAGIC: [u8; 4] = *b"OXN1";
 /// The record layout's version. A future field goes in by incrementing this
 /// and teaching [`DeviceStore::decode`] the old shape — never by changing what
 /// a byte means at a version that has already been written to a board.
-pub const VERSION: u8 = 1;
+///
+/// Version 2 added the bond table after the firmware hash. A version 1 record
+/// still decodes, with no bonds, which is exactly what a board provisioned
+/// before phase 8 has.
+pub const VERSION: u8 = 2;
+/// The last version without bonds, and how long its record was.
+const VERSION_1: u8 = 1;
+const RECORD_LEN_V1: usize = OFF_FW_HASH + HASH_LEN;
 
 /// Bit 0 of the flags byte: a device signature is present.
 const FLAG_DEVICE_SIGNATURE: u8 = 1 << 0;
@@ -55,8 +63,80 @@ const OFF_EEPROM: usize = OFF_BODY;
 const OFF_SIGNATURE: usize = OFF_EEPROM + EEPROM_SIZE;
 const OFF_FW_HASH: usize = OFF_SIGNATURE + DEVICE_SIGNATURE_LEN;
 
-/// The size of one stored record.
-pub const RECORD_LEN: usize = OFF_FW_HASH + HASH_LEN;
+const OFF_BONDS: usize = OFF_FW_HASH + HASH_LEN;
+/// Bond slot layout: kind, address, flags, IRK, LTK.
+const BOND_LEN: usize = 1 + 6 + 1 + 16 + 16;
+const BOND_FLAG_IRK: u8 = 1 << 0;
+const BOND_FLAG_AUTHENTICATED: u8 = 1 << 1;
+/// How many phones the board remembers.
+///
+/// Four is more than one person's pockets hold. The table is not a queue:
+/// when it is full the oldest slot is reused, and a phone that has been
+/// forgotten pairs again and is remembered again.
+pub const MAX_BONDS: usize = 4;
+/// The size of one stored record: the bond count, the slots, then padding to
+/// a whole number of words for the flash controller.
+pub const RECORD_LEN: usize = (OFF_BONDS + 1 + MAX_BONDS * BOND_LEN).div_ceil(4) * 4;
+// The flash controller writes words, and the bond table must fit.
+const _: () = assert!(RECORD_LEN % 4 == 0);
+const _: () = assert!(RECORD_LEN >= OFF_BONDS + 1 + MAX_BONDS * BOND_LEN);
+
+/// One phone's key material, as the board keeps it.
+///
+/// Held as bytes rather than as the host stack's own types, because this
+/// crate is host-testable and has no dependencies, and the stack's types are
+/// neither. The firmware converts at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bond {
+    /// The peer's identity address type, as HCI numbers it: 0 public, 1
+    /// random static.
+    pub addr_kind: u8,
+    /// The peer's identity address, least significant byte first.
+    pub addr: [u8; 6],
+    /// The peer's Identity Resolving Key, if it uses private addresses.
+    pub irk: Option<[u8; 16]>,
+    /// The Long Term Key, which is the whole point.
+    pub ltk: [u8; 16],
+    /// Made with MITM protection — a passkey — rather than "just works".
+    pub authenticated: bool,
+}
+
+impl Bond {
+    fn encode(&self, out: &mut [u8]) {
+        out[0] = self.addr_kind;
+        out[1..7].copy_from_slice(&self.addr);
+        let mut flags = 0;
+        if self.authenticated {
+            flags |= BOND_FLAG_AUTHENTICATED;
+        }
+        if let Some(irk) = self.irk {
+            flags |= BOND_FLAG_IRK;
+            out[8..24].copy_from_slice(&irk);
+        }
+        out[7] = flags;
+        out[24..40].copy_from_slice(&self.ltk);
+    }
+
+    fn decode(bytes: &[u8]) -> Self {
+        let flags = bytes[7];
+        let mut addr = [0u8; 6];
+        addr.copy_from_slice(&bytes[1..7]);
+        let mut ltk = [0u8; 16];
+        ltk.copy_from_slice(&bytes[24..40]);
+        let irk = (flags & BOND_FLAG_IRK != 0).then(|| {
+            let mut irk = [0u8; 16];
+            irk.copy_from_slice(&bytes[8..24]);
+            irk
+        });
+        Self {
+            addr_kind: bytes[0],
+            addr,
+            irk,
+            ltk,
+            authenticated: flags & BOND_FLAG_AUTHENTICATED != 0,
+        }
+    }
+}
 
 /// The persistent device state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +147,8 @@ pub struct DeviceStore {
     pub device_signature: Option<[u8; DEVICE_SIGNATURE_LEN]>,
     /// The hash the running firmware is expected to have.
     pub target_firmware_hash: Option<[u8; HASH_LEN]>,
+    /// Phones that have paired, oldest first.
+    pub bonds: [Option<Bond>; MAX_BONDS],
 }
 
 impl Default for DeviceStore {
@@ -82,6 +164,7 @@ impl DeviceStore {
             rom: Eeprom::new(),
             device_signature: None,
             target_firmware_hash: None,
+            bonds: [None; MAX_BONDS],
         }
     }
 
@@ -93,6 +176,38 @@ impl DeviceStore {
     /// provisioning would inherit it.
     pub fn wipe(&mut self) {
         *self = Self::new();
+    }
+
+    /// Remember a phone. A bond for the same address replaces the old one;
+    /// a new one takes the first free slot, or the oldest when there is none.
+    pub fn add_bond(&mut self, bond: Bond) {
+        if let Some(slot) = self
+            .bonds
+            .iter_mut()
+            .find(|s| matches!(s, Some(b) if b.addr == bond.addr && b.addr_kind == bond.addr_kind))
+        {
+            *slot = Some(bond);
+            return;
+        }
+        if let Some(slot) = self.bonds.iter_mut().find(|s| s.is_none()) {
+            *slot = Some(bond);
+            return;
+        }
+        // Full: the front is the oldest. Shift down and append.
+        self.bonds.copy_within(1.., 0);
+        self.bonds[MAX_BONDS - 1] = Some(bond);
+    }
+
+    /// Forget every phone without touching the rest. `wipe` covers the case
+    /// of a board being handed on; this is for a host that only wants the
+    /// pairings gone.
+    pub fn clear_bonds(&mut self) {
+        self.bonds = [None; MAX_BONDS];
+    }
+
+    /// The bonds, oldest first, without the empty slots.
+    pub fn bonds(&self) -> impl Iterator<Item = &Bond> {
+        self.bonds.iter().flatten()
     }
 
     /// Serialise for storage.
@@ -113,6 +228,15 @@ impl DeviceStore {
         out[OFF_FLAGS] = flags;
         out[OFF_EEPROM..OFF_EEPROM + EEPROM_SIZE].copy_from_slice(self.rom.as_bytes());
 
+        // Bonds are packed from the front, so the count says where they stop.
+        let mut n = 0usize;
+        for bond in self.bonds.iter().flatten() {
+            let at = OFF_BONDS + 1 + n * BOND_LEN;
+            bond.encode(&mut out[at..at + BOND_LEN]);
+            n += 1;
+        }
+        out[OFF_BONDS] = n as u8;
+
         let crc = record_crc(&out);
         out[OFF_CRC..OFF_CRC + 4].copy_from_slice(&crc.to_le_bytes());
         out
@@ -128,7 +252,13 @@ impl DeviceStore {
         if bytes.len() < RECORD_LEN {
             return None;
         }
-        if bytes[OFF_MAGIC..OFF_MAGIC + 4] != MAGIC || bytes[OFF_VERSION] != VERSION {
+        let version = bytes[OFF_VERSION];
+        let len = match version {
+            VERSION => RECORD_LEN,
+            VERSION_1 => RECORD_LEN_V1,
+            _ => return None,
+        };
+        if bytes[OFF_MAGIC..OFF_MAGIC + 4] != MAGIC {
             return None;
         }
         let stored = u32::from_le_bytes([
@@ -137,7 +267,7 @@ impl DeviceStore {
             bytes[OFF_CRC + 2],
             bytes[OFF_CRC + 3],
         ]);
-        if record_crc(&bytes[..RECORD_LEN]) != stored {
+        if record_crc(&bytes[..len]) != stored {
             return None;
         }
 
@@ -156,10 +286,20 @@ impl DeviceStore {
             hash
         });
 
+        let mut bonds = [None; MAX_BONDS];
+        if version == VERSION {
+            let n = (bytes[OFF_BONDS] as usize).min(MAX_BONDS);
+            for (slot, bond) in bonds.iter_mut().zip(0..n) {
+                let at = OFF_BONDS + 1 + bond * BOND_LEN;
+                *slot = Some(Bond::decode(&bytes[at..at + BOND_LEN]));
+            }
+        }
+
         Some(Self {
             rom: Eeprom::from_bytes(rom),
             device_signature,
             target_firmware_hash,
+            bonds,
         })
     }
 }
@@ -325,5 +465,86 @@ mod tests {
         assert_eq!(store.device_signature, None);
         assert_eq!(store.target_firmware_hash, None);
         assert!(!store.rom.is_provisioned());
+    }
+}
+
+#[cfg(test)]
+mod bond_tests {
+    use super::*;
+
+    fn bond(n: u8) -> Bond {
+        Bond {
+            addr_kind: 1,
+            addr: [n, 2, 3, 4, 5, 0xC0],
+            irk: (n % 2 == 0).then_some([n; 16]),
+            ltk: [0xA0 | n; 16],
+            authenticated: true,
+        }
+    }
+
+    #[test]
+    fn bonds_survive_a_round_trip() {
+        let mut store = DeviceStore::new();
+        store.add_bond(bond(1));
+        store.add_bond(bond(2));
+        let back = DeviceStore::decode(&store.encode()).unwrap();
+        assert_eq!(back, store);
+        assert_eq!(back.bonds().count(), 2);
+        assert_eq!(back.bonds[1].unwrap().irk, Some([2; 16]));
+        assert_eq!(back.bonds[0].unwrap().irk, None);
+    }
+
+    #[test]
+    fn the_same_phone_replaces_its_own_bond() {
+        let mut store = DeviceStore::new();
+        store.add_bond(bond(1));
+        let mut again = bond(1);
+        again.ltk = [0xEE; 16];
+        store.add_bond(again);
+        assert_eq!(store.bonds().count(), 1);
+        assert_eq!(store.bonds[0].unwrap().ltk, [0xEE; 16]);
+    }
+
+    #[test]
+    fn a_full_table_forgets_the_oldest() {
+        let mut store = DeviceStore::new();
+        for n in 1..=MAX_BONDS as u8 {
+            store.add_bond(bond(n));
+        }
+        store.add_bond(bond(9));
+        let addrs: Vec<u8> = store.bonds().map(|b| b.addr[0]).collect();
+        assert_eq!(addrs, vec![2, 3, 4, 9]);
+    }
+
+    #[test]
+    fn a_version_1_record_still_decodes_with_no_bonds() {
+        // Exactly what every board provisioned before phase 8 has in flash.
+        let mut v1 = DeviceStore::new().encode();
+        v1[OFF_VERSION] = VERSION_1;
+        let crc = record_crc(&v1[..RECORD_LEN_V1]);
+        v1[OFF_CRC..OFF_CRC + 4].copy_from_slice(&crc.to_le_bytes());
+        let back = DeviceStore::decode(&v1).expect("a version 1 record decodes");
+        assert_eq!(back.bonds().count(), 0);
+        assert_eq!(back.rom, DeviceStore::new().rom);
+    }
+
+    #[test]
+    fn an_eeprom_wipe_forgets_the_phones_too() {
+        // `rnodeconf --eeprom-wipe` is the "this board is leaving my hands"
+        // command, and a board that keeps the last owner's phone keys is not
+        // wiped.
+        let mut store = DeviceStore::new();
+        store.add_bond(bond(1));
+        store.wipe();
+        assert_eq!(store.bonds().count(), 0);
+        assert_eq!(store, DeviceStore::new());
+    }
+
+    #[test]
+    fn clearing_forgets_everyone() {
+        let mut store = DeviceStore::new();
+        store.add_bond(bond(1));
+        store.clear_bonds();
+        assert_eq!(store.bonds().count(), 0);
     }
 }

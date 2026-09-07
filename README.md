@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode with a screen, over USB or Bluetooth
+## Status: a provisioned RNode, over USB or paired Bluetooth
 
 Being precise about that:
 
@@ -23,7 +23,7 @@ Being precise about that:
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
-| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **working** — iOS Sideband drives the radio over BLE; pairing not yet required, [notes](docs/phase-8-bluetooth.md) |
+| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -49,14 +49,14 @@ the RNode display protocol so a host can push pictures to it. See
 
 Phase 8 gave it Bluetooth: the same KISS stream, over the Nordic UART
 Service, into the same protocol core and the same radio. iOS Sideband finds
-`RNode 7F23`, configures it, and brings the interface online; USB keeps
-working alongside, and the panel says which host is on the line. What it
-does not yet do is require pairing. See
+`RNode 7F23`, pairs with the six digits the panel shows, and brings the
+interface online; the bond goes to flash and survives a reset, USB keeps
+working alongside, and the panel says which host is on the line. See
 [docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md) — including the bug
-that stood between advertising and this, which took a captured program
-counter to find.
+that stood between advertising and any of this, which took a captured
+program counter to find.
 
-Phases 1 to 8 are confirmed on hardware; phase 8's pairing is not built.
+Phases 1 to 8 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -380,8 +380,9 @@ using anyway.
   the vector. Done, and it cost a week: see the phase 8 notes.
 * **Pairing is not optional.** The stock firmware requires LE Secure
   Connections with MITM protection, generates a six-digit passkey, and
-  explicitly refuses "Just Works". That passkey needs a display, which is why
-  phase 7 comes first.
+  explicitly refuses "Just Works". So does this one: both characteristics
+  demand an authenticated link, the board is `DisplayOnly`, and the passkey
+  goes on the OLED — which is why phase 7 came first.
 
 ### Why it is phase 8 and not phase 3
 

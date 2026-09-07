@@ -306,6 +306,7 @@ async fn main(_spawner: Spawner) {
             last_snr_quarter_db: Some(45),
             // A bring-up image with no stack; the badge stays off.
             bluetooth: oxinode_core::status::Bluetooth::Absent,
+            passkey: None,
         };
 
         // Rendered into a scratch frame and committed by comparison, so an

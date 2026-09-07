@@ -152,6 +152,13 @@ impl Protocol {
     }
 
     /// The persistent device data, for the storage layer to write out.
+    /// The persistent state, for the parts of it the protocol does not
+    /// manage: the firmware keeps the Bluetooth bonds here so that one record
+    /// and one flash write cover everything.
+    pub fn store_mut(&mut self) -> &mut DeviceStore {
+        &mut self.store
+    }
+
     pub const fn store(&self) -> &DeviceStore {
         &self.store
     }

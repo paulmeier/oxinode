@@ -91,6 +91,8 @@ pub struct Status {
     pub last_snr_quarter_db: Option<i8>,
     /// The Bluetooth link, if the image has one.
     pub bluetooth: Bluetooth,
+    /// A pairing in progress: the six digits the phone has to be told.
+    pub passkey: Option<u32>,
 }
 
 /// What the Bluetooth transport is doing, for the title bar.
@@ -128,6 +130,7 @@ impl Status {
             last_rssi_dbm: None,
             last_snr_quarter_db: None,
             bluetooth: Bluetooth::Absent,
+            passkey: None,
         }
     }
 }
@@ -276,6 +279,25 @@ pub fn render(status: &Status, frame: &mut Frame) {
         }
     }
     row(frame, &mut line, "SNR", buf.as_str());
+    // A pairing in progress covers the middle of the page: a filled box with
+    // the six digits knocked out of it, big enough to read across a table,
+    // because this is the one moment the screen is the whole user interface.
+    if let Some(key) = status.passkey {
+        let (top, height) = (44, 40);
+        frame.rect(LEFT, top, RIGHT - LEFT, height, true);
+        font::draw(frame, LEFT + 4, top + 5, "PAIR WITH", false);
+        let mut digits = Text::<8>::new();
+        let _ = write!(digits, "{:06}", key % 1_000_000);
+        // Spaced out: each digit gets two cells, so it reads as a code and not
+        // as a number.
+        let mut x = LEFT + 4;
+        for c in digits.as_str().chars() {
+            let mut one = Text::<2>::new();
+            let _ = write!(one, "{c}");
+            font::draw(frame, x, top + 22, one.as_str(), false);
+            x += font::ADVANCE * 2 + 1;
+        }
+    }
 }
 
 // The page has to fit. Twelve rows of nine pixels below a title bar and two
@@ -304,6 +326,7 @@ mod tests {
             last_rssi_dbm: Some(-69),
             last_snr_quarter_db: Some(45),
             bluetooth: Bluetooth::Absent,
+            passkey: None,
         }
     }
 

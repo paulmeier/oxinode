@@ -249,6 +249,9 @@ async fn main(_spawner: Spawner) {
     let mut storage = Storage::new(p.NVMC);
     let device = storage.load();
     let mcu_id = board::device_id();
+    // The phones this board already knows, handed to the host stack at boot.
+    // Copied out because `device` moves into the modem loop.
+    let stored_bonds = device.bonds;
 
     let mut boost = Boost::new(p.P0_23);
     static TWIM_RAM: StaticCell<[u8; 256]> = StaticCell::new();
@@ -299,7 +302,13 @@ async fn main(_spawner: Spawner) {
         };
         join(
             mpsl.run(),
-            serve_bluetooth(controller, mcu_id, &ble_writer, &ble_out_reader),
+            serve_bluetooth(
+                controller,
+                mcu_id,
+                stored_bonds,
+                &ble_writer,
+                &ble_out_reader,
+            ),
         )
         .await;
     };
@@ -463,6 +472,7 @@ async fn main(_spawner: Spawner) {
 async fn serve_bluetooth(
     controller: sdc::SoftdeviceController<'static>,
     device_id: u64,
+    stored_bonds: [Option<oxinode_core::rnode::store::Bond>; oxinode_core::rnode::store::MAX_BONDS],
     to_modem: &Writer<'_, NoopRawMutex, BLE_IN>,
     from_modem: &Reader<'_, NoopRawMutex, BLE_OUT>,
 ) {
@@ -475,7 +485,18 @@ async fn serve_bluetooth(
     > = StaticCell::new();
     let stack = trouble_host::new(controller, RESOURCES.init(HostResources::new()))
         .set_random_address(Address::random(address))
+        // A screen and no keyboard: the board shows six digits and the phone
+        // types them. That is the Passkey Entry method, which is the one that
+        // gives MITM protection -- see `nus::NusService` for why that is
+        // required rather than merely preferred.
+        .set_io_capabilities(IoCapabilities::DisplayOnly)
         .build();
+    for bond in stored_bonds.iter().flatten() {
+        match stack.add_bond_information(nus::restore(bond)) {
+            Ok(()) => defmt::info!("ble: remembered {=[u8; 6]:02x}", bond.addr),
+            Err(e) => defmt::warn!("ble: could not restore a bond: {}", e),
+        }
+    }
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
@@ -574,6 +595,14 @@ fn push_to_ble(outbox: &mut Outbox<OUTBOX>, out: &Writer<'_, NoopRawMutex, BLE_O
     let dropped = outbox.take_dropped();
     if dropped > 0 {
         defmt::warn!("ble outbox: {=u32} frames dropped", dropped);
+    }
+}
+
+/// The passkey to show, if a pairing is in progress.
+fn passkey_state() -> Option<u32> {
+    match nus::PASSKEY.load(Ordering::Relaxed) {
+        nus::NO_PASSKEY => None,
+        key => Some(key),
     }
 }
 
@@ -855,6 +884,7 @@ where
                             last_rssi_dbm: last_signal.map(|(rssi, _)| rssi),
                             last_snr_quarter_db: last_signal.map(|(_, snr)| snr),
                             bluetooth: bluetooth_state(),
+                            passkey: passkey_state(),
                         },
                         &mut scratch,
                     );
@@ -866,6 +896,18 @@ where
                     defmt::error!("panel: {}", e);
                 }
             }
+        }
+
+        // A phone that has just paired goes into the record with everything
+        // else, on the same timer. The write is one page erase, about 85 ms
+        // of stalled CPU, inside a live connection: iOS's supervision timeout
+        // is measured in seconds, so the link survives it. What would not
+        // survive is a reset before it is written -- see `nus::take_new_bond`.
+        if let Some(bond) = nus::take_new_bond() {
+            protocol.store_mut().add_bond(bond);
+            dirty_since = Some(Instant::now());
+            // Redraw promptly: the passkey box has to go.
+            last_render = Instant::now() - RENDER_INTERVAL;
         }
 
         // Write the EEPROM out once it has stopped changing. Checked on every

@@ -110,6 +110,8 @@ trouble-host = { version = "0.8", optional = true, default-features = false, fea
     "gatt",
     "derive",
     "default-packet-pool",
+    # LE Secure Connections: the security manager, with pure-Rust P-256.
+    "security",
 ] }
 static_cell = "2.1"
 

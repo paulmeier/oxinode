@@ -1,15 +1,46 @@
 # Phase 8: Bluetooth LE
 
-Where phase 8 stands: **iOS Sideband connects to `RNode 7F23`, configures
-the radio, and brings the interface online**, over the Nordic UART Service,
-through the same protocol core and the same modem loop the USB port uses.
-USB keeps working alongside — `rnodeconf` validates the device signature with
-the stack running — and the panel's title bar shows `BT` while advertising and
-`BT*` with a phone on the line.
+Where phase 8 stands: **done.** iOS Sideband connects to `RNode 7F23`,
+pairs with the six digits the panel shows, configures the radio, and brings
+the interface online, over the Nordic UART Service, through the same protocol
+core and the same modem loop the USB port uses. The bond goes to flash and the
+phone gets back in after a reset without being asked again. USB keeps working
+alongside — `rnodeconf` validates the device signature with the stack running
+— and the panel's title bar shows `BT` while advertising and `BT*` with a
+phone on the line.
 
-Not yet done: pairing. The stock firmware requires LE Secure Connections with
-a passkey; this one accepts any connection. That is the remaining step, and
-the display it needs is there.
+## Pairing
+
+Both characteristics demand an *authenticated* link: a write to RX or a
+subscription to TX from an unpaired phone is refused with "insufficient
+authentication", and every phone answers that by pairing. That is the only
+trigger there is — a peripheral cannot demand pairing, it can only refuse to
+talk until it has happened.
+
+The board is `DisplayOnly`, so the method is Passkey Entry: the host stack
+generates six digits, the panel shows them in a box over the status page, the
+phone's user types them, and the link is encrypted *and authenticated* — MITM
+protected. "Just works" pairing, which anyone in range can do, would only get
+encryption, and an RNode's host is the only thing allowed to key its radio.
+The stock firmware makes the same choice.
+
+Two things had to be found out on hardware:
+
+* **Bonding is per connection and off by default** in `trouble-host`. The
+  first pairing completed authenticated and then reported "the phone did not
+  bond": the keys were thrown away with the connection, and the phone would
+  have been asked for a passkey every time. `Connection::set_bondable(true)`
+  before anything can start pairing is the whole fix.
+* **iOS keeps its half of a bond the board has forgotten**, and then refuses
+  the device until the user deletes it by hand. So bonds are persisted: the
+  device record gained a version and a table of four, oldest reused first,
+  written with everything else on the same 250 ms timer, and reloaded into
+  the host stack at boot. A version 1 record — every board provisioned before
+  phase 8 — still decodes, with no bonds.
+
+Verified: passkey `029717` shown on the panel and accepted by iOS; "paired,
+authenticated"; "528 bytes written to 0xea000"; reset; reconnected online with
+no passkey asked.
 
 It did not start out that way. The first working image hung on every boot
 that followed a flash and came up on every boot that followed the reset
@@ -250,11 +281,6 @@ worth keeping for the next one:
   Phase 6 writes the device record with `NVMC` directly. Until that moves onto
   `nrf_mpsl::Flash`, which schedules the write inside a timeslot, a
   provisioning run with a phone connected will drop the connection.
-* **Pairing.** LE Secure Connections with MITM protection and a six-digit
-  passkey, which is why phase 7 came first. `trouble-host`'s `security` feature
-  and the `security-p256-cortex-m4` backend are the pieces; neither is enabled
-  yet, and enabling them changes the memory sizing.
-
 ## Licensing
 
 `nrf-sdc-sys` vendors Nordic's SoftDevice Controller as a binary archive under

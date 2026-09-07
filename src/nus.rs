@@ -17,8 +17,13 @@
 //! [`Protocol`] and the same [`Outbox`] the USB port uses. That is the point:
 //! Bluetooth is a second pipe, and everything that is not the pipe is shared.
 
+use core::cell::Cell;
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use embassy_futures::select::{select, Either};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::pipe::{Reader, Writer};
 use embassy_time::{with_timeout, Duration};
 use heapless::Vec;
@@ -27,7 +32,9 @@ use oxinode_core::rnode::command;
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::outbox::Outbox;
 use oxinode_core::rnode::protocol::{Action, Protocol};
+use oxinode_core::rnode::store::Bond;
 use trouble_host::prelude::*;
+use trouble_host::{BondInformation, Identity, IdentityResolvingKey, LongTermKey};
 
 /// Largest write the host can make in one go, and largest notification we
 /// send: the attribute ceiling, which is what Reticulum negotiates towards.
@@ -55,12 +62,145 @@ pub struct Server {
 }
 
 /// See the module docs for which direction is which.
+///
+/// # Why both characteristics demand authentication
+///
+/// This is how pairing is *started*. A central that writes to RX, or
+/// subscribes to TX, without an authenticated link is refused with
+/// "insufficient authentication", and every phone answers that by pairing —
+/// which on a `DisplayOnly` peripheral means asking its user for the six
+/// digits the panel is showing. There is no other trigger: a peripheral
+/// cannot demand pairing, it can only refuse to talk until it has happened.
+///
+/// *Authenticated* rather than merely *encrypted*, because encryption alone
+/// is "just works" pairing, which anyone in range can do, and an RNode's host
+/// is the only thing allowed to key its radio. The stock firmware makes the
+/// same choice.
 #[gatt_service(uuid = interop::NUS_SERVICE)]
 pub struct NusService {
-    #[characteristic(uuid = interop::NUS_RX_CHARACTERISTIC, write, write_without_response)]
+    #[characteristic(
+        uuid = interop::NUS_RX_CHARACTERISTIC,
+        write,
+        write_without_response,
+        permissions(write = authenticated)
+    )]
     pub rx: Vec<u8, VALUE_LEN>,
-    #[characteristic(uuid = interop::NUS_TX_CHARACTERISTIC, notify)]
+    #[characteristic(
+        uuid = interop::NUS_TX_CHARACTERISTIC,
+        notify,
+        permissions(cccd = authenticated)
+    )]
     pub tx: Vec<u8, VALUE_LEN>,
+}
+
+/// No pairing in progress.
+pub const NO_PASSKEY: u32 = u32::MAX;
+
+/// The passkey the phone has to be told, or [`NO_PASSKEY`].
+///
+/// Written by whichever loop is handling the connection, read by whichever
+/// loop is drawing the panel. Those are different tasks in the product image,
+/// so it is a static rather than a value passed along.
+pub static PASSKEY: AtomicU32 = AtomicU32::new(NO_PASSKEY);
+
+/// A bond made by the last pairing, waiting to be written to flash.
+///
+/// The host stack keeps bonds in RAM and forgets them at reset; the modem
+/// loop owns the flash, so this is how a bond crosses from the Bluetooth task
+/// to the thing that can keep it. A phone whose bond is forgotten does not
+/// simply pair again — iOS in particular keeps its half and then refuses the
+/// device until the user deletes it by hand — so a bond that is not persisted
+/// is worse than no bond at all.
+static NEW_BOND: Mutex<CriticalSectionRawMutex, Cell<Option<Bond>>> = Mutex::new(Cell::new(None));
+
+/// The bond the last pairing produced, once.
+pub fn take_new_bond() -> Option<Bond> {
+    NEW_BOND.lock(|cell| cell.take())
+}
+
+fn offer_bond(bond: &BondInformation) {
+    let record = Bond {
+        addr_kind: bond.identity.addr.kind.into_inner(),
+        addr: bond.identity.addr.addr.into_inner(),
+        irk: bond.identity.irk.map(|irk| irk.0.get().to_le_bytes()),
+        ltk: bond.ltk.0.to_le_bytes(),
+        authenticated: matches!(bond.security_level, SecurityLevel::EncryptedAuthenticated),
+    };
+    NEW_BOND.lock(|cell| cell.set(Some(record)));
+}
+
+/// A stored bond, as the host stack wants it back at boot.
+pub fn restore(bond: &Bond) -> BondInformation {
+    BondInformation::new(
+        Identity {
+            addr: Address::new(AddrKind::new(bond.addr_kind), BdAddr::new(bond.addr)),
+            irk: bond
+                .irk
+                .and_then(|irk| core::num::NonZeroU128::new(u128::from_le_bytes(irk)))
+                .map(IdentityResolvingKey),
+        },
+        LongTermKey(u128::from_le_bytes(bond.ltk)),
+        if bond.authenticated {
+            SecurityLevel::EncryptedAuthenticated
+        } else {
+            SecurityLevel::Encrypted
+        },
+        true,
+    )
+}
+
+/// Handle the events pairing raises, the same way on every connection.
+///
+/// Returns whether the event was one of these.
+fn on_pairing_event<P: PacketPool>(event: &GattConnectionEvent<'_, '_, P>) -> bool {
+    match event {
+        GattConnectionEvent::PassKeyDisplay(key) => {
+            defmt::info!("nus: pairing; showing passkey {=u32:06}", key.value());
+            PASSKEY.store(key.value(), Ordering::Relaxed);
+        }
+        GattConnectionEvent::PairingComplete {
+            security_level,
+            bond,
+        } => {
+            PASSKEY.store(NO_PASSKEY, Ordering::Relaxed);
+            defmt::info!(
+                "nus: paired, {}",
+                match security_level {
+                    SecurityLevel::EncryptedAuthenticated => "authenticated",
+                    SecurityLevel::Encrypted => "encrypted only",
+                    SecurityLevel::NoEncryption => "not encrypted",
+                }
+            );
+            match bond {
+                Some(bond) if bond.is_bonded => offer_bond(bond),
+                _ => defmt::warn!("nus: the phone did not bond; it will pair again next time"),
+            }
+        }
+        GattConnectionEvent::PairingFailed(e) => {
+            PASSKEY.store(NO_PASSKEY, Ordering::Relaxed);
+            defmt::warn!("nus: pairing failed: {}", e);
+        }
+        GattConnectionEvent::Encrypted {
+            security_level,
+            bond,
+        } => {
+            defmt::info!(
+                "nus: link encrypted, {}, {}",
+                match security_level {
+                    SecurityLevel::EncryptedAuthenticated => "authenticated",
+                    _ => "not authenticated",
+                },
+                if bond.is_some() {
+                    "from a stored bond"
+                } else {
+                    "by a pairing in progress"
+                }
+            );
+        }
+        GattConnectionEvent::BondLost => defmt::warn!("nus: the phone has lost its bond"),
+        _ => return false,
+    }
+    true
 }
 
 /// How a transport asks the rest of the modem to act on a command.
@@ -107,6 +247,9 @@ pub async fn session<'a, P: PacketPool, A: Act>(
 ) -> End {
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     let rx_handle = server.nus.rx.handle;
+    if let Err(e) = conn.raw().set_bondable(true) {
+        defmt::warn!("nus: could not make the connection bondable: {}", e);
+    }
     defmt::info!(
         "nus: rx handle {=u16}, tx handle {=u16}, tx cccd {}",
         rx_handle,
@@ -124,6 +267,7 @@ pub async fn session<'a, P: PacketPool, A: Act>(
         match conn.next().await {
             GattConnectionEvent::Disconnected { reason } => {
                 outbox.abandon();
+                PASSKEY.store(NO_PASSKEY, Ordering::Relaxed);
                 return End::Disconnected(reason.into_inner());
             }
             GattConnectionEvent::Gatt {
@@ -204,7 +348,11 @@ pub async fn session<'a, P: PacketPool, A: Act>(
             GattConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
                 defmt::info!("nus: phy tx {=u8} rx {=u8}", tx_phy as u8, rx_phy as u8)
             }
-            _ => defmt::info!("nus: some other connection event"),
+            other => {
+                if !on_pairing_event(&other) {
+                    defmt::info!("nus: some other connection event");
+                }
+            }
         }
 
         if let Err(end) = flush(conn, server, outbox).await {
@@ -281,6 +429,13 @@ pub async fn pump<P: PacketPool, M: RawMutex, const IN: usize, const OUT: usize>
     from_modem: &Reader<'_, M, OUT>,
 ) -> End {
     let rx_handle = server.nus.rx.handle;
+    // Off by default in the host stack, per connection, and without it the
+    // pairing that authentication forces is thrown away the moment it is
+    // over: the phone would be asked for a passkey on every connection. With
+    // it, the pairing produces a bond, and the bond goes to flash.
+    if let Err(e) = conn.raw().set_bondable(true) {
+        defmt::warn!("nus: could not make the connection bondable: {}", e);
+    }
     defmt::info!(
         "nus: pumping for {=[u8; 6]:02x}, att mtu {=u16}",
         conn.raw().peer_address().addr.into_inner(),
@@ -313,6 +468,7 @@ pub async fn pump<P: PacketPool, M: RawMutex, const IN: usize, const OUT: usize>
                 }
             }
             Either::First(GattConnectionEvent::Disconnected { reason }) => {
+                PASSKEY.store(NO_PASSKEY, Ordering::Relaxed);
                 return End::Disconnected(reason.into_inner());
             }
             Either::First(GattConnectionEvent::Gatt {
@@ -350,7 +506,9 @@ pub async fn pump<P: PacketPool, M: RawMutex, const IN: usize, const OUT: usize>
                 conn_interval.as_micros(),
                 supervision_timeout.as_millis()
             ),
-            Either::First(_) => {}
+            Either::First(other) => {
+                on_pairing_event(&other);
+            }
         }
     }
 }

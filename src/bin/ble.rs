@@ -353,6 +353,7 @@ async fn run(controller: sdc::SoftdeviceController<'static>, device_id: u64) {
     > = StaticCell::new();
     let stack = trouble_host::new(controller, RESOURCES.init(HostResources::new()))
         .set_random_address(Address::random(address))
+        .set_io_capabilities(IoCapabilities::DisplayOnly)
         .build();
 
     let mut runner = stack.runner();
