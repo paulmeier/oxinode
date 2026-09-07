@@ -226,8 +226,8 @@ Out of scope for now, recorded so nobody has to re-derive it: second I²C bus
 P0.04/P0.06 (IMU, RX8130CE RTC at `0x32`, *and* the Qwiic/STEMMA QT connector,
 5.1 kΩ pull-ups on board), GPS UART P0.20/P0.19, battery sense P0.31 through an
 806 kΩ/1.5 MΩ divider (ratio 0.65048), BQ25185 charger status on P0.27 and P1.02,
-trackball (P0.21/P0.17/P1.05/P0.16, press P0.10), cancel button P0.15, and a
-three-position mode switch (P1.09 / P0.12).
+the navigation pad (up P0.21, down P0.17, left P1.05, right P0.16, OK P0.10),
+the back button P0.15, and a three-position mode switch (P1.09 / P0.12).
 
 Two of those pins are not what their Meshtastic names suggest:
 
@@ -241,7 +241,7 @@ Two of those pins are not what their Meshtastic names suggest:
   `GPS_RX_PIN` P0.20 and `GPS_TX_PIN` P0.19. Neither name is safe to copy —
   decide direction from the nRF52840's point of view and confirm on hardware.
 
-Everything above the Base Duo itself — trackball, buzzer, GPS, OLED, mode switch
+Everything above the Base Duo itself — navigation pad, buzzer, GPS, OLED, mode switch
 — lives on the Super IO board and reaches it through 25 castellations (`JC1`–
 `JC25`) carrying VBAT+, a solar input, the two switched rails, the second I²C
 bus, the OLED bus and eight general-purpose IOs. The Base Duo just brings pins
@@ -259,6 +259,19 @@ bring-up means charging, not a fault in anything oxinode did.
   **W25Q128JVPIQ**, 128 Mbit. Since the variant is demonstrably wrong and the
   schematic covers one revision, phase 3+ should still read the JEDEC ID at
   runtime — but now it knows what answer to expect.
+* **It is a navigation pad, not a trackball, whatever the variant calls it.**
+  Meshtastic declares `HAS_TRACKBALL 1` and names the five lines `TB_UP`,
+  `TB_DOWN`, `TB_LEFT`, `TB_RIGHT` and `TB_PRESS`, so reading the variant alone
+  leaves you expecting a ball. muzi's own specification for the Super IO lists
+  "Navigation Pad Buttons + OK + Back", and the board has six discrete
+  switches. The pin numbers are the same either way; the *driver* is not. A
+  trackball emits a burst of edges as the ball rolls and is read by counting
+  them, which is why the variant sets `TB_DIRECTION FALLING`. A pad emits one
+  edge and then a level that lasts as long as a finger does, and wants
+  debouncing and an auto-repeat instead. Counting edges from a pad gives one
+  step per press and no repeat; watching levels on a ball gives a runaway
+  cursor. Six buttons, all active low: up P0.21, down P0.17, left P1.05,
+  right P0.16, OK P0.10, back P0.15.
 * **P0.10 is an NFC pin, and it is the user button.** P0.09 is unconnected;
   P0.10/NFC2 carries `USR_BTN` (SW1, active low, 100 kΩ pull-up). NFC pins only
   work as GPIO once `UICR.NFCPINS` is programmed — a non-volatile change that

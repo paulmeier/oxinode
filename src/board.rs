@@ -83,3 +83,45 @@ pub fn take_device_serial() -> &'static str {
     // `hex_u64` only ever emits ASCII hex digits, which its own tests assert.
     core::str::from_utf8(buf).expect("hex_u64 produced non-ASCII")
 }
+
+/// Whether P0.09 and P0.10 are ordinary GPIOs rather than the NFC antenna.
+///
+/// P0.10 carries `USR_BTN` and the Super IO trackball's press, and neither
+/// works while the pins belong to the NFC peripheral. Which they are is not a
+/// runtime choice: it is `UICR.NFCPINS`, a word in the chip's user information
+/// page, and changing it means erasing and rewriting that page rather than
+/// setting a register.
+///
+/// So this only *reports*. The board shipped running Meshtastic, which builds
+/// with `CONFIG_NFCT_PINS_AS_GPIOS`, so the answer is expected to be `true`
+/// already and oxinode should not have to touch the page at all. Reading it and
+/// saying so is much better than assuming either way, because the failure looks
+/// identical to a broken button: the pin simply never changes.
+///
+/// `PROTECT` is bit 0. Erased flash is all ones, so the factory default is NFC.
+pub fn nfc_pins_are_gpio() -> bool {
+    embassy_nrf::pac::UICR.nfcpins().read().0 & 1 == 0
+}
+
+/// The regulator output voltage `UICR.REGOUT0` selects, in tenths of a volt.
+///
+/// Reported alongside [`nfc_pins_are_gpio`] because both live in the same
+/// erase page. Anything that rewrites `NFCPINS` has to carry this value across
+/// with it: the bootloader programs 3.3 V here, and a page erase that lost it
+/// would drop the board to the 1.8 V reset default with the panel's boost
+/// converter and the QSPI flash still expecting 3.3.
+///
+/// `None` when the field holds a reserved encoding.
+pub fn regulator_decivolts() -> Option<u8> {
+    match embassy_nrf::pac::UICR.regout0().read().0 & 0b111 {
+        0 => Some(18),
+        1 => Some(21),
+        2 => Some(24),
+        3 => Some(27),
+        4 => Some(30),
+        5 => Some(33),
+        // 6 is reserved; 7 is the erased default, which means 1.8 V.
+        7 => Some(18),
+        _ => None,
+    }
+}

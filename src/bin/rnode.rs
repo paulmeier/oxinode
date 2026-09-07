@@ -414,6 +414,16 @@ async fn main(_spawner: Spawner) {
             }
         };
 
+        // Reported after the radio rather than at the top of boot, because the
+        // log ring is small and the first hundred milliseconds of it are long
+        // gone by the time a host has enumerated and opened the port.
+        defmt::info!(
+            "board: nav pad usable={=bool} (UICR.NFCPINS), regulator={=u8}.{=u8} V",
+            board::nfc_pins_are_gpio(),
+            board::regulator_decivolts().unwrap_or(0) / 10,
+            board::regulator_decivolts().unwrap_or(0) % 10,
+        );
+
         let mut dev = match bringup::bring_up(spi, reset, &mut irq).await {
             Ok(dev) => dev,
             Err(e) => {

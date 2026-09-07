@@ -31,8 +31,8 @@
 //! * **A menu.** Select opens the current screen's action menu over the
 //!   content. Up and down move the highlight, select activates it, back closes
 //!   it. Left and right are ignored rather than being made to mean something
-//!   else, so a stray sideways nudge on a trackball cannot change screen out
-//!   from under a menu that is open.
+//!   else, so a stray sideways press cannot change screen out from under a
+//!   menu that is open.
 //!
 //! Back at the browsing level does nothing at all. There is nowhere above the
 //! top, and a back button that silently jumps to the first screen is a way to
@@ -182,9 +182,10 @@ impl Screen {
 
     /// What its action menu offers, `Back` first.
     ///
-    /// `Back` is an item rather than only a button because the trackball's
-    /// press is the one input that certainly exists, and a menu you can open
-    /// but not leave without a second working button is a trap.
+    /// `Back` is an item as well as a button. The board does have a dedicated
+    /// back switch, so this is redundancy rather than necessity -- but a menu
+    /// that can only be left by a key the user has not found yet is a trap,
+    /// and the way out costs one line.
     pub const fn menu(self) -> &'static [Item] {
         match self {
             Screen::Home => &HOME_MENU,
@@ -241,9 +242,10 @@ pub enum Action {
 
 /// Which way the user moved.
 ///
-/// Named for the gesture and not the hardware: the trackball's four directions
-/// and its press, plus the cancel button beside it. What produces them is the
-/// driver's business.
+/// Named for the gesture and not the hardware, though on this board the two
+/// happen to line up exactly: the Super IO carries a navigation pad, an OK and
+/// a back button, which is six switches for six variants. What debounces them
+/// is the driver's business.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Input {
     Left,
@@ -560,7 +562,7 @@ mod tests {
     /// Select opens the menu on the item that closes it again.
     ///
     /// Opening on `Back` rather than on the first real action is what makes a
-    /// stray press harmless: press, press is a no-op, not a reboot.
+    /// double press harmless: OK, OK is a no-op, not a reboot.
     #[test]
     fn a_menu_opens_on_back() {
         let mut nav = Nav::new();
