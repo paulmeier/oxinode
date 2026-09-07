@@ -1102,6 +1102,7 @@ dependencies = [
  "embedded-hal-async",
  "embedded-hal-bus",
  "embedded-storage",
+ "heapless 0.9.3",
  "lr11xx",
  "nrf-mpsl",
  "nrf-sdc",

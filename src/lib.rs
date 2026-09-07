@@ -24,6 +24,8 @@ pub mod bringup;
 pub mod display;
 pub mod logger;
 pub mod modem;
+#[cfg(feature = "ble")]
+pub mod nus;
 pub mod radio;
 pub mod store;
 pub mod usb_log;

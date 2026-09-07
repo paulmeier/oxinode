@@ -34,6 +34,7 @@ ble = [
     "dep:nrf-mpsl",
     "dep:nrf-sdc",
     "dep:trouble-host",
+    "dep:heapless",
     "nrf-mpsl/critical-section-impl",
 ]
 
@@ -100,6 +101,9 @@ nrf-sdc = { version = "0.4", optional = true, default-features = false, features
     # controller library we would never call.
     "peripheral",
 ] }
+# Fixed-capacity byte vectors, which is how trouble-host's GATT table holds a
+# variable-length characteristic value. Same major as trouble's own.
+heapless = { version = "0.9", optional = true }
 trouble-host = { version = "0.8", optional = true, default-features = false, features = [
     "defmt",
     "peripheral",

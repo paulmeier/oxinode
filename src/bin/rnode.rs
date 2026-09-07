@@ -48,6 +48,7 @@ use oxinode_core::lr1121::config::ValidConfig;
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::kiss;
+use oxinode_core::rnode::outbox::Outbox;
 use oxinode_core::rnode::protocol::{Action, Protocol, Sink};
 use oxinode_core::rnode::store::DeviceStore;
 use oxinode_core::{sh1107, status};
@@ -430,7 +431,7 @@ where
                                 // will look at the result afterwards.
                                 Action::Reset => {
                                     defmt::info!("reset requested by the host");
-                                    outbox.flush(tx).await;
+                                    flush(&mut outbox, tx).await;
                                     commit(storage, &protocol);
                                     boot::reboot();
                                 }
@@ -575,7 +576,7 @@ where
             }
         }
 
-        outbox.flush(tx).await;
+        flush(&mut outbox, tx).await;
 
         // Belt and braces. Every path above is *supposed* to await something
         // that can actually pend, but a loop that can complete an iteration
@@ -754,7 +755,7 @@ where
                         // dependency that is not there.
                         Action::Persist => dirty_since = Some(Instant::now()),
                         Action::Reset => {
-                            outbox.flush(tx).await;
+                            flush(&mut outbox, tx).await;
                             commit(storage, &protocol);
                             boot::reboot();
                         }
@@ -785,7 +786,7 @@ where
         }
         led.off();
         Timer::after(Duration::from_millis(100)).await;
-        outbox.flush(tx).await;
+        flush(&mut outbox, tx).await;
     }
 }
 
@@ -821,79 +822,46 @@ fn commit(storage: &mut Storage<'_>, protocol: &Protocol) {
     }
 }
 
-/// Response frames waiting to go to the host.
+/// Write everything an outbox holds to a USB endpoint, then report anything lost.
 ///
-/// Whole frames or nothing. A byte ring that dropped its oldest bytes — which
-/// is right for a log, and is what `logbuf` does — would splice two frames
-/// together here and hand the host a packet made of two halves. So an
-/// overflowing frame is dropped entire and counted.
-struct Outbox<const N: usize> {
-    buf: [u8; N],
-    len: usize,
-    dropped: u32,
-}
-
-impl<const N: usize> Outbox<N> {
-    const fn new() -> Self {
-        Self {
-            buf: [0; N],
-            len: 0,
-            dropped: 0,
-        }
-    }
-
-    /// Write everything queued, then report anything lost.
-    async fn flush<'d, D: UsbDriverTrait<'d>>(&mut self, tx: &mut Sender<'d, D>) {
-        let max = usb_log::MAX_PACKET_SIZE as usize;
-        let mut sent = 0;
-        while sent < self.len {
-            let end = (sent + max).min(self.len);
-            // Bounded, because `write_packet` waits for the host to ask for
-            // the data and a host that has closed the port never will. Without
-            // a bound the modem stops servicing the radio the moment somebody
-            // disconnects, and only starts again if they come back.
-            match with_timeout(
-                Duration::from_millis(500),
-                tx.write_packet(&self.buf[sent..end]),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                // The host went away mid-frame. Everything queued is part of a
-                // conversation nobody is having; drop it rather than delivering
-                // half a frame to whoever connects next.
-                Ok(Err(_)) | Err(_) => {
-                    self.len = 0;
-                    self.dropped += 1;
-                    return;
-                }
+/// The buffer itself is `oxinode_core::rnode::outbox::Outbox`, shared with the
+/// Bluetooth transport; this is the part that knows about 64-byte packets.
+async fn flush<'d, D: UsbDriverTrait<'d>, const N: usize>(
+    outbox: &mut Outbox<N>,
+    tx: &mut Sender<'d, D>,
+) {
+    let max = usb_log::MAX_PACKET_SIZE as usize;
+    let total = outbox.len();
+    while !outbox.is_empty() {
+        let n = outbox.len().min(max);
+        // Bounded, because `write_packet` waits for the host to ask for the
+        // data and a host that has closed the port never will. Without a
+        // bound the modem stops servicing the radio the moment somebody
+        // disconnects, and only starts again if they come back.
+        match with_timeout(
+            Duration::from_millis(500),
+            tx.write_packet(&outbox.pending()[..n]),
+        )
+        .await
+        {
+            Ok(Ok(())) => outbox.consume(n),
+            // The host went away mid-frame. Everything queued is part of a
+            // conversation nobody is having; drop it rather than delivering
+            // half a frame to whoever connects next.
+            Ok(Err(_)) | Err(_) => {
+                outbox.abandon();
+                break;
             }
-            sent = end;
-        }
-        // A full-size final packet needs a zero-length packet behind it, or the
-        // host waits for the rest of a transfer that is already complete.
-        if self.len % max == 0 && self.len != 0 {
-            let _ = with_timeout(Duration::from_millis(500), tx.write_packet(&[])).await;
-        }
-        self.len = 0;
-        if self.dropped > 0 {
-            defmt::warn!("outbox: {=u32} frames dropped", self.dropped);
-            self.dropped = 0;
         }
     }
-}
-
-impl<const N: usize> Sink for Outbox<N> {
-    fn frame(&mut self, cmd: u8, payload: &[u8]) {
-        let need = command::response_len(cmd, payload);
-        if self.len + need > N {
-            self.dropped += 1;
-            return;
-        }
-        match command::encode_response(cmd, payload, &mut self.buf[self.len..]) {
-            Some(n) => self.len += n,
-            None => self.dropped += 1,
-        }
+    // A full-size final packet needs a zero-length packet behind it, or the
+    // host waits for the rest of a transfer that is already complete.
+    if total != 0 && total % max == 0 && outbox.is_empty() {
+        let _ = with_timeout(Duration::from_millis(500), tx.write_packet(&[])).await;
+    }
+    let dropped = outbox.take_dropped();
+    if dropped > 0 {
+        defmt::warn!("outbox: {=u32} frames dropped", dropped);
     }
 }
 

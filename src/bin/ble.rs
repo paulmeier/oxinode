@@ -4,11 +4,11 @@
 //! what they say about themselves, and advertises as `RNode XXXX`. It accepts
 //! a connection and logs what happens to it.
 //!
-//! **There is no GATT server yet.** A phone can see this board and connect to
-//! it, and will then find nothing to talk to. That is deliberate: whether the
-//! controller can run at all on this board is one question, and whether the
-//! service definition is right is another, and answering them in separate
-//! images means a failure says which.
+//! It serves the Nordic UART Service and answers the RNode protocol on it —
+//! everything except the radio, which this image does not have. So Sideband
+//! finds the device, detects it, reads its firmware version, and then fails
+//! at radio initialisation, which is the honest result: bytes went both ways
+//! through the whole stack and were understood, on a board with no radio.
 //!
 //! Like `radio` and `display`, this image exposes a **single** CDC-ACM port
 //! and it is a log port, so it can still take the 1200-baud touch.
@@ -70,8 +70,13 @@ use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
+use oxinode::nus;
 use oxinode::{boot, usb_log};
 use oxinode_core::ble as interop;
+use oxinode_core::rnode::command::error;
+use oxinode_core::rnode::outbox::Outbox;
+use oxinode_core::rnode::protocol::{Action, Protocol};
+use oxinode_core::rnode::store::DeviceStore;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -431,6 +436,23 @@ async fn run(controller: sdc::SoftdeviceController<'static>, device_id: u64) {
     )
     .expect("scan response does not fit");
 
+    let server = match nus::Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name,
+        appearance: &appearance::UNKNOWN,
+    })) {
+        Ok(server) => server,
+        Err(e) => {
+            defmt::error!("ble: could not build the GATT server: {}", e);
+            return;
+        }
+    };
+    // The same protocol core the USB port runs, with an empty EEPROM: this
+    // image has no flash driver and provisioning over Bluetooth is not a
+    // thing anyone does. What matters is that detect, version and the rest of
+    // the conversation are answered by the real thing.
+    let mut protocol = Protocol::with_storage(DeviceStore::new(), device_id);
+    let mut outbox = Outbox::<{ nus::OUTBOX }>::new();
+
     let advertise = async {
         loop {
             defmt::info!("ble: advertising");
@@ -463,40 +485,15 @@ async fn run(controller: sdc::SoftdeviceController<'static>, device_id: u64) {
                 "ble: connected to {=[u8; 6]:02x}",
                 conn.peer_address().addr.into_inner()
             );
-
-            // Nothing to serve yet, so the only thing to do is watch. A phone
-            // that finds no services here disconnects on its own after a few
-            // seconds, and seeing that happen is the point of step 1.
-            loop {
-                match conn.next().await {
-                    ConnectionEvent::Disconnected { reason } => {
-                        defmt::info!("ble: disconnected, reason {=u8:#04x}", reason.into_inner());
-                        break;
-                    }
-                    ConnectionEvent::ConnectionParamsUpdated {
-                        conn_interval,
-                        supervision_timeout,
-                        ..
-                    } => defmt::info!(
-                        "ble: interval {=u64} us, supervision timeout {=u64} ms",
-                        conn_interval.as_micros(),
-                        supervision_timeout.as_millis()
-                    ),
-                    ConnectionEvent::DataLengthUpdated {
-                        max_tx_octets,
-                        max_rx_octets,
-                        ..
-                    } => defmt::info!(
-                        "ble: data length tx {=u16} rx {=u16} octets",
-                        max_tx_octets,
-                        max_rx_octets
-                    ),
-                    ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
-                        defmt::info!("ble: phy tx {=u8} rx {=u8}", tx_phy as u8, rx_phy as u8)
-                    }
-                    _ => {}
+            let conn = match conn.with_attribute_server(&server) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    defmt::error!("ble: could not attach the GATT server: {}", e);
+                    continue;
                 }
-            }
+            };
+            let end = nus::session(&conn, &server, &mut protocol, &mut outbox, &mut NoRadio).await;
+            defmt::info!("ble: session over: {}", end);
         }
     };
 
@@ -514,6 +511,33 @@ async fn run(controller: sdc::SoftdeviceController<'static>, device_id: u64) {
 /// what is broken.
 fn vbus_present() -> bool {
     embassy_nrf::pac::POWER.usbregstatus().read().vbusdetect()
+}
+
+/// What this image does with a command that needed a radio: says so.
+///
+/// The same answer `rnode` gives when its radio did not come up, and for the
+/// same reason -- a host told "hardware initialisation error" looks at the
+/// radio, and a host left waiting looks at the cable.
+struct NoRadio;
+
+impl nus::Act for NoRadio {
+    async fn act(
+        &mut self,
+        protocol: &mut Protocol,
+        action: Action<'_>,
+        outbox: &mut Outbox<{ nus::OUTBOX }>,
+    ) {
+        match action {
+            Action::None | Action::Redraw => {}
+            // Nothing to persist to, and nothing to reset for.
+            Action::Persist => defmt::info!("nus: a write the image cannot keep"),
+            Action::Reset => defmt::info!("nus: reset requested; this image stays"),
+            Action::ReportDisplay => {
+                defmt::info!("nus: display read on an image with no panel")
+            }
+            _ => protocol.report_error(error::INITRADIO, outbox),
+        }
+    }
 }
 
 /// Blink, and watch for the 1200-baud touch.
