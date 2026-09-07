@@ -24,7 +24,8 @@ Being precise about that:
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
-| 9 | An on-device interface, and a simulator to build it with | **in progress** — the shell and the simulator are done, [notes](docs/phase-9-simulator.md) |
+| 9 | An on-device interface, and a simulator to build it with | **done** — the shell is pure code and every screen has a golden image, [notes](docs/phase-9-simulator.md) |
+| 10 | The navigation pad driver | **built, awaiting the board** — debounce and repeat tested on the host, [notes](docs/phase-10-pad.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -64,6 +65,15 @@ drives the menus from a script or the arrow keys, and holds every screen and
 menu to a committed golden image. See
 [Looking at a screen without a board](#looking-at-a-screen-without-a-board)
 and [docs/phase-9-simulator.md](docs/phase-9-simulator.md).
+
+Phase 10 is the navigation pad driver: six switches debounced and turned into
+the six gestures the interface already understands, with auto-repeat on the
+directions and none on OK or back, interrupt-driven and silent when nothing
+is pressed. The timing lives in the core and is tested there; the driver
+measures how the real switches bounce and logs it, so the debounce can be
+settled against the board rather than guessed. It also turned up what
+`embassy-nrf` does to `UICR.NFCPINS` when asked for P0.10 — see
+[docs/phase-10-pad.md](docs/phase-10-pad.md) before flashing it.
 
 Phases 1 to 8 are confirmed on hardware.
 What that actually establishes:
@@ -229,14 +239,16 @@ to work from.
 | OLED 12 V boost enable | P0.23 | must be driven **high** or the panel is dark |
 | QSPI SCK / CS / IO0-3 | P0.03 / P0.26 / P0.30, P0.29, P0.28, P0.02 | W25Q128, 16 MB |
 | LF clock | — | external 32.768 kHz crystal (LFXO) |
+| Navigation pad up / down / left / right | P0.21 / P0.17 / P1.05 / P0.16 | active low, internal pull-ups; auto-repeat |
+| Navigation pad OK / back | P0.10 / P0.15 | active low; **P0.10 is an NFC pin**, see below |
+| Mode switch (three positions) | P1.09 / P0.12 | read with no pull, polarity unconfirmed; see [phase 10](docs/phase-10-pad.md) |
 | SWDIO / SWDCLK | — | test pads TP1 / TP2, no header |
 
 Out of scope for now, recorded so nobody has to re-derive it: second I²C bus
 P0.04/P0.06 (IMU, RX8130CE RTC at `0x32`, *and* the Qwiic/STEMMA QT connector,
 5.1 kΩ pull-ups on board), GPS UART P0.20/P0.19, battery sense P0.31 through an
-806 kΩ/1.5 MΩ divider (ratio 0.65048), BQ25185 charger status on P0.27 and P1.02,
-the navigation pad (up P0.21, down P0.17, left P1.05, right P0.16, OK P0.10),
-the back button P0.15, and a three-position mode switch (P1.09 / P0.12).
+806 kΩ/1.5 MΩ divider (ratio 0.65048), and BQ25185 charger status on P0.27 and
+P1.02.
 
 Two of those pins are not what their Meshtastic names suggest:
 
@@ -282,12 +294,24 @@ bring-up means charging, not a fault in anything oxinode did.
   cursor. Six buttons, all active low: up P0.21, down P0.17, left P1.05,
   right P0.16, OK P0.10, back P0.15.
 * **P0.10 is an NFC pin, and it is the user button.** P0.09 is unconnected;
-  P0.10/NFC2 carries `USR_BTN` (SW1, active low, 100 kΩ pull-up). NFC pins only
-  work as GPIO once `UICR.NFCPINS` is programmed — a non-volatile change that
-  needs an erase, not a runtime register write. Meshtastic does it with
-  `CONFIG_NFCT_PINS_AS_GPIOS=1`. This stops being optional the moment oxinode
-  wants *any* button: a DFU trigger, a display page cycle, or the passkey
-  confirmation phase 8 needs.
+  P0.10/NFC2 carries `USR_BTN` (SW1, active low, 100 kΩ pull-up) and the
+  pad's OK switch. NFC pins only work as GPIO once the `PROTECT` bit of
+  `UICR.NFCPINS` is cleared — a non-volatile change, not a runtime register
+  write. Meshtastic does it with `CONFIG_NFCT_PINS_AS_GPIOS=1`, so on a board
+  that shipped running Meshtastic it is expected to be done already. Since
+  phase 10 the firmware builds `embassy-nrf` with `nfc-pins-as-gpio`, which
+  is the only way it names P0.10 at all — and which makes `embassy_nrf::init`
+  clear that bit itself if it is set: a single masked word write (1→0 only,
+  no erase, `REGOUT0` untouched) and one reset. If the bit is already clear
+  that is a no-op. The product image reports both words at every boot:
+
+  ```
+  board: nav pad usable=true (UICR.NFCPINS), regulator=3.3 V
+  ```
+
+  **Read on hardware:** not yet. Read it from whatever image is on the board
+  *before* flashing a phase 10 image, and record the answer here. See
+  [docs/phase-10-pad.md](docs/phase-10-pad.md) for the whole of it.
 * **`USE_SX1262` and `USE_LR1121` are both defined because there are two
   modules, not two wiring options.** Elecrow's **nRFLR1121** (nRF52840 +
   LR1121) and **nRFLR1262** (nRF52840 + SX1262, despite the name) share a
@@ -581,6 +605,8 @@ src/ble.rs            phase 8: MPSL, the SoftDevice Controller, and what they ta
 src/bin/ble.rs        phase 8: the bring-up image, built to be debugged without a probe
 core/src/status.rs    phase 7: the status page, rendered from a value
 core/src/ui.rs        phase 9: screens, the navigation model, the chrome and the menus
+core/src/pad.rs       phase 10: the pad as a state machine -- debounce, auto-repeat, the numbers
+src/pad.rs            phase 10: the pad driver -- six pins, the PORT interrupt, the channel; the mode switch
 sim/                  phase 9: oxinode-sim, the panel simulator -- host only
 sim/src/image.rs      a frame as a PNG at 4x with a pixel grid, and the diff between two
 sim/src/script.rs     `right right select down select`: an input script
@@ -712,7 +738,9 @@ sim raw frame.bin -o frame.png
 
 **What the simulator does not tell you** is anything electrical: button
 debounce and auto-repeat, I²C timing, the panel's own refresh. Those are the
-board's, and phases 10 and 11 are where they get looked at.
+board's. The pad's timing is [phase 10](docs/phase-10-pad.md), tested in the
+core with a clock that is a number and measured on the board by the driver;
+the simulator's input script is the gestures *after* that driver.
 
 ## Releases
 

@@ -23,6 +23,7 @@ pub mod linker_script;
 pub mod logbuf;
 pub mod lr1121;
 pub mod meshtastic;
+pub mod pad;
 pub mod rnode;
 pub mod serial;
 pub mod sh1107;

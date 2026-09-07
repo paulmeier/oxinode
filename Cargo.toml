@@ -58,6 +58,15 @@ embassy-nrf = { version = "0.11", features = [
     "gpiote",
     "time",
     "unstable-pac",   # POWER.GPREGRET, for reboot-into-bootloader
+    # Phase 10. P0.10 carries the pad's OK switch and is an NFC pin, and
+    # embassy-nrf does not even *name* P0.09/P0.10 without this feature. It
+    # is not only a name: with it, `embassy_nrf::init` clears the PROTECT bit
+    # of `UICR.NFCPINS` if it is set -- a single masked word write that only
+    # ever turns a 1 into a 0, so no page erase and `UICR.REGOUT0` is never
+    # touched -- and resets once so it takes. On a board Meshtastic has
+    # already programmed the bit is clear and the write is a no-op. See
+    # docs/phase-10-pad.md before changing this.
+    "nfc-pins-as-gpio",
 ] }
 embassy-usb = "0.6"
 # A pipe between the USB reader and the modem loop. See src/bin/rnode.rs: the

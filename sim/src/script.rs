@@ -68,14 +68,7 @@ pub fn key_named(word: &str) -> Option<Input> {
 
 /// The word for an input, as [`parse`] reads it. Used to name dumped frames.
 pub fn name_of(input: Input) -> &'static str {
-    match input {
-        Input::Left => "left",
-        Input::Right => "right",
-        Input::Up => "up",
-        Input::Down => "down",
-        Input::Select => "select",
-        Input::Back => "back",
-    }
+    input.name()
 }
 
 #[cfg(test)]

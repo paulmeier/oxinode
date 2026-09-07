@@ -256,6 +256,20 @@ pub enum Input {
     Back,
 }
 
+impl Input {
+    /// Its name, for a log or a script.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Input::Left => "left",
+            Input::Right => "right",
+            Input::Up => "up",
+            Input::Down => "down",
+            Input::Select => "select",
+            Input::Back => "back",
+        }
+    }
+}
+
 /// Where the user is.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Nav {
@@ -564,6 +578,24 @@ pub fn page(frame: &mut Frame, nav: &mut Nav, left: &str, right: &str, lines: &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_input_has_its_own_name() {
+        let all = [
+            Input::Left,
+            Input::Right,
+            Input::Up,
+            Input::Down,
+            Input::Select,
+            Input::Back,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            assert_eq!(a.name(), a.name().to_lowercase());
+            for b in &all[i + 1..] {
+                assert_ne!(a.name(), b.name());
+            }
+        }
+    }
 
     /// Walk the whole strip and come back to where you started.
     #[test]

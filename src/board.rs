@@ -86,17 +86,23 @@ pub fn take_device_serial() -> &'static str {
 
 /// Whether P0.09 and P0.10 are ordinary GPIOs rather than the NFC antenna.
 ///
-/// P0.10 carries `USR_BTN` and the Super IO trackball's press, and neither
+/// P0.10 carries `USR_BTN` and the Super IO pad's OK switch, and neither
 /// works while the pins belong to the NFC peripheral. Which they are is not a
 /// runtime choice: it is `UICR.NFCPINS`, a word in the chip's user information
-/// page, and changing it means erasing and rewriting that page rather than
-/// setting a register.
+/// page, and changing it means writing that page rather than setting a
+/// register.
 ///
-/// So this only *reports*. The board shipped running Meshtastic, which builds
-/// with `CONFIG_NFCT_PINS_AS_GPIOS`, so the answer is expected to be `true`
-/// already and oxinode should not have to touch the page at all. Reading it and
-/// saying so is much better than assuming either way, because the failure looks
-/// identical to a broken button: the pin simply never changes.
+/// This only *reports*. What writes it, since phase 10, is `embassy_nrf::init`
+/// under the `nfc-pins-as-gpio` feature -- the only way `embassy-nrf` names
+/// P0.10 at all -- and it does so carefully: a masked word write that clears
+/// the `PROTECT` bit and changes nothing else. Flash bits go from 1 to 0
+/// without an erase, so the rest of the page, `REGOUT0` included, is never
+/// touched; if the bit is already clear the write is a no-op; if it was not,
+/// the chip resets once so the change takes. The board shipped running
+/// Meshtastic, which builds with `CONFIG_NFCT_PINS_AS_GPIOS`, so the expected
+/// answer is `true` before oxinode ever ran. Reading it and saying so is much
+/// better than assuming either way, because the failure looks identical to a
+/// broken button: the pin simply never changes.
 ///
 /// `PROTECT` is bit 0. Erased flash is all ones, so the factory default is NFC.
 pub fn nfc_pins_are_gpio() -> bool {
@@ -106,10 +112,13 @@ pub fn nfc_pins_are_gpio() -> bool {
 /// The regulator output voltage `UICR.REGOUT0` selects, in tenths of a volt.
 ///
 /// Reported alongside [`nfc_pins_are_gpio`] because both live in the same
-/// erase page. Anything that rewrites `NFCPINS` has to carry this value across
-/// with it: the bootloader programs 3.3 V here, and a page erase that lost it
-/// would drop the board to the 1.8 V reset default with the panel's boost
-/// converter and the QSPI flash still expecting 3.3.
+/// erase page. Anything that *erases* that page to rewrite `NFCPINS` has to
+/// carry this value across with it: the bootloader programs 3.3 V here, and a
+/// page erase that lost it would drop the board to the 1.8 V reset default
+/// with the panel's boost converter and the QSPI flash still expecting 3.3.
+/// The bit-clearing write `embassy_nrf::init` does is not an erase, and
+/// oxinode leaves `Config::dcdc.reg0_voltage` at `None` so it never writes
+/// this word either; the log line is there to prove both, every boot.
 ///
 /// `None` when the field holds a reserved encoding.
 pub fn regulator_decivolts() -> Option<u8> {

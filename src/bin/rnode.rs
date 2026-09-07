@@ -63,6 +63,7 @@ use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
 use oxinode::modem::Modem;
 use oxinode::nus;
+use oxinode::pad;
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::ble as interop;
@@ -242,6 +243,15 @@ async fn main(_spawner: Spawner) {
 
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
+
+    // Phase 10: the navigation pad. Claimed whether or not a Super IO is
+    // attached -- with the pull-ups on, an unconnected line reads released,
+    // and an idle driver costs nothing. The channel is what the modem loop
+    // reads gestures from.
+    let mut pad_pins = pad::Pins::new(p.P0_21, p.P0_17, p.P1_05, p.P0_16, p.P0_10, p.P0_15);
+    let mode_switch = pad::ModeSwitch::new(p.P1_09, p.P0_12);
+    let pad_events = pad::Events::new();
+    let nav_pad = pad::run(&mut pad_pins, &pad_events);
 
     // Read before anything else touches it. What comes back is either a record
     // this firmware wrote, or the state of a board nobody has provisioned --
@@ -423,6 +433,7 @@ async fn main(_spawner: Spawner) {
             board::regulator_decivolts().unwrap_or(0) / 10,
             board::regulator_decivolts().unwrap_or(0) % 10,
         );
+        mode_switch.report();
 
         let mut dev = match bringup::bring_up(spi, reset, &mut irq).await {
             Ok(dev) => dev,
@@ -447,6 +458,7 @@ async fn main(_spawner: Spawner) {
                     device,
                     mcu_id,
                     panel.as_mut(),
+                    &pad_events,
                 )
                 .await;
             }
@@ -466,11 +478,12 @@ async fn main(_spawner: Spawner) {
             device,
             mcu_id,
             panel.as_mut(),
+            &pad_events,
         )
         .await
     };
 
-    join5(run_usb, pump, feed_host_rx, modem, bluetooth).await;
+    join5(run_usb, pump, feed_host_rx, modem, join(bluetooth, nav_pad)).await;
 }
 
 /// Advertise, and pump bytes for every connection that comes.
@@ -642,6 +655,7 @@ async fn run<'d, D, S, B>(
     device: DeviceStore,
     mcu_id: u64,
     mut panel: Option<&mut Panel<'_>>,
+    pad_events: &pad::Events,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -866,6 +880,18 @@ where
             }
         }
 
+        // Gestures from the pad. Phase 10 is the driver; what the interface
+        // does with each one is phase 11. Until then a gesture is logged here,
+        // where it arrived, and brings the next redraw forward -- so a person
+        // at the board can see that it was heard, and so a burst of presses
+        // is taken off the channel at the pace the panel is drawn.
+        if pad::drain(pad_events, |input| {
+            defmt::debug!("ui: {=str}", input.name())
+        }) > 0
+        {
+            last_render = Instant::now() - RENDER_INTERVAL;
+        }
+
         // Draw, and send at most two pages of it. A full repaint is 218 ms on
         // this bus and the radio cannot be left that long, so the panel is
         // filled in over several passes -- under half a second for a whole
@@ -1082,6 +1108,7 @@ async fn serve_without_a_radio<'d, D>(
     device: DeviceStore,
     mcu_id: u64,
     panel: Option<&mut Panel<'_>>,
+    pad_events: &pad::Events,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -1173,6 +1200,9 @@ where
                 dirty_since = None;
             }
         }
+        // Nothing on this screen answers the pad, but the channel still has
+        // to be emptied or the driver starts reporting drops.
+        pad::drain(pad_events, |_| {});
         led.off();
         Timer::after(Duration::from_millis(100)).await;
         flush(&mut outbox, tx).await;
