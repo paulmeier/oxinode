@@ -9,7 +9,7 @@ repository = "https://github.com/paulmeier/oxinode"
 publish = false
 
 [workspace]
-members = ["core"]
+members = ["core", "sim"]
 
 [features]
 # Exactly one critical-section implementation may be linked, and the two builds

@@ -493,7 +493,12 @@ pub fn menu(frame: &mut Frame, screen: Screen, selected: usize) {
         let label_w = font::width_of(item.label) + if chosen { 4 * font::ADVANCE } else { 0 };
         let mut lx = x + w.saturating_sub(label_w) / 2;
         if chosen {
-            lx = font::draw(frame, lx, row_y, ">", false);
+            // One advance of gap inside each bracket, which is what the
+            // width above budgets for. The first version drew the label hard
+            // against `>` and left the gap only before `<`; it looked right
+            // as a pixel count and wrong as a picture, and was the first
+            // thing the simulator caught.
+            lx = font::draw(frame, lx, row_y, ">", false) + font::ADVANCE;
             lx = font::draw(frame, lx, row_y, item.label, false);
             font::draw(frame, lx + font::ADVANCE, row_y, "<", false);
         } else {
@@ -518,6 +523,42 @@ pub fn scrollbar(frame: &mut Frame, first: usize, lines: usize) {
     let top = CONTENT_TOP + span * first / (lines - visible);
     frame.rect(x, CONTENT_TOP, 1, track, false);
     frame.rect(x, top, 2, thumb, true);
+}
+
+/// Left edge of a screen's own content, in from the panel edge.
+pub const CONTENT_LEFT: usize = 4;
+
+/// Draw a whole page: chrome, content and, if one is open, the menu.
+///
+/// This is the one composition the firmware and the simulator share, so that
+/// what is looked at on the host is what is drawn on the board. `lines` is the
+/// current screen's content, one string per line, already formatted -- the
+/// caller owns the scratch buffers, for the reason [`title_bar`] gives. The
+/// navigator is told how tall the content is here, because this is the first
+/// place that knows, and it is told before the scroll is read so that a screen
+/// shorter than the last one cannot be shown scrolled past its end.
+pub fn page(frame: &mut Frame, nav: &mut Nav, left: &str, right: &str, lines: &[&str]) {
+    frame.fill(false);
+    nav.set_content_lines(lines.len());
+    let screen = nav.screen();
+    title_bar(frame, left, screen.title(), right);
+
+    let first = nav.scroll();
+    for (n, line) in lines.iter().skip(first).take(visible_lines()).enumerate() {
+        font::draw(
+            frame,
+            CONTENT_LEFT,
+            CONTENT_TOP + n * font::LINE_HEIGHT,
+            line,
+            true,
+        );
+    }
+    scrollbar(frame, first, lines.len());
+
+    icon_bar(frame, screen);
+    if let Some(selected) = nav.menu_item() {
+        menu(frame, screen, selected);
+    }
 }
 
 #[cfg(test)]
@@ -872,5 +913,164 @@ mod tests {
             assert_eq!(Screen::at(n), *screen);
             assert_eq!(Screen::at(n + Screen::COUNT), *screen, "wrapping");
         }
+    }
+
+    /// A composed page carries the chrome of the screen the navigator is on.
+    #[test]
+    fn a_page_shows_the_current_screen() {
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        let mut frame = Frame::new();
+        page(&mut frame, &mut nav, "99%", "12:45p", &[]);
+
+        let mut chrome = Frame::new();
+        chrome.fill(false);
+        title_bar(&mut chrome, "99%", Screen::Radio.title(), "12:45p");
+        icon_bar(&mut chrome, Screen::Radio);
+        assert_eq!(frame.as_bytes(), chrome.as_bytes(), "chrome only, on Radio");
+    }
+
+    /// Content lines land in the content area, starting at the scroll.
+    #[test]
+    fn a_page_draws_its_lines_from_the_scroll() {
+        let lines: Vec<String> = (0..visible_lines() + 4)
+            .map(|n| format!("line {n}"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut nav = Nav::new();
+        let mut top = Frame::new();
+        page(&mut top, &mut nav, "", "", &refs);
+        assert_eq!(nav.scroll(), 0);
+
+        nav.handle(Input::Down);
+        let mut down = Frame::new();
+        page(&mut down, &mut nav, "", "", &refs);
+        assert_eq!(nav.scroll(), 1, "the page told the navigator its height");
+
+        // Row 2 of the scrolled page is row 1 of the unscrolled one, shifted
+        // up by one line, in the text columns.
+        for x in CONTENT_LEFT..sh1107::WIDTH - 4 {
+            for dy in 0..font::HEIGHT {
+                assert_eq!(
+                    down.pixel(x, CONTENT_TOP + dy),
+                    top.pixel(x, CONTENT_TOP + font::LINE_HEIGHT + dy),
+                    "at ({x}, {dy})"
+                );
+            }
+        }
+        // And it did not draw in the chrome.
+        for x in 0..sh1107::WIDTH {
+            for y in (0..CONTENT_TOP).chain(CONTENT_BOTTOM..sh1107::HEIGHT) {
+                assert_eq!(
+                    top.pixel(x, y),
+                    down.pixel(x, y),
+                    "chrome changed at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// Fewer lines than fit means no scrollbar; more means one.
+    #[test]
+    fn a_page_scrolls_only_when_it_must() {
+        let bar_lit = |count: usize| {
+            let lines: Vec<String> = (0..count).map(|n| n.to_string()).collect();
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let mut nav = Nav::new();
+            let mut frame = Frame::new();
+            page(&mut frame, &mut nav, "", "", &refs);
+            (CONTENT_TOP..CONTENT_BOTTOM).any(|y| frame.pixel(sh1107::WIDTH - 1, y))
+        };
+        assert!(!bar_lit(visible_lines()));
+        assert!(bar_lit(visible_lines() + 1));
+    }
+
+    /// An open menu is drawn over the content, and a closed one is not.
+    #[test]
+    fn a_page_overlays_the_menu_when_one_is_open() {
+        let mut nav = Nav::new();
+        let mut closed = Frame::new();
+        page(&mut closed, &mut nav, "", "", &[]);
+        nav.handle(Input::Select);
+        let mut open = Frame::new();
+        page(&mut open, &mut nav, "", "", &[]);
+
+        let mut expected = closed.clone();
+        menu(&mut expected, Screen::Home, 0);
+        assert_eq!(open.as_bytes(), expected.as_bytes());
+        assert_ne!(open.as_bytes(), closed.as_bytes());
+    }
+
+    /// A page that shrinks between renders pulls a scrolled view back.
+    #[test]
+    fn a_page_that_shrinks_is_not_left_scrolled_past_its_end() {
+        let long: Vec<String> = (0..visible_lines() + 5).map(|n| n.to_string()).collect();
+        let long_refs: Vec<&str> = long.iter().map(String::as_str).collect();
+        let mut nav = Nav::new();
+        let mut frame = Frame::new();
+        page(&mut frame, &mut nav, "", "", &long_refs);
+        for _ in 0..5 {
+            nav.handle(Input::Down);
+        }
+        assert_eq!(nav.scroll(), 5);
+        page(&mut frame, &mut nav, "", "", &["only one"]);
+        assert_eq!(nav.scroll(), 0);
+    }
+
+    /// The highlight's brackets sit the same distance from the label on
+    /// both sides.
+    ///
+    /// Found by looking at a golden image rather than by any assertion: the
+    /// label was drawn flush against `>` and a full advance away from `<`.
+    #[test]
+    fn the_highlighted_label_is_bracketed_symmetrically() {
+        let screen = Screen::System;
+        let selected = 1;
+        let mut frame = Frame::new();
+        frame.fill(false);
+        menu(&mut frame, screen, selected);
+        // The box's left edge is the leftmost lit column; the highlighted row
+        // is the first row below the filled heading where the column just
+        // inside that edge is lit again.
+        let box_x = (0..sh1107::WIDTH)
+            .find(|&x| (CONTENT_TOP..CONTENT_BOTTOM).any(|y| frame.pixel(x, y)))
+            .expect("a menu box");
+        let inside = |y: usize| frame.pixel(box_x + 1, y);
+        let box_top = (CONTENT_TOP..CONTENT_BOTTOM)
+            .find(|&y| inside(y))
+            .expect("a heading");
+        let body = (box_top..CONTENT_BOTTOM)
+            .find(|&y| !inside(y))
+            .expect("a body below the heading");
+        let row_y = (body..CONTENT_BOTTOM)
+            .find(|&y| inside(y))
+            .expect("an inverted row");
+        // In an inverted row, text is dark on light. Walk the columns and
+        // record which are entirely lit across the glyph height: those are
+        // the gaps.
+        let is_gap = |x: usize| (0..font::HEIGHT).all(|dy| frame.pixel(x, row_y + 1 + dy));
+        // Only inside the box: outside it every column is dark.
+        let box_right = (0..sh1107::WIDTH)
+            .rev()
+            .find(|&x| frame.pixel(x, row_y))
+            .expect("a right edge");
+        let dark: Vec<usize> = (box_x + 1..box_right).filter(|&x| !is_gap(x)).collect();
+        let (first, last) = (*dark.first().unwrap(), *dark.last().unwrap());
+        // `>` is the first dark run, `<` the last; the label is in between.
+        let after_open = (first..).find(|&x| is_gap(x)).unwrap();
+        let label_start = (after_open..).find(|&x| !is_gap(x)).unwrap();
+        let before_close = (0..=last).rev().find(|&x| is_gap(x)).unwrap();
+        let label_end = (0..=before_close).rev().find(|&x| !is_gap(x)).unwrap();
+        assert_eq!(
+            label_start - after_open,
+            before_close - label_end,
+            "gap after > is {}, gap before < is {}",
+            label_start - after_open,
+            before_close - label_end
+        );
+        assert!(
+            label_start - after_open > 1,
+            "the brackets should stand off"
+        );
     }
 }

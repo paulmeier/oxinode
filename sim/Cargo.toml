@@ -1,0 +1,24 @@
+[package]
+name = "oxinode-sim"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "A panel simulator: renders oxinode's on-device interface on the host"
+publish = false
+
+# Host only. This crate is never linked into the firmware, which is what lets
+# it take dependencies oxinode-core must not: a PNG encoder, std, an allocator.
+# Build and test it with `--target <host>`, because .cargo/config.toml points
+# the workspace at the Cortex-M by default.
+
+[dependencies]
+oxinode-core = { path = "../core" }
+# The one thing worth not writing by hand: deflate. A PNG of a 512-pixel
+# square is a quarter of a megabyte uncompressed and a few kilobytes
+# compressed, and twenty of them are committed as golden images.
+png = "0.18"
+
+[[bin]]
+name = "oxinode-sim"
+path = "src/main.rs"

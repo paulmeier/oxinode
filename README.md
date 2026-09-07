@@ -24,6 +24,7 @@ Being precise about that:
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
+| 9 | An on-device interface, and a simulator to build it with | **in progress** — the shell and the simulator are done, [notes](docs/phase-9-simulator.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -55,6 +56,14 @@ working alongside, and the panel says which host is on the line. See
 [docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md) — including the bug
 that stood between advertising and any of this, which took a captured
 program counter to find.
+
+Phase 9 is the on-device interface: screens, a navigation pad, and menus that
+do something. Its shell is built as pure code, and so is the thing that makes
+it buildable at all: a panel simulator that renders any screen to a PNG,
+drives the menus from a script or the arrow keys, and holds every screen and
+menu to a committed golden image. See
+[Looking at a screen without a board](#looking-at-a-screen-without-a-board)
+and [docs/phase-9-simulator.md](docs/phase-9-simulator.md).
 
 Phases 1 to 8 are confirmed on hardware.
 What that actually establishes:
@@ -571,6 +580,15 @@ core/src/font.rs      phase 7: a 5x7 font, drawn as art and generated into a tab
 src/ble.rs            phase 8: MPSL, the SoftDevice Controller, and what they take away
 src/bin/ble.rs        phase 8: the bring-up image, built to be debugged without a probe
 core/src/status.rs    phase 7: the status page, rendered from a value
+core/src/ui.rs        phase 9: screens, the navigation model, the chrome and the menus
+sim/                  phase 9: oxinode-sim, the panel simulator -- host only
+sim/src/image.rs      a frame as a PNG at 4x with a pixel grid, and the diff between two
+sim/src/script.rs     `right right select down select`: an input script
+sim/src/scene.rs      a navigator plus what a page borrows, rendered as the board will
+sim/src/text.rs       a frame as braille or half blocks, for a terminal
+sim/src/tty.rs        the interactive mode: arrow keys against the real menu tree
+sim/src/golden.rs     the golden-image set and the comparison
+sim/golden/           the committed images: every screen, every menu, every selection
 core/src/rnode/display.rs     phase 7: the host's framebuffer and display readback
 src/display.rs        phase 7: the I2C bus, the 12 V rail, and the panel transport
 src/bin/display.rs    phase 7: the display bring-up image
@@ -616,6 +634,16 @@ project is arranged so that the parts worth testing are testable:
   the host, and is unit tested there. It is thin today — phases 0–2 are mostly
   register pokes — but phase 5's KISS framing is nearly all pure byte
   manipulation and belongs here.
+* **`oxinode-sim`** renders the interface on the host and compares every
+  screen and menu against the golden images in `sim/golden/`. The pixel
+  assertions in `oxinode-core` say where nothing is drawn; a golden image says
+  what it looks like, and a mismatch fails the run and leaves a diff picture in
+  `target/golden-diff/`. If the change was meant, regenerate and commit:
+
+  ```bash
+  cargo run -p oxinode-sim --target "$(rustc -vV | sed -n 's/^host: //p')" -- golden --update
+  ```
+
 * **The host tooling** (UF2 writer, `memory.x` reader, image checker) is tested
   directly. A malformed UF2 does not crash; it produces a board that quietly
   does not run what you flashed.
@@ -635,6 +663,56 @@ The checker's own tests mostly feed it deliberately broken images (linked at
 `0x0`, overrunning the bootloader, stack pointer in flash, missing Thumb bit)
 and assert that it rejects each one. A check that cannot fail is worse than no
 check, because it gets believed.
+
+## Looking at a screen without a board
+
+The interface is pure code, so it can be looked at on the host. `oxinode-sim`
+is a second host crate, and like `oxinode-core` it needs the host target named,
+because the workspace defaults to the Cortex-M:
+
+```bash
+alias sim='cargo run -q -p oxinode-sim --target "$(rustc -vV | sed -n "s/^host: //p")" --'
+```
+
+**A picture of a screen.** A script is the keys you would press, and the
+result is a PNG at 4× with a visible pixel grid, which at 128 × 128 reads
+better than the panel does:
+
+```bash
+sim render --script "right*4 select down" -o system-reboot.png
+```
+
+**A picture per step**, to see a path through the menus as a strip:
+
+```bash
+sim steps --script "right select down select" --out /tmp/steps
+```
+
+**In the terminal.** Arrow keys move, Enter selects, Esc or Backspace goes
+back, `q` quits. The panel is drawn in braille, or in half blocks on a terminal
+tall enough for 64 rows of them. The actions a menu item would fire are shown
+on the status line rather than performed, exactly as the core hands them to
+the firmware:
+
+```bash
+sim tty
+```
+
+**Something to scroll.** The screens do not draw their own content yet; that
+needs the modem's state and is the rest of phase 9. `--sample 20` gives the
+current screen twenty numbered lines, enough to exercise scrolling and the
+scrollbar.
+
+**A frame from the board.** A 2048-byte dump of the controller's RAM, as the
+RNode display-read command returns it, renders the same way:
+
+```bash
+sim raw frame.bin -o frame.png
+```
+
+**What the simulator does not tell you** is anything electrical: button
+debounce and auto-repeat, I²C timing, the panel's own refresh. Those are the
+board's, and phases 10 and 11 are where they get looked at.
 
 ## Releases
 

@@ -2,8 +2,8 @@
 # Everything that can be checked without a board attached.
 #
 # Split three ways, because the pieces cannot share a build target:
-#   * oxinode-core and the Python tools run on the host, where a test harness
-#     exists;
+#   * oxinode-core, the panel simulator and the Python tools run on the host,
+#     where a test harness exists;
 #   * the firmware crate only compiles for thumbv7em-none-eabihf and cannot be
 #     unit tested at all (no std, no probe, no harness) -- so it is checked by
 #     building it and inspecting the result;
@@ -52,6 +52,15 @@ try cargo clippy -p oxinode-core --target "$host" --all-targets -- -D warnings
 
 step "unit tests (core, $host)"
 try cargo test -p oxinode-core --target "$host"
+
+# The simulator is a second host crate; it renders the interface and compares
+# every screen and menu against the golden images in sim/golden. A mismatch
+# leaves a diff image in target/golden-diff/ and fails here.
+step "lint (sim, $host)"
+try cargo clippy -p oxinode-sim --target "$host" --all-targets -- -D warnings
+
+step "unit tests and golden images (sim, $host)"
+try cargo test -p oxinode-sim --target "$host"
 
 step "unit tests (host tooling)"
 try python3 -m unittest discover -s tools -p 'test_*.py'
