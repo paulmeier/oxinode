@@ -51,10 +51,11 @@ exit 0
 """
 
 
-STTY_STUB = """#!/usr/bin/env bash
-# Stub stty: record what it was asked to do. The real one would fail against
-# /dev/null, which is what the tests use for a port.
-printf '%s\\n' "$*" >> "$STTY_LOG"
+# Stub python3, for the one place the script shells out to it: reopening the
+# port at 115200 so the host stops caching the touch rate. It records the baud
+# rate it was asked for, since that is the whole point of the call.
+REOPEN_STUB = """#!/usr/bin/env bash
+printf 'reopen 115200 %s\\n' "$*" >> "$STTY_LOG"
 exit 0
 """
 
@@ -72,17 +73,18 @@ class TestDfuFlash(unittest.TestCase):
             f.write(STUB)
         os.chmod(stub, 0o755)
 
-        stty = os.path.join(tmp, "stty")
-        with open(stty, "w", encoding="utf-8") as f:
-            f.write(STTY_STUB)
-        os.chmod(stty, 0o755)
-        self.stty_log = os.path.join(tmp, "stty.log")
+        reopen = os.path.join(tmp, "reopen-stub")
+        with open(reopen, "w", encoding="utf-8") as f:
+            f.write(REOPEN_STUB)
+        os.chmod(reopen, 0o755)
+        self.stty_log = os.path.join(tmp, "reopen.log")
 
         log = os.path.join(tmp, "calls.log")
         env = dict(os.environ)
         env["PATH"] = tmp + os.pathsep + env["PATH"]
         env["NRFUTIL_LOG"] = log
         env["STTY_LOG"] = self.stty_log
+        env["OXINODE_PYTHON"] = reopen
         env["OXINODE_DFU_PORT"] = "/dev/null"
         env.update(env_extra)
         for key, value in list(env_extra.items()):
@@ -258,7 +260,7 @@ class TestDfuFlash(unittest.TestCase):
         """
         proc, _ = self.run_script(OXINODE_DFU_IN_DFU="1", OXINODE_DFU_SETTLE="0")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(os.path.exists(self.stty_log), "stty was never called")
+        self.assertTrue(os.path.exists(self.stty_log), "the port was never reopened")
         with open(self.stty_log, encoding="utf-8") as f:
             calls = f.read()
         self.assertIn("115200", calls, calls)

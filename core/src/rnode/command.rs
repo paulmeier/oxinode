@@ -357,6 +357,17 @@ pub enum Command<'a> {
     /// A firmware update is about to be flashed.
     FirmwareUpdateImminent,
 
+    /// Show the host's picture instead of the device's own page, or stop.
+    ShowExternalFramebuffer(bool),
+    /// One row of that picture: `[line, 8 bytes]`.
+    WriteFramebuffer { line: u8, data: &'a [u8] },
+    /// Hand the stored picture back.
+    ReadFramebuffer,
+    /// Hand back what is actually on the screen.
+    ReadDisplay,
+    /// Set the display's contrast.
+    SetDisplayIntensity(u8),
+
     /// A command for hardware this board does not have — WiFi, a neopixel.
     /// Distinct from [`Command::NotYetImplemented`] because there is no phase
     /// in which it becomes implemented; the answer is "not on this board".
@@ -498,16 +509,36 @@ pub fn decode<'a>(command: u8, payload: &'a [u8]) -> Command<'a> {
         cmd::PLATFORM => Command::QueryPlatform,
         cmd::MCU => Command::QueryMcu,
         cmd::BOARD => Command::QueryBoard,
-        cmd::FB_EXT
-        | cmd::FB_READ
-        | cmd::FB_WRITE
-        | cmd::DISP_READ
-        | cmd::DISP_INT
-        | cmd::DISP_ADR
-        | cmd::DISP_BLNK
-        | cmd::DISP_ROT
-        | cmd::DISP_RCND
-        | cmd::BLINK => Command::NotYetImplemented(command),
+        cmd::FB_EXT => match payload.first() {
+            Some(&b) => Command::ShowExternalFramebuffer(b != 0),
+            None => Command::Malformed(command),
+        },
+        // `[line, 8 bytes]`, and the eight are checked here rather than in the
+        // buffer, so a short frame is reported as a disagreement about a
+        // command both ends know rather than silently storing a part-row.
+        cmd::FB_WRITE => match (payload.first(), payload.len()) {
+            (Some(&line), len) if len > super::display::FB_BYTES_PER_LINE => {
+                Command::WriteFramebuffer {
+                    line,
+                    data: &payload[1..1 + super::display::FB_BYTES_PER_LINE],
+                }
+            }
+            _ => Command::Malformed(command),
+        },
+        cmd::FB_READ => Command::ReadFramebuffer,
+        cmd::DISP_READ => Command::ReadDisplay,
+        cmd::DISP_INT => match payload.first() {
+            Some(&level) => Command::SetDisplayIntensity(level),
+            None => Command::Malformed(command),
+        },
+        // Real features, not built yet: a blanking timeout, a rotation the
+        // host can choose, a reconditioning sweep, and the identify blink.
+        cmd::DISP_BLNK | cmd::DISP_ROT | cmd::DISP_RCND | cmd::BLINK => {
+            Command::NotYetImplemented(command)
+        }
+        // The panel's address is *discovered* by scanning the bus at boot, so
+        // a host setting it would be replacing a measurement with a guess.
+        cmd::DISP_ADR => Command::NotApplicable(command),
         cmd::BT_CTRL | cmd::BT_PIN => Command::NotYetImplemented(command),
         // Hardware this board does not have, and will not grow.
         cmd::NP_INT
@@ -785,12 +816,6 @@ mod tests {
     #[test]
     fn the_display_and_bluetooth_commands_are_known_but_not_implemented() {
         for c in [
-            cmd::FB_EXT,
-            cmd::FB_READ,
-            cmd::FB_WRITE,
-            cmd::DISP_READ,
-            cmd::DISP_INT,
-            cmd::DISP_ADR,
             cmd::DISP_BLNK,
             cmd::DISP_ROT,
             cmd::DISP_RCND,
@@ -822,9 +847,50 @@ mod tests {
             cmd::CFG_READ,
             cmd::NP_INT,
             cmd::DIS_IA,
+            // The panel's address is discovered by scanning, so setting it
+            // would replace a measurement with a guess.
+            cmd::DISP_ADR,
         ] {
             assert_eq!(decode(c, &[0x00]), Command::NotApplicable(c), "{c:#04x}");
         }
+    }
+
+    /// The display commands, decoded. `CMD_FB_WRITE` is the shape that is easy
+    /// to get wrong: one line byte and then exactly eight of picture.
+    #[test]
+    fn the_display_commands_decode_to_their_arguments() {
+        assert_eq!(
+            decode(cmd::FB_EXT, &[0x01]),
+            Command::ShowExternalFramebuffer(true)
+        );
+        assert_eq!(
+            decode(cmd::FB_EXT, &[0x00]),
+            Command::ShowExternalFramebuffer(false)
+        );
+        assert_eq!(decode(cmd::FB_READ, &[0x01]), Command::ReadFramebuffer);
+        assert_eq!(decode(cmd::DISP_READ, &[0x01]), Command::ReadDisplay);
+        assert_eq!(
+            decode(cmd::DISP_INT, &[0xC0]),
+            Command::SetDisplayIntensity(0xC0)
+        );
+
+        let row = [7u8, 0x80, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        assert_eq!(
+            decode(cmd::FB_WRITE, &row),
+            Command::WriteFramebuffer {
+                line: 7,
+                data: &row[1..]
+            }
+        );
+        // A row one byte short is a disagreement, not something to pad out.
+        assert_eq!(
+            decode(cmd::FB_WRITE, &row[..8]),
+            Command::Malformed(cmd::FB_WRITE)
+        );
+        assert_eq!(
+            decode(cmd::FB_WRITE, &[]),
+            Command::Malformed(cmd::FB_WRITE)
+        );
     }
 
     /// The two commands that cannot be undone both carry a guard byte, and

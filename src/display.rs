@@ -454,10 +454,31 @@ impl<'d> Panel<'d> {
     /// stays where it was, so a continuous stream would rewrite one page
     /// sixteen times.
     pub async fn flush(&mut self, frame: &mut sh1107::Frame) -> Result<(), PanelError> {
+        self.flush_pages(frame, sh1107::PAGES).await
+    }
+
+    /// Send at most `max` dirty pages, and say whether any are left.
+    ///
+    /// This is what keeps the panel from blocking the radio. A full repaint is
+    /// 218 ms on this bus, and a modem that stopped servicing its interrupt for
+    /// that long to redraw a status line would be trading the thing it is for
+    /// the thing it shows. One page is 14 ms, and a caller that sends a couple
+    /// per pass finishes a whole screen in under half a second without ever
+    /// being away for long.
+    pub async fn flush_pages(
+        &mut self,
+        frame: &mut sh1107::Frame,
+        max: usize,
+    ) -> Result<(), PanelError> {
+        let mut sent = 0;
         for page in 0..sh1107::PAGES {
             if !frame.is_dirty(page) {
                 continue;
             }
+            if sent == max {
+                break;
+            }
+            sent += 1;
             self.commands(&sh1107::page_cursor(page)).await?;
 
             self.scratch[0] = sh1107::control::DATA;

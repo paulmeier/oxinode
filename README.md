@@ -509,6 +509,7 @@ core/src/hash/        phase 6: MD5 (because the EEPROM checksum is one) and SHA-
 core/src/sh1107.rs    phase 7: the OLED controller's commands and framebuffer
 core/src/font.rs      phase 7: a 5x7 font, drawn as art and generated into a table
 core/src/status.rs    phase 7: the status page, rendered from a value
+core/src/rnode/display.rs     phase 7: the host's framebuffer and display readback
 src/display.rs        phase 7: the I2C bus, the 12 V rail, and the panel transport
 src/bin/display.rs    phase 7: the display bring-up image
 src/store.rs          phase 6: that record, in the flash a reflash cannot reach

@@ -21,6 +21,7 @@
 //! than re-derived.
 
 pub mod command;
+pub mod display;
 pub mod eeprom;
 pub mod kiss;
 pub mod protocol;

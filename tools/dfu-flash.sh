@@ -146,8 +146,24 @@ run_dfu() {
 # at 115200 and closing it resets the cache, and is harmless: DTR at 115200 is
 # what every ordinary terminal does.
 clear_cached_baud() {
-    [[ -e "$1" ]] || return 0
-    stty -f "$1" 115200 2>/dev/null || true
+    local port="$1"
+    # The board is re-enumerating, so wait for the node before opening it.
+    local waited=0
+    while [[ ! -e "$port" && "$waited" -lt 20 ]]; do
+        sleep 0.5
+        waited=$(( waited + 1 ))
+    done
+    [[ -e "$port" ]] || return 0
+    # An explicit open at 115200 rather than `stty`, because stty applies the
+    # cached settings on the way in and the point is to not do that. pyserial
+    # sets the rate as part of opening.
+    "${OXINODE_PYTHON:-python3}" - "$port" <<'EOF' 2>/dev/null || true
+import sys, time
+import serial
+s = serial.Serial(sys.argv[1], 115200, timeout=0.1)
+time.sleep(0.2)
+s.close()
+EOF
 }
 
 size="$(wc -c < "$bin" | tr -d ' ')"

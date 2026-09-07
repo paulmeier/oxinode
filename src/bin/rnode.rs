@@ -32,7 +32,7 @@ use embassy_futures::select::{select, Either};
 use embassy_futures::yield_now;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
-use embassy_nrf::{bind_interrupts, peripherals, spim};
+use embassy_nrf::{bind_interrupts, peripherals, spim, twim};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::pipe::{Pipe, Reader};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
@@ -40,20 +40,24 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Sender, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
+use oxinode::display::{self, Boost, Panel};
 use oxinode::modem::Modem;
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::lr1121::config::ValidConfig;
 use oxinode_core::rnode::command::{self, error};
+use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::protocol::{Action, Protocol, Sink};
 use oxinode_core::rnode::store::DeviceStore;
+use oxinode_core::{sh1107, status};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
 });
 
 /// Same prototyping VID as the other images, with its own PID.
@@ -62,11 +66,13 @@ const USB_PID: u16 = 0x0003;
 
 /// How much unsent response can pile up.
 ///
-/// One worst-case data frame is 1019 bytes: 508 bytes of payload where every
-/// byte needs escaping, plus the command and two delimiters. This holds that
-/// and a little more, so a full packet can always be queued whole — which
-/// matters because [`Outbox`] drops whole frames rather than truncating them.
-const OUTBOX: usize = 2048;
+/// The largest frame is no longer a packet. `CMD_DISP_READ` answers with 1024
+/// bytes of screen, which escapes to 2051 in the worst case — and a picture is
+/// exactly the kind of data that is full of `0xC0`. This holds that and a data
+/// frame behind it, because [`Outbox`] drops whole frames rather than
+/// truncating them, and a display read that could never fit would never be
+/// answered at all.
+const OUTBOX: usize = 4096;
 
 /// How long the EEPROM has to stay still before it is written to flash.
 ///
@@ -146,6 +152,16 @@ async fn main(_spawner: Spawner) {
     let mut storage = Storage::new(p.NVMC);
     let device = storage.load();
     let mcu_id = board::device_id();
+
+    let mut boost = Boost::new(p.P0_23);
+    static TWIM_RAM: StaticCell<[u8; 256]> = StaticCell::new();
+    let mut i2c = Some(display::new_i2c(
+        p.TWISPI0,
+        Irqs,
+        p.P0_24,
+        p.P0_25,
+        TWIM_RAM.init([0; 256]),
+    ));
 
     let run_usb = usb.run();
     // `|| true` rather than waiting for DTR: this image's log is continuous
@@ -228,6 +244,32 @@ async fn main(_spawner: Spawner) {
             Either::Second(()) => defmt::info!("usb: not enumerated after 2 s; continuing anyway"),
         }
 
+        // The panel, if there is one. A board with no Super IO attached is a
+        // perfectly good modem, so nothing here is allowed to be fatal -- and
+        // the display is brought up before the radio because it costs 50 ms
+        // against the radio's 250, and because a status page saying "no radio"
+        // is worth more than a blank screen.
+        boost.on().await;
+        let mut panel = match display::scan(i2c.as_mut().unwrap()).await.display {
+            Some(address) => {
+                let mut panel = Panel::new(i2c.take().unwrap(), address);
+                match panel.init(status_intensity()).await {
+                    Ok(()) => {
+                        defmt::info!("panel: {=u8:#04x}, 128x128", address);
+                        Some(panel)
+                    }
+                    Err(e) => {
+                        defmt::error!("panel: init failed: {}", e);
+                        None
+                    }
+                }
+            }
+            None => {
+                defmt::info!("panel: none on the bus; running without a display");
+                None
+            }
+        };
+
         let mut dev = match bringup::bring_up(spi, reset, &mut irq).await {
             Ok(dev) => dev,
             Err(e) => {
@@ -248,6 +290,7 @@ async fn main(_spawner: Spawner) {
                     &mut storage,
                     device,
                     mcu_id,
+                    panel.as_mut(),
                 )
                 .await;
             }
@@ -264,6 +307,7 @@ async fn main(_spawner: Spawner) {
             &mut storage,
             device,
             mcu_id,
+            panel.as_mut(),
         )
         .await
     };
@@ -283,6 +327,7 @@ async fn run<'d, D, S, B>(
     storage: &mut Storage<'_>,
     device: DeviceStore,
     mcu_id: u64,
+    mut panel: Option<&mut Panel<'_>>,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -297,6 +342,19 @@ where
     // When the EEPROM was last changed, and therefore when it should be
     // written out. See `PERSIST_IDLE`.
     let mut dirty_since: Option<Instant> = None;
+
+    // The panel's state. `live` is what the controller has been sent; `scratch`
+    // is where a page is drawn before being committed by comparison, so an
+    // update costs the pages that changed rather than the pages that were
+    // redrawn. See `sh1107::Frame::copy_from`.
+    let mut live = sh1107::Frame::new();
+    let mut scratch = sh1107::Frame::new();
+    let mut last_render = Instant::now() - RENDER_INTERVAL;
+    let mut last_signal: Option<(i16, i8)> = None;
+    let mut screen_name = [b'-'; 4];
+    for (slot, byte) in screen_name.iter_mut().zip(serial_tail(mcu_id)) {
+        *slot = byte;
+    }
     // What the radio is currently programmed with, so a configuration is not
     // reprogrammed on every packet -- and, more to the point, so that a change
     // is applied exactly once and can be logged when it happens.
@@ -376,6 +434,19 @@ where
                                     commit(storage, &protocol);
                                     boot::reboot();
                                 }
+                                // Force the next pass to redraw rather than
+                                // waiting for the tick.
+                                Action::Redraw => {
+                                    last_render = Instant::now() - RENDER_INTERVAL;
+                                }
+                                // The pixels the host wants are the ones on
+                                // the panel, and those are here rather than in
+                                // the protocol.
+                                Action::ReportDisplay => {
+                                    let mut image = [0u8; rnode_display::DISP_LEN];
+                                    rnode_display::read_display(&live, &mut image);
+                                    outbox.frame(command::cmd::DISP_READ, &image);
+                                }
                                 action => {
                                     act(
                                         dev,
@@ -418,6 +489,7 @@ where
                     match modem.receive(&mut rx_buf, Duration::from_millis(20)).await {
                         Ok(Some(report)) => {
                             led.off();
+                            last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
                             protocol.received(
                                 report.rssi_dbm,
                                 // Quarter-dB throughout: the chip reports it
@@ -448,6 +520,46 @@ where
                     } else {
                         led.off();
                     }
+                }
+            }
+        }
+
+        // Draw, and send at most two pages of it. A full repaint is 218 ms on
+        // this bus and the radio cannot be left that long, so the panel is
+        // filled in over several passes -- under half a second for a whole
+        // screen, and never away for more than 28 ms at a time.
+        if let Some(panel) = panel.as_deref_mut() {
+            if last_render.elapsed() >= RENDER_INTERVAL {
+                last_render = Instant::now();
+                if protocol.external().enabled() {
+                    protocol.external().draw(&mut scratch);
+                } else {
+                    let (rx, tx_count) = protocol.counters();
+                    let config = protocol.config();
+                    status::render(
+                        &status::Status {
+                            name: screen_name,
+                            frequency_hz: config.frequency_hz,
+                            bandwidth_hz: config.bandwidth_hz,
+                            spreading_factor: config.spreading_factor,
+                            coding_rate: config.coding_rate,
+                            tx_power_dbm: config.tx_power_dbm,
+                            radio_on: protocol.radio_is_on(),
+                            tnc: protocol.is_tnc(),
+                            provisioned: protocol.rom().is_provisioned(),
+                            rx_count: rx,
+                            tx_count,
+                            last_rssi_dbm: last_signal.map(|(rssi, _)| rssi),
+                            last_snr_quarter_db: last_signal.map(|(_, snr)| snr),
+                        },
+                        &mut scratch,
+                    );
+                }
+                live.copy_from(&scratch);
+            }
+            if !live.is_clean() {
+                if let Err(e) = panel.flush_pages(&mut live, 2).await {
+                    defmt::error!("panel: {}", e);
                 }
             }
         }
@@ -491,11 +603,11 @@ async fn act<S, B>(
     match action {
         Action::None => {}
 
-        // Handled where the command was decoded, because neither is anything
-        // to do with the radio. Reported rather than ignored: reaching here
-        // would mean a caller had forgotten one.
-        Action::Persist | Action::Reset => {
-            defmt::error!("a storage action reached the radio path");
+        // Handled where the command was decoded, because none of these is
+        // anything to do with the radio. Reported rather than ignored:
+        // reaching here would mean a caller had forgotten one.
+        Action::Persist | Action::Reset | Action::Redraw | Action::ReportDisplay => {
+            defmt::error!("a storage or display action reached the radio path");
         }
 
         Action::Reconfigure => {
@@ -598,6 +710,7 @@ async fn serve_without_a_radio<'d, D>(
     storage: &mut Storage<'_>,
     device: DeviceStore,
     mcu_id: u64,
+    panel: Option<&mut Panel<'_>>,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -607,6 +720,19 @@ where
     let mut outbox = Outbox::<OUTBOX>::new();
     let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut dirty_since: Option<Instant> = None;
+
+    // Say so on the panel, which is the only place somebody holding the board
+    // can be told.
+    if let Some(panel) = panel {
+        let mut frame = sh1107::Frame::new();
+        let mut page = status::Status::new();
+        page.name = *b"DEAD";
+        page.provisioned = protocol.rom().is_provisioned();
+        status::render(&page, &mut frame);
+        oxinode_core::font::draw(&mut frame, 4, 118, "NO RADIO", true);
+        let _ = panel.flush(&mut frame).await;
+    }
+
     loop {
         if usb_log::is_bootloader_touch_tx(tx, control) {
             commit(storage, &protocol);
@@ -632,6 +758,18 @@ where
                             commit(storage, &protocol);
                             boot::reboot();
                         }
+                        // The display works whether or not the radio does, and
+                        // a host reading the screen should get the screen.
+                        Action::Redraw => {}
+                        Action::ReportDisplay => {
+                            let mut image = [0u8; rnode_display::DISP_LEN];
+                            let mut frame = sh1107::Frame::new();
+                            let mut page = status::Status::new();
+                            page.name = *b"DEAD";
+                            status::render(&page, &mut frame);
+                            rnode_display::read_display(&frame, &mut image);
+                            outbox.frame(command::cmd::DISP_READ, &image);
+                        }
                         // Anything that needed the radio: say why it cannot
                         // happen, rather than leaving the host to time out.
                         _ => protocol.report_error(error::INITRADIO, &mut outbox),
@@ -649,6 +787,25 @@ where
         Timer::after(Duration::from_millis(100)).await;
         outbox.flush(tx).await;
     }
+}
+
+/// How often the status page is redrawn.
+///
+/// Half a second: fast enough that a packet counter looks live, slow enough
+/// that the rendering and the diff are lost in the noise next to the radio.
+const RENDER_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Contrast the panel starts at: the SH1107's own power-on value, so a host
+/// that never sends `CMD_DISP_INT` gets what the part was designed for.
+const fn status_intensity() -> u8 {
+    0x80
+}
+
+/// The last four hex digits of the device ID, which is what the host names the
+/// port with and therefore what a person can match the board against.
+fn serial_tail(mcu_id: u64) -> [u8; 4] {
+    let hex = oxinode_core::serial::hex_u64(mcu_id);
+    [hex[12], hex[13], hex[14], hex[15]]
 }
 
 /// Write the device record out, and say so if it will not go.
@@ -744,3 +901,5 @@ impl<const N: usize> Sink for Outbox<N> {
 // escapable bytes -- which encrypted traffic eventually produces -- could never
 // be delivered at all.
 const _: () = assert!(OUTBOX >= 2 * kiss::HW_MTU + 3);
+// And a worst-case display read, which is larger.
+const _: () = assert!(OUTBOX >= 2 * rnode_display::DISP_LEN + 3);

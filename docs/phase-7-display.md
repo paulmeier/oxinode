@@ -194,6 +194,68 @@ partial update     27313 us   (one line of text: two pages)
 Eight times faster, and the difference between a display that can be refreshed
 while the radio is working and one that cannot.
 
+## Step 4 — the RNode display protocol
+
+A Reticulum host decides this device has a display purely from its platform
+byte — `RNodeInterface` sets `self.display = True` for any nRF52 — and then
+offers three things: an **external framebuffer** an application can push
+pictures into, a way to read that back, and a way to read what is on the screen.
+
+### Two buffers, two shapes, and neither is this panel
+
+| | size | layout |
+|---|---|---|
+| external framebuffer | 64 × 64, 512 bytes | **row-major**, 8 bytes a row |
+| display readback | 128 × 64, 1024 bytes | **page-major**, a byte is 8 rows |
+| this panel | 128 × 128, 2048 bytes | page-major |
+
+Those are not guesses. The host writes the framebuffer a line at a time as
+`[line, 8 bytes]` and reads it back by accumulating until it has 512; it reads
+the display by accumulating until it has 1024. Both counts are hard-coded on
+the host, so a device that sends a different number of bytes sends a frame that
+never completes.
+
+So the panel has to be presented as something it is not, twice over, and each
+direction gets the answer that loses least:
+
+* **the framebuffer is drawn at double size.** 64 × 64 doubled is exactly
+  128 × 128, so a picture fills the panel with no cropping and no
+  interpolation — every source pixel becomes a 2 × 2 block. Showing it at 1:1
+  in a quarter of the screen would waste three quarters of a display somebody
+  is looking at.
+* **the readback is halved vertically, by OR.** Sending only the top half would
+  be true about half the screen and silent about the rest; folding pairs of
+  rows keeps *everything that is lit* visible. It is lossy and it is
+  documented; the alternative was lossy and would have looked complete. A test
+  asserts that a pixel anywhere on the panel survives the fold, which is what
+  makes it a rendition rather than a sample — under sampling, a one-pixel line
+  would vanish half the time.
+
+### What is answered, and what is not
+
+`CMD_FB_EXT`, `CMD_FB_WRITE`, `CMD_FB_READ`, `CMD_DISP_READ` and
+`CMD_DISP_INT` are implemented. `CMD_DISP_BLNK`, `CMD_DISP_ROT`,
+`CMD_DISP_RCND` and `CMD_BLINK` are real features that are not built yet.
+
+`CMD_DISP_ADR` is reported as **not applicable**, which is a different thing:
+the panel's address is *discovered* by scanning the bus at boot, so a host
+setting it would be replacing a measurement with a guess.
+
+### Two things the integration had to get right
+
+**Writing a picture must not repaint per row.** The host sends sixty-four rows
+in a burst; a full flush after each would be fourteen seconds of bus traffic to
+show one image. Rows are stored and the panel is repainted on its own half-second
+tick, where the frame diff makes the cost proportional to what changed.
+
+**The panel must never block the radio.** A full repaint is 218 ms and the
+modem loop cannot be away that long, so `Panel::flush_pages` sends at most two
+pages a pass — 28 ms — and a whole screen fills in over about half a second.
+
+The outbox grew from 2048 bytes to 4096, because the largest frame is no longer
+a packet: a display read is 1024 bytes of screen, which escapes to 2051 in the
+worst case, and a picture is exactly the kind of data that is full of `0xC0`.
+
 ## Flashing this phase cost more resets than the last three phases together
 
 Worth writing down, because none of it was about the display.

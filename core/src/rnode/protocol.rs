@@ -40,6 +40,7 @@
 use super::command::RSSI_OFFSET;
 use super::command::{cmd, hash_kind, Command, RadioState};
 use super::command::{DETECT_RESP, FW_VERSION_MAJOR, FW_VERSION_MINOR, MCU_NRF52, PLATFORM_NRF52};
+use super::display::External;
 use super::eeprom::{self, Eeprom, BOARD_HMBRW};
 use super::store::DeviceStore;
 use crate::lr1121::config::{ConfigError, RadioConfig, ValidConfig, DEFAULT};
@@ -79,6 +80,11 @@ pub enum Action<'a> {
     Persist,
     /// The host asked the device to restart.
     Reset,
+    /// What the panel should show has changed. Redraw it.
+    Redraw,
+    /// Answer `CMD_DISP_READ`, which needs the pixels the panel is actually
+    /// showing — and those live with the display driver, not here.
+    ReportDisplay,
 }
 
 /// The protocol state.
@@ -97,6 +103,11 @@ pub struct Protocol {
     /// The MCU's factory device ID, which the device hash is bound to. Zero on
     /// a `Protocol::new`, because a pure state machine has no chip to ask.
     mcu_id: u64,
+    /// The picture the host can push, and whether it is being shown.
+    external: External,
+    /// Display contrast, as `CMD_DISP_INT` sets it. The SH1107's power-on
+    /// value, so a host that never sets it gets the panel's own default.
+    display_intensity: u8,
 }
 
 impl Default for Protocol {
@@ -126,6 +137,8 @@ impl Protocol {
             last_error: None,
             store: DeviceStore::new(),
             mcu_id: 0,
+            external: External::new(),
+            display_intensity: 0x80,
         }
     }
 
@@ -146,6 +159,16 @@ impl Protocol {
     /// The EEPROM image, as the host reads it.
     pub const fn rom(&self) -> &Eeprom {
         &self.store.rom
+    }
+
+    /// The picture the host has pushed, and whether it is the one to show.
+    pub const fn external(&self) -> &External {
+        &self.external
+    }
+
+    /// Contrast, as `CMD_DISP_INT` last set it.
+    pub const fn display_intensity(&self) -> u8 {
+        self.display_intensity
     }
 
     /// Adopt the stored configuration, if there is one: TNC mode.
@@ -311,6 +334,27 @@ impl Protocol {
             // serving its bootstrap console from flash that is about to be
             // overwritten; there is no such thing here.
             Command::FirmwareUpdateImminent => Action::None,
+
+            Command::ShowExternalFramebuffer(on) => {
+                self.external.set_enabled(on);
+                Action::Redraw
+            }
+            // No reply, and no redraw per line. The host writes sixty-four of
+            // these in a burst, and repainting the panel after each would cost
+            // fourteen seconds of bus time to show one picture.
+            Command::WriteFramebuffer { line, data } => {
+                self.external.write_line(line, data);
+                Action::None
+            }
+            Command::ReadFramebuffer => {
+                out.frame(cmd::FB_READ, self.external.as_bytes());
+                Action::None
+            }
+            Command::ReadDisplay => Action::ReportDisplay,
+            Command::SetDisplayIntensity(level) => {
+                self.display_intensity = level;
+                Action::Redraw
+            }
 
             Command::SetFrequency(hz) => {
                 self.set(|c| c.frequency_hz = hz);
@@ -1517,5 +1561,129 @@ mod tests {
         }
         assert!(p.radio_is_on());
         assert_eq!(p.config(), &before);
+    }
+
+    // ---- phase 7: the display --------------------------------------------
+
+    /// The whole `display_image` sequence the host writes: enable, then
+    /// sixty-four rows. It must not repaint per row -- the host sends them in
+    /// a burst, and a full panel flush each time would be fourteen seconds of
+    /// bus traffic to show one picture.
+    #[test]
+    fn pushing_a_picture_does_not_repaint_per_row() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+
+        assert_eq!(
+            p.handle(Command::ShowExternalFramebuffer(true), &mut sink),
+            Action::Redraw,
+            "switching the source is worth a repaint"
+        );
+        assert!(p.external().enabled());
+
+        for line in 0..64u8 {
+            let row = [line; 8];
+            assert_eq!(
+                p.handle(Command::WriteFramebuffer { line, data: &row }, &mut sink),
+                Action::None,
+                "row {line} asked for a repaint"
+            );
+        }
+        assert!(sink.0.is_empty(), "rows are not acknowledged");
+
+        // And the picture is all there.
+        let mut read = Frames::default();
+        p.handle(Command::ReadFramebuffer, &mut read);
+        let bytes = read.payload(cmd::FB_READ).expect("a framebuffer");
+        assert_eq!(bytes.len(), 512);
+        for line in 0..64usize {
+            assert_eq!(&bytes[line * 8..line * 8 + 8], &[line as u8; 8]);
+        }
+    }
+
+    /// `CMD_DISP_READ` is handed back to the caller, because the pixels it
+    /// wants are the ones on the panel and those live with the display driver.
+    /// Answering it from here would mean answering with the protocol's idea of
+    /// the screen rather than the screen.
+    #[test]
+    fn reading_the_display_is_handed_to_the_caller() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        assert_eq!(
+            p.handle(Command::ReadDisplay, &mut sink),
+            Action::ReportDisplay
+        );
+        assert!(sink.0.is_empty());
+    }
+
+    /// A 512-byte framebuffer read has to survive the framing, and it will
+    /// contain `0xC0` on any real picture.
+    #[test]
+    fn a_framebuffer_read_survives_the_wire() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        for line in 0..64u8 {
+            // Every byte value appears across the picture, framing bytes and
+            // all.
+            let row = [
+                line.wrapping_mul(4),
+                kiss::FEND,
+                kiss::FESC,
+                line,
+                0x00,
+                0xFF,
+                line ^ 0x5A,
+                line.wrapping_add(1),
+            ];
+            p.handle(Command::WriteFramebuffer { line, data: &row }, &mut sink);
+        }
+
+        let mut wire = Wire::default();
+        p.handle(Command::ReadFramebuffer, &mut wire);
+
+        // A 1024-byte decoder, not the HW_MTU one `read_back` uses: this frame
+        // is 512 bytes of payload, which is larger than any *packet* and so
+        // larger than the buffer the firmware decodes inbound frames with.
+        // The host's own reader allows 1024, which is the number that matters.
+        let mut d = kiss::Decoder::<1024>::new();
+        let mut frames: Vec<(u8, Vec<u8>)> = Vec::new();
+        for &b in &wire.0 {
+            if d.feed(b) == kiss::Step::Frame {
+                frames.push((d.command(), d.payload().to_vec()));
+            }
+        }
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, cmd::FB_READ);
+        assert_eq!(frames[0].1.len(), 512, "the host counts to exactly 512");
+        assert_eq!(&frames[0].1, p.external().as_bytes());
+    }
+
+    /// Contrast is stored and asks for a repaint. It is the one display
+    /// setting a host can change on this board.
+    #[test]
+    fn the_display_intensity_is_settable() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        assert_eq!(p.display_intensity(), 0x80, "the panel's own default");
+        assert_eq!(
+            p.handle(Command::SetDisplayIntensity(0x20), &mut sink),
+            Action::Redraw
+        );
+        assert_eq!(p.display_intensity(), 0x20);
+        assert!(sink.0.is_empty());
+    }
+
+    /// Turning the external framebuffer off puts the device's own page back.
+    #[test]
+    fn the_external_framebuffer_can_be_switched_off_again() {
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::ShowExternalFramebuffer(true), &mut sink);
+        assert!(p.external().enabled());
+        assert_eq!(
+            p.handle(Command::ShowExternalFramebuffer(false), &mut sink),
+            Action::Redraw
+        );
+        assert!(!p.external().enabled());
     }
 }
