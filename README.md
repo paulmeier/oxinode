@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode with a screen
+## Status: a provisioned RNode with a screen, and Bluetooth half up
 
 Being precise about that:
 
@@ -23,7 +23,7 @@ Being precise about that:
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
-| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | interop constants pinned; stack not started |
+| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **in progress** — the stack runs and advertises, but not reliably, [notes](docs/phase-8-bluetooth.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -47,7 +47,14 @@ Phase 7 gave it a screen: a 128 × 128 OLED showing what the modem is doing, and
 the RNode display protocol so a host can push pictures to it. See
 [docs/phase-7-display.md](docs/phase-7-display.md).
 
-Phases 1 to 7 are confirmed on hardware.
+Phase 8 has a Bluetooth stack that builds, links, and has been seen to
+advertise as `RNode 7F23` — and that does not start reliably. `mpsl_init`
+sometimes never returns, on the same image and the same board that worked a
+moment earlier. What has been ruled out, and how, is in
+[docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md); it is a longer list
+than the bug deserves and most of it is reusable.
+
+Phases 1 to 7 are confirmed on hardware. Phase 8 is not.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -386,10 +393,28 @@ on this board, the useful thing is to keep the number of unproven layers small,
 and BLE cannot be proven against a real client until there is a real RNode
 behind it.
 
-What *is* done now is the part that is easy to get quietly wrong — the service
-and characteristic UUIDs, the `RNode ` name prefix the host scans for, and the
-MTU arithmetic. Those are in `core/src/ble.rs` with tests, so phase 8 is stack
-integration rather than protocol archaeology.
+The interoperability constants — the service and characteristic UUIDs, the
+`RNode ` name prefix the host scans for, the static random address, and the MTU
+arithmetic — are in `core/src/ble.rs` with tests. The stack itself is in
+`src/ble.rs` and `src/bin/ble.rs`, and is where phase 8 currently stands: see
+[docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md).
+
+The Bluetooth build is a **separate feature set**, not an extra feature,
+because it swaps the `critical-section` implementation for the whole image:
+
+```bash
+cargo build --release --no-default-features --features ble --bin ble
+```
+
+`cortex-m`'s single-core implementation masks every interrupt, which is right
+for phases 1 to 7 and wrong the moment MPSL is running — the link layer keeps
+its timing on `RADIO`, `RTC0` and `TIMER0`. `src/lib.rs` refuses a build that
+enables both, and `tools/test.sh` lints and builds each separately.
+
+One licensing note: `nrf-sdc-sys` vendors Nordic's SoftDevice Controller as a
+binary archive under `LicenseRef-Nordic-5-Clause`, which permits use on Nordic
+silicon. It is the one part of oxinode that is neither MIT nor Apache-2.0 and
+neither is nor could be built from source.
 
 ## Flashing
 
@@ -520,6 +545,8 @@ core/src/rnode/store.rs       phase 6: the record that survives a power cycle, a
 core/src/hash/        phase 6: MD5 (because the EEPROM checksum is one) and SHA-256
 core/src/sh1107.rs    phase 7: the OLED controller's commands and framebuffer
 core/src/font.rs      phase 7: a 5x7 font, drawn as art and generated into a table
+src/ble.rs            phase 8: MPSL, the SoftDevice Controller, and what they take away
+src/bin/ble.rs        phase 8: the bring-up image, built to be debugged without a probe
 core/src/status.rs    phase 7: the status page, rendered from a value
 core/src/rnode/display.rs     phase 7: the host's framebuffer and display readback
 src/display.rs        phase 7: the I2C bus, the 12 V rail, and the panel transport
