@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode that Reticulum and `rnodeconf` both accept
+## Status: a provisioned RNode with a screen
 
 Being precise about that:
 
@@ -22,7 +22,7 @@ Being precise about that:
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | **done** — verified on hardware, [notes](docs/phase-4-config.md) |
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
-| 7 | SH1107 OLED status display | **in progress** — bus, driver and status page on hardware, [notes](docs/phase-7-display.md) |
+| 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | interop constants pinned; stack not started |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
@@ -43,7 +43,11 @@ Phase 6 gave the board an identity that survives a reflash: `rnodeconf` writes
 an EEPROM, signs the device, and stores a configuration it comes up on by
 itself. See [docs/phase-6-provisioning.md](docs/phase-6-provisioning.md).
 
-Phases 1 to 6 are confirmed on hardware.
+Phase 7 gave it a screen: a 128 × 128 OLED showing what the modem is doing, and
+the RNode display protocol so a host can push pictures to it. See
+[docs/phase-7-display.md](docs/phase-7-display.md).
+
+Phases 1 to 7 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -126,6 +130,14 @@ What that actually establishes:
   host's request would be, and commanded at 915,067,069 Hz, which is phase 4's
   reference correction applied to a frequency that came out of flash.
 
+* **it has a screen, and the host can draw on it.** The Super IO's 128 × 128
+  SH1107 shows frequency, bandwidth, spreading factor, power, radio state,
+  provisioning and packet counters, updated twice a second and never blocking
+  the radio for more than 28 ms. A 64 × 64 picture pushed over `CMD_FB_WRITE`
+  reads back byte-identical, and `CMD_DISP_READ` returns a screen in which all
+  8192 pixels agree with that picture doubled across and folded back — which
+  checks the whole display path without anybody looking at it.
+
 * **the 73 ppm is corrected, by the amount it should be.** Turning the
   correction on moves the receive window's edge against the peer board from
   +328 kHz to +254 kHz — a shift of −74 ± 14 kHz against −66.5 kHz predicted —
@@ -159,7 +171,7 @@ all). What is left is the module's own reference, which also drifts ≈0.65 ppm/
 bounds what a static correction can do: 20 °C of temperature swing is 13 ppm, a
 fifth of what is being corrected.
 
-There is no display code: not stubbed, not half-written, absent.
+There is no Bluetooth code: not stubbed, not half-written, absent.
 
 ## Hardware
 

@@ -256,6 +256,44 @@ The outbox grew from 2048 bytes to 4096, because the largest frame is no longer
 a packet: a display read is 1024 bytes of screen, which escapes to 2051 in the
 worst case, and a picture is exactly the kind of data that is full of `0xC0`.
 
+### What the hardware says, without anybody looking at it
+
+The two transformations compose into something predictable. A source pixel
+`(x, y)` is drawn at `(2x…2x+1, 2y…2y+1)`, and the readback folds panel rows in
+pairs — so readback pixel `(X, Y)` is source pixel `(X/2, Y)`, exactly. That
+makes the whole path checkable byte for byte from the host, with no eyes
+involved:
+
+```
+FB_READ  : 512 bytes  MATCH
+DISP_READ: 1024 bytes
+screen   : 4326 pixels lit, 0 disagree with the pushed picture
+```
+
+A 64 × 64 picture — a border, a triangle, and a notch cut out of one corner so
+a mirrored or rotated result could not pass — was pushed a row at a time, read
+back identical, and then found on the screen transformed exactly as predicted.
+All 8192 readback pixels agree. That one run covers `CMD_FB_EXT`, all
+sixty-four `CMD_FB_WRITE` rows, `CMD_FB_READ`, `CMD_DISP_READ`, both buffer
+layouts, the doubling, the fold, and the escaping in both directions.
+
+Confirmed by eye as well: the triangle appears the right way up and filling the
+panel, and switching the external framebuffer off brings the status page back.
+
+### And Reticulum still comes up
+
+With the panel in the loop:
+
+```
+RNodeInterface[oxinode RNode] is configured and powered up
+  online   : True
+  bitrate  : 3125.0
+  r_sf/cr/bw: 8 5 125000
+```
+
+and `rnodeconf -i` still reports `Device signature validated`. The display costs
+the modem nothing it can measure, which is what `flush_pages` was for.
+
 ## Flashing this phase cost more resets than the last three phases together
 
 Worth writing down, because none of it was about the display.
