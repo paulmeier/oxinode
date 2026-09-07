@@ -5,6 +5,19 @@
 
 #![no_std]
 
+// Exactly one `critical-section` implementation may be linked, and picking the
+// wrong one for the build is not a link error -- it is a Bluetooth stack that
+// loses connections for no visible reason. See `[features]` in Cargo.toml.
+#[cfg(all(feature = "ble", feature = "cs-single-core"))]
+compile_error!(
+    "a `ble` build must not use the single-core critical section: build with \
+     --no-default-features --features ble"
+);
+#[cfg(not(any(feature = "ble", feature = "cs-single-core")))]
+compile_error!("no critical-section implementation selected: enable `ble` or `cs-single-core`");
+
+#[cfg(feature = "ble")]
+pub mod ble;
 pub mod board;
 pub mod boot;
 pub mod bringup;

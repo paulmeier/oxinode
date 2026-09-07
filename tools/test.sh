@@ -39,7 +39,13 @@ else
 fi
 
 step "lint (firmware, thumbv7em-none-eabihf)"
-try cargo clippy --lib --bins --all-features -- -D warnings
+try cargo clippy --lib --bins -- -D warnings
+
+# The BLE build is a separate feature set, not an extra feature: it swaps the
+# critical-section implementation, so `--all-features` would enable both and
+# fail the guard in src/lib.rs. Hence a second invocation rather than one.
+step "lint (firmware, ble)"
+try cargo clippy --no-default-features --features ble --lib --bins -- -D warnings
 
 step "lint (core, $host)"
 try cargo clippy -p oxinode-core --target "$host" --all-targets -- -D warnings
@@ -67,6 +73,24 @@ for bin in blink usb-cdc radio rnode display; do
         -b "$(tools/layout.py memory.x --field FLASH.origin)" 2>/dev/null
     try tools/check_layout.py "$elf" --uf2 "$elf.uf2"
 done
+
+# Last, and `--bin ble` only, so the images checked above are not quietly
+# replaced by BLE-flavoured rebuilds of themselves. `--bin ble` emits one
+# binary and leaves the rest of target/ alone.
+step "build firmware (ble)"
+try cargo build --release --no-default-features --features ble --bin ble
+
+step "ble image layout vs memory.x"
+elf="target/thumbv7em-none-eabihf/release/ble"
+if [[ -f "$elf" ]]; then
+    rust-objcopy -O binary "$elf" "$elf.bin"
+    tools/uf2conv.py "$elf.bin" -o "$elf.uf2" \
+        -b "$(tools/layout.py memory.x --field FLASH.origin)" 2>/dev/null
+    try tools/check_layout.py "$elf" --uf2 "$elf.uf2"
+else
+    echo "missing $elf"
+    fail=1
+fi
 
 if (( fail )); then
     printf '\n\033[31msome checks failed\033[0m\n'

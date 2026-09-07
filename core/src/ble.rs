@@ -10,10 +10,10 @@
 //! either never sees the board or connects and then gives up, so it is pinned
 //! here and tested rather than written into the BLE stack by hand.
 //!
-//! What this module does *not* contain is a BLE stack. That is phase 8, after
-//! the RNode protocol exists to be carried and the display exists to show a
-//! pairing passkey on. See the README for the controller choice and the
-//! peripheral conflicts it brings.
+//! What this module does *not* contain is a BLE stack. That lives in
+//! `src/ble.rs`, which cannot be tested without a radio; everything here is
+//! decidable on a host and is therefore decided on a host. See the README for
+//! the controller choice and the peripheral conflicts it brings.
 
 use crate::serial::hex_u16;
 
@@ -79,6 +79,58 @@ pub fn advertised_name(device_id: u64) -> [u8; NAME_LEN] {
     out[..NAME_PREFIX.len()].copy_from_slice(NAME_PREFIX.as_bytes());
     out[NAME_PREFIX.len()..].copy_from_slice(&hex_u16(tag));
     out
+}
+
+/// Build a static random device address from the chip's factory device address.
+///
+/// # Which end is which
+///
+/// A BLE address is six octets, and every API in sight disagrees about their
+/// order. This returns them in the order the controller wants: `out[5]` is the
+/// **most significant** octet, the one printed first in `AA:BB:CC:DD:EE:FF`.
+///
+/// # Why static random rather than public
+///
+/// A public address has to be bought from the IEEE. A *static random* address
+/// is free, and is what every nRF52 device ships with: the factory writes 48
+/// random bits into `FICR.DEVICEADDR`. The Bluetooth core specification asks
+/// for two things of it (Vol 6, Part B, 1.3.2.1) -- the top two bits must be
+/// `0b11`, and the remaining 46 bits must be neither all zeros nor all ones --
+/// so this forces the first and checks the second.
+///
+/// It must also not change between reboots, or a bonded phone stops
+/// recognising the board. `FICR` is read-only and set at manufacture, so it
+/// does not.
+pub fn static_random_address(device_addr: u64) -> [u8; 6] {
+    let mut out = [0u8; 6];
+    out.copy_from_slice(&device_addr.to_le_bytes()[..6]);
+    // The two most significant bits of the address identify the sub-type.
+    out[5] |= 0xC0;
+    out
+}
+
+/// Whether an address is a usable static random address.
+///
+/// Only reachable with a device address of all zeros or all ones, which would
+/// mean an unprogrammed or failed `FICR` -- but the failure it produces is a
+/// peripheral that advertises and is refused by every scanner, which is not a
+/// failure anyone would diagnose from the outside. So it is worth asking.
+pub fn is_valid_static_random(addr: &[u8; 6]) -> bool {
+    if addr[5] & 0xC0 != 0xC0 {
+        return false;
+    }
+    // The 46 bits below the sub-type must not be uniform.
+    let random_part = u64::from_le_bytes([
+        addr[0],
+        addr[1],
+        addr[2],
+        addr[3],
+        addr[4],
+        addr[5] & 0x3F,
+        0,
+        0,
+    ]);
+    random_part != 0 && random_part != (1u64 << 46) - 1
 }
 
 /// How many bytes of KISS stream fit in one notification at a given ATT MTU.
@@ -184,6 +236,56 @@ mod tests {
     fn advertised_name_is_stable() {
         // Bonding survives reboots only if the name does.
         assert_eq!(name(0x1234_5678_9ABC_DEF0), name(0x1234_5678_9ABC_DEF0));
+    }
+
+    #[test]
+    fn static_random_address_has_the_right_sub_type_bits() {
+        // The top two bits say "static random". Without them the address is a
+        // resolvable or non-resolvable private address, and a scanner treats it
+        // as a different device -- or refuses it.
+        for id in [0u64, 1, 0x1234_5678_9ABC, u64::MAX] {
+            let addr = static_random_address(id);
+            assert_eq!(addr[5] & 0xC0, 0xC0, "{addr:02x?}");
+        }
+    }
+
+    #[test]
+    fn static_random_address_keeps_the_factory_bits() {
+        // 46 bits of the factory value survive; only the top two are forced.
+        let addr = static_random_address(0x0000_3FFF_FFFF_FFFF);
+        assert_eq!(addr, [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        let addr = static_random_address(0x0000_0000_0000_00A5);
+        assert_eq!(addr, [0xA5, 0x00, 0x00, 0x00, 0x00, 0xC0]);
+    }
+
+    #[test]
+    fn static_random_address_is_stable() {
+        // A bonded phone finds the board by this. If it moved, every bond
+        // would have to be made again after a reboot.
+        assert_eq!(
+            static_random_address(0x1234_5678_9ABC_DEF0),
+            static_random_address(0x1234_5678_9ABC_DEF0)
+        );
+    }
+
+    #[test]
+    fn a_uniform_factory_address_is_rejected() {
+        // All zeros and all ones are the two values the specification excludes,
+        // and are also what an unprogrammed FICR would read as.
+        assert!(!is_valid_static_random(&static_random_address(0)));
+        assert!(!is_valid_static_random(&static_random_address(u64::MAX)));
+        assert!(is_valid_static_random(&static_random_address(1)));
+        assert!(is_valid_static_random(&static_random_address(
+            0xDEAD_BEEF_CAFE
+        )));
+    }
+
+    #[test]
+    fn an_address_without_the_sub_type_bits_is_rejected() {
+        assert!(!is_valid_static_random(&[1, 2, 3, 4, 5, 0x00]));
+        assert!(!is_valid_static_random(&[1, 2, 3, 4, 5, 0x40]));
+        assert!(!is_valid_static_random(&[1, 2, 3, 4, 5, 0x80]));
+        assert!(is_valid_static_random(&[1, 2, 3, 4, 5, 0xC0]));
     }
 
     #[test]

@@ -11,14 +11,38 @@ publish = false
 [workspace]
 members = ["core"]
 
+[features]
+# Exactly one critical-section implementation may be linked, and the two builds
+# need different ones -- so the choice is a feature rather than a dependency.
+#
+# `cortex-m`'s single-core implementation masks *every* interrupt. That is
+# correct for phases 1-7 and wrong the moment MPSL is running: the Bluetooth
+# controller's timing is kept by RADIO, RTC0 and TIMER0, and a critical section
+# that stops those loses connections. `nrf-mpsl` ships an implementation that
+# masks everything *except* those three.
+#
+# The MPSL one would work in both builds -- with MPSL absent those interrupts
+# are never enabled -- but it costs an NVIC mask save and restore on every
+# critical section, and `embassy-time` takes one per timer operation. So the
+# non-BLE images keep the cheap one.
+default = ["cs-single-core"]
+cs-single-core = ["cortex-m/critical-section-single-core"]
+
+# Phase 8. Build with:
+#     cargo build --release --no-default-features --features ble
+ble = [
+    "dep:nrf-mpsl",
+    "dep:nrf-sdc",
+    "dep:trouble-host",
+    "nrf-mpsl/critical-section-impl",
+]
+
 [dependencies]
 oxinode-core = { path = "core" }
 critical-section = "1.2"
-cortex-m = { version = "0.7.7", features = [
-    "inline-asm",
-    # Single-core Cortex-M: interrupt-masking is a sufficient critical section.
-    "critical-section-single-core",
-] }
+# The critical-section implementation is NOT selected here. It comes from a
+# feature, because a BLE build has to use a different one -- see [features].
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7.6"
 
 embassy-executor = { version = "0.10", features = [
@@ -55,6 +79,34 @@ embedded-hal-bus = { version = "0.3", default-features = false, features = ["asy
 # The internal-flash driver speaks embedded-storage; phase 6 stores the device
 # record in the 40 KB the bootloader reserves above the application.
 embedded-storage = "0.3"
+
+# Phase 8: Bluetooth LE. `nrf-mpsl` and `nrf-sdc` wrap Nordic's own
+# SoftDevice Controller -- a binary blob under LicenseRef-Nordic-5-Clause,
+# vendored in `nrf-sdc-sys` and licensed for use on Nordic silicon, which is
+# what this is. `trouble-host` is the host stack above it. These are optional
+# because they change the critical-section implementation for the whole image;
+# see [features].
+#
+# The versions are not a free choice: nrf-mpsl 0.4 and nrf-sdc 0.4 both pin
+# embassy-nrf 0.11 and embassy-sync 0.8, and trouble-host 0.8 pins embassy-time
+# 0.5.1 -- exactly what phases 1 to 7 already use. Moving any of them moves all
+# of them.
+nrf-mpsl = { version = "0.4", optional = true, features = ["defmt", "nrf52840"] }
+nrf-sdc = { version = "0.4", optional = true, default-features = false, features = [
+    "defmt",
+    "nrf52840",
+    # Peripheral only. This board is advertised to and connected to; it never
+    # scans or initiates, and the central role is a third of a megabyte of
+    # controller library we would never call.
+    "peripheral",
+] }
+trouble-host = { version = "0.8", optional = true, default-features = false, features = [
+    "defmt",
+    "peripheral",
+    "gatt",
+    "derive",
+    "default-packet-pool",
+] }
 static_cell = "2.1"
 
 [build-dependencies]
@@ -89,6 +141,15 @@ path = "src/bin/rnode.rs"
 [[bin]]
 name = "display"
 path = "src/bin/display.rs"
+
+# Phase 8 bring-up image for the Bluetooth stack. Needs the `ble` feature, and
+# therefore a different critical section, so it cannot be built in the same
+# invocation as the others:
+#     cargo build --release --no-default-features --features ble --bin ble
+[[bin]]
+name = "ble"
+path = "src/bin/ble.rs"
+required-features = ["ble"]
 
 # Debug builds of this still have to fit in 784K of flash and run at 64 MHz,
 # so keep some optimisation on even in dev.
