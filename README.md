@@ -25,7 +25,7 @@ Being precise about that:
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
 | 9 | An on-device interface, and a simulator to build it with | **done** — the shell is pure code and every screen has a golden image, [notes](docs/phase-9-simulator.md) |
-| 10 | The navigation pad driver | **in progress** — `UICR.NFCPINS` read and clear, the switches not yet exercised on the board, [notes](docs/phase-10-pad.md) |
+| 10 | The navigation pad driver | **done** — all six switches, repeat and debounce verified on the board; mode switch polarity still to confirm, [notes](docs/phase-10-pad.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.

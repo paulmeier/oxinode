@@ -1,18 +1,17 @@
 # Phase 10 — the navigation pad driver
 
-Where phase 10 stands: **built, flashed, the UICR question answered; the
-switches not yet exercised.** The driver compiles into the product image,
-every timing decision in it is tested on the host, and the product image logs
-what the hardware checklist at the end needs read. The first boot on the
-board said:
+Where phase 10 stands: **working on the board.** All six switches produce
+their gesture, a held direction repeats at the documented rate and a held OK
+does not, the channel delivered every one of 130 presses without a drop, and
+the debounce is set from what the switches measured. The first boot said:
 
 ```
 board: nav pad usable=true (UICR.NFCPINS), regulator=3.3 V
 board: mode switch P1.09=low P0.12=high -> middle (polarity unconfirmed)
 ```
 
-What remains is a finger on each switch and the mode switch in its other two
-positions.
+What remains is the mode switch in its other two positions, to confirm or
+flip the polarity.
 
 The interface models six gestures; the Super IO has exactly six switches. This
 phase connects the two, and most of it is about *time* rather than pins.
@@ -61,11 +60,11 @@ re-read that agrees as not an edge.
 
 | constant | value | why |
 |---|---|---|
-| `DEBOUNCE_MS` | 20 | a level must hold this long to be believed |
+| `DEBOUNCE_MS` | 10 | a level must hold this long to be believed; measured, see below |
 | `REPEAT_DELAY_MS` | 400 | a held direction repeats after this |
 | `REPEAT_PERIOD_MS` | 125 | and then every this: eight lines a second |
 
-**Debounce is "stable for 20 ms", not "ignore for 20 ms".** Every edge
+**Debounce is "stable for 10 ms", not "ignore for 10 ms".** Every edge
 restarts the timer, and the change commits only once the level has held. That
 makes the *number* of bounces irrelevant and only their *duration* matter, and
 it means a bounce that ends back where it began commits nothing at all. The
@@ -73,23 +72,27 @@ alternative — accept the first edge and ignore the line for a while — commit
 to whatever the first edge said, and on a switch that bounces on release that
 is a phantom press.
 
-**Twenty is a starting figure, not a measurement.** Tactile dome switches
-settle in 1–10 ms when new and get worse with wear; 20 ms covers that with
-margin while adding less latency than one iteration of the render loop. It
-is not settled yet, and the issue is right to ask for it to be. So the driver
-measures: every committed press reports how long the contact took to stop
-bouncing and how many edges it produced, and the product image logs them:
+**Ten milliseconds is a measurement, not a guess.** The driver started at
+20 ms, and measures: every committed press reports how long the contact took
+to stop bouncing and how many edges it produced, and the product image logs
+them:
 
 ```
-pad: down press, settled in 3 ms after 2 bounce(s)
+pad: down press, settled in 0 ms after 0 bounce(s)
 ```
 
-Press each switch a few dozen times, take the worst `settled in`, and the
-right debounce is that with margin. If the worst is under 5 ms — likely, for
-switches this new — 20 is generous and 10 would do; the constant is pinned by
-a test so changing it is a deliberate edit in two places. A compile-time
-assertion keeps the three numbers ordered, because a repeat period shorter
-than the debounce is a driver that repeats bounces.
+On 2026-09-07, 130 presses spread over all six switches logged exactly that
+line, every time: not one second edge inside the 20 ms window. The
+measurement has a floor — a bounce shorter than the interrupt-to-task latency,
+a few tens of microseconds, is invisible to a level-sampling driver — but
+that floor is far below anything a debounce needs to care about, and it means
+the window can be set from the part rather than from the board. Tactile domes
+are specified to bounce for at most 5 ms; 10 ms is twice that, ten times more
+than was ever seen, and half the latency of the first figure. The constant is
+pinned by a test so changing it is a deliberate edit in two places, and if a
+worn switch ever logs a `settled in` anywhere near it, it goes back up. A
+compile-time assertion keeps the three numbers ordered, because a repeat
+period shorter than the debounce is a driver that repeats bounces.
 
 **Repeat only on the four directions.** A held direction scrolls; that is the
 whole reason for repeat. A held OK is one OK, because an action chosen once is
@@ -250,15 +253,17 @@ What the issue's "done when" needs, and the log line that answers each:
       on 2026-09-07, on the first boot of the phase 10 image. The bit was
       already clear, so the feature's write was a no-op and `REGOUT0` is
       still what the bootloader set. Recorded in the README.
-- [ ] **All six switches produce their gesture.** Press each; expect
-      `pad: <name> press, settled in …` for `up`, `down`, `left`, `right`,
-      `ok`, `back`, and at debug level `ui: <gesture>` from the modem loop.
-- [ ] **A held direction repeats; a held OK does not.** Hold down for two
-      seconds: one `press` and then `pad: down repeat` at 125 ms intervals
-      after 400 ms. Hold OK for two seconds: one `press`, nothing else.
-- [ ] **Debounce settled against measurements.** Take the worst `settled in`
-      over a few dozen presses per switch, write the number and the choice
-      into the table above, and change `DEBOUNCE_MS` and its test together.
+- [x] **All six switches produce their gesture.** 2026-09-07: `up`, `down`,
+      `left`, `right`, `ok` and `back` each logged their press and the modem
+      loop logged the matching `ui:` gesture off the channel; 130 presses in
+      all, none dropped.
+- [x] **A held direction repeats; a held OK does not.** Down held for three
+      seconds: one press at 150.580 s, the first repeat at 150.980 s, then
+      every 125 ms until release. OK held for seven seconds: one press and
+      nothing else.
+- [x] **Debounce settled against measurements.** Worst `settled in` over 130
+      presses: 0 ms, 0 bounces. `DEBOUNCE_MS` lowered from 20 to 10; the
+      reasoning is in the table section above.
 - [ ] **The mode switch read.** `board: mode switch …` with the switch in
       each of its three positions; confirm or flip the polarity in
       `ModeSwitch::read`, and record the three readings.

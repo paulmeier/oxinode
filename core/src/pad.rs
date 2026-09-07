@@ -49,13 +49,12 @@
 //!
 //! # The numbers
 //!
-//! [`DEBOUNCE_MS`] is a starting figure, not a measurement. Tactile dome
-//! switches settle in 1-10 ms when new and get worse with wear, and 20 ms
-//! covers that with margin while adding less latency than one frame of the
-//! render loop. What settles it is [`Event::settle_ms`] and
-//! [`Event::bounces`]: every committed press reports how long the contact took
-//! to stop bouncing and how many edges it produced, the firmware logs them, and
-//! the constant is to be revised against what the real switches do.
+//! [`DEBOUNCE_MS`] was settled on the board, and [`Event::settle_ms`] and
+//! [`Event::bounces`] are how: every committed press reports how long the
+//! contact took to stop bouncing and how many edges it produced, and the
+//! firmware logs them. The switches turned out to be clean -- no second edge
+//! in 130 presses -- so the constant is set from the part's specification
+//! with margin rather than from a bounce that was never seen.
 
 use crate::ui::Input;
 
@@ -63,7 +62,15 @@ use crate::ui::Input;
 pub type Millis = u64;
 
 /// How long a level must hold before it is believed.
-pub const DEBOUNCE_MS: Millis = 20;
+///
+/// Measured, not guessed: 130 presses across all six switches on the board
+/// on 2026-09-07 and not one of them showed a second edge inside the window
+/// -- `settled in 0 ms after 0 bounce(s)`, every time. Tactile domes are
+/// specified to bounce for 5 ms at most, so 10 ms is twice the worst the
+/// part is allowed to be and ten times worse than anything seen, at half the
+/// latency the first figure of 20 ms cost. If a worn switch ever logs a
+/// `settled in` near this, raise it.
+pub const DEBOUNCE_MS: Millis = 10;
 
 /// How long a direction is held before it starts repeating.
 ///
@@ -489,7 +496,7 @@ mod tests {
     #[test]
     fn the_numbers_are_what_the_docs_say() {
         // Pinned so a change is a deliberate edit here and in the README.
-        assert_eq!(DEBOUNCE_MS, 20);
+        assert_eq!(DEBOUNCE_MS, 10);
         assert_eq!(REPEAT_DELAY_MS, 400);
         assert_eq!(REPEAT_PERIOD_MS, 125);
     }
