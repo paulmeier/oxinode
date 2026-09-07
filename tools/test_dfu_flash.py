@@ -51,6 +51,14 @@ exit 0
 """
 
 
+STTY_STUB = """#!/usr/bin/env bash
+# Stub stty: record what it was asked to do. The real one would fail against
+# /dev/null, which is what the tests use for a port.
+printf '%s\\n' "$*" >> "$STTY_LOG"
+exit 0
+"""
+
+
 @unittest.skipUnless(
     os.path.isfile(ELF), "no release ELF built; run `cargo build --release` first"
 )
@@ -64,10 +72,17 @@ class TestDfuFlash(unittest.TestCase):
             f.write(STUB)
         os.chmod(stub, 0o755)
 
+        stty = os.path.join(tmp, "stty")
+        with open(stty, "w", encoding="utf-8") as f:
+            f.write(STTY_STUB)
+        os.chmod(stty, 0o755)
+        self.stty_log = os.path.join(tmp, "stty.log")
+
         log = os.path.join(tmp, "calls.log")
         env = dict(os.environ)
         env["PATH"] = tmp + os.pathsep + env["PATH"]
         env["NRFUTIL_LOG"] = log
+        env["STTY_LOG"] = self.stty_log
         env["OXINODE_DFU_PORT"] = "/dev/null"
         env.update(env_extra)
         for key, value in list(env_extra.items()):
@@ -232,6 +247,21 @@ class TestDfuFlash(unittest.TestCase):
         # re-enumeration that never comes, because there is no app to reset.
         _proc, calls = self.run_script(OXINODE_DFU_IN_DFU="1")
         self.assertNotIn("--touch", calls[1])
+
+    def test_the_cached_baud_rate_is_reset_after_a_successful_flash(self):
+        """The 1200-baud touch lives in the host's terminal settings, not on
+        the board, and it is re-applied the next time anything opens that
+        device path. Leaving it there means the next `cat` of the log port is
+        a second touch, and the freshly flashed image reboots into DFU.
+
+        The stub `stty` records that it was asked to set 115200.
+        """
+        proc, _ = self.run_script(OXINODE_DFU_IN_DFU="1", OXINODE_DFU_SETTLE="0")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.exists(self.stty_log), "stty was never called")
+        with open(self.stty_log, encoding="utf-8") as f:
+            calls = f.read()
+        self.assertIn("115200", calls, calls)
 
     def test_touch_when_an_application_is_running(self):
         # The empty-array case that broke on bash 3.2 is the *other* branch, so

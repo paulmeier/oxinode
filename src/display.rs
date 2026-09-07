@@ -196,6 +196,31 @@ pub fn check_pin_selection() -> bool {
     ok
 }
 
+/// Disable and re-enable the TWIM, leaving its pin and frequency settings alone.
+///
+/// The nRF52's TWIM can be left in a state it does not come out of after a
+/// transaction that ends in a NACK, and `embassy-nrf` implements no workaround
+/// for it. The symptom is not an error — it is *inconsistency*: the same
+/// address answers a read one moment and not the next, a write succeeds and
+/// then the identical write NACKs, and a bus scan disagrees with a probe run
+/// half a millisecond earlier. All three of those happened here before this
+/// existed, and between them they had the display at 0x3d, then at 0x3c, then
+/// nowhere.
+///
+/// Cycling `ENABLE` is enough: `PSEL` and `FREQUENCY` are separate registers
+/// and survive it. A scan NACKs a hundred times by design, so it does this
+/// after every one.
+pub fn reset_peripheral() {
+    let r = pac::TWIM0;
+    r.enable()
+        .write(|w| w.set_enable(pac::twim::vals::Enable::Disabled));
+    // The peripheral needs the write to land before it is turned back on.
+    cortex_m::asm::dsb();
+    r.enable()
+        .write(|w| w.set_enable(pac::twim::vals::Enable::Enabled));
+    cortex_m::asm::dsb();
+}
+
 /// A short name for a bus error, for the log.
 ///
 /// The difference matters more than it looks: an address NACK is nobody home,
@@ -220,7 +245,12 @@ pub const fn error_name(e: &twim::Error) -> &'static str {
 }
 
 /// Ask one address one question, and say exactly what came back.
+///
+/// The peripheral is cycled first, so the answer is about the bus rather than
+/// about whatever the previous transaction left behind. See
+/// [`reset_peripheral`].
 pub async fn probe(i2c: &mut Twim<'_>, address: u8, write: bool) -> &'static str {
+    reset_peripheral();
     let mut byte = [0u8; 1];
     let outcome = if write {
         with_timeout(
@@ -281,10 +311,12 @@ pub async fn scan(i2c: &mut Twim<'_>) -> Scan {
     };
     for address in 0x08..=0x77u8 {
         let mut byte = [0u8; 1];
+        reset_peripheral();
         let reads = matches!(
             with_timeout(TRANSACTION_TIMEOUT, i2c.read(address, &mut byte)).await,
             Ok(Ok(()))
         );
+        reset_peripheral();
         let writes = matches!(
             with_timeout(
                 TRANSACTION_TIMEOUT,
@@ -437,8 +469,14 @@ impl<'d> Panel<'d> {
             .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => return Err(PanelError::Timeout),
+                Ok(Err(e)) => {
+                    reset_peripheral();
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    reset_peripheral();
+                    return Err(PanelError::Timeout);
+                }
             }
             frame.mark_sent(page);
         }

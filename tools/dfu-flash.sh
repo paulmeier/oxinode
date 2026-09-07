@@ -17,6 +17,8 @@
 #   OXINODE_DFU_IN_DFU     1/0 to assert bootloader state instead of detecting it
 #   OXINODE_DFU_BOOTLOADER 1/0 to answer the bootloader probe directly
 #   OXINODE_DFU_RETRY_DELAY seconds to wait between retries (default 2)
+#   OXINODE_DFU_SETTLE     seconds to wait after a flash before reopening the
+#                          port to reset the host's cached baud rate (default 3)
 set -euo pipefail
 
 elf="${1:?usage: dfu-flash.sh <elf>}"
@@ -132,10 +134,29 @@ run_dfu() {
     "$nrfutil" "${args[@]}"
 }
 
+# Leave the host's cached line settings at 115200 rather than at 1200.
+#
+# The 1200-baud touch lives in the *host's* terminal settings for a device
+# path, not in anything on the board, and macOS re-applies them the next time
+# something opens that path. So after a flash that used a touch, an innocent
+# `cat /dev/cu.usbmodem*` opens at 1200 and closes again -- which is a second
+# touch, and the freshly flashed image goes straight back to its bootloader.
+#
+# That cost several rounds of "why is it in DFU again". Opening the port once
+# at 115200 and closing it resets the cache, and is harmless: DTR at 115200 is
+# what every ordinary terminal does.
+clear_cached_baud() {
+    [[ -e "$1" ]] || return 0
+    stty -f "$1" 115200 2>/dev/null || true
+}
+
 size="$(wc -c < "$bin" | tr -d ' ')"
 echo "dfu-flash: $port  ($size bytes at $base)"
 
 if run_dfu "$in_dfu"; then
+    # The board is re-enumerating; give it a moment before touching the port.
+    sleep "${OXINODE_DFU_SETTLE:-3}"
+    clear_cached_baud "$port"
     exit 0
 fi
 
@@ -159,9 +180,18 @@ for attempt in 1 2 3; do
     fi
     echo "dfu-flash: the board is in its bootloader; retrying (attempt $attempt)" >&2
     if run_dfu 1; then
+        sleep "${OXINODE_DFU_SETTLE:-3}"
+        clear_cached_baud "$port"
         exit 0
     fi
 done
+
+# Also on the way out. A *failed* touch leaves the cached rate at 1200 just as
+# a successful one does, and then the next thing to open the port -- a log
+# reader, or the host probing a freshly attached device -- performs another
+# touch. That is how one lost race turns into a board that will not stay out of
+# its bootloader.
+clear_cached_baud "$port"
 
 cat >&2 <<'MSG'
 

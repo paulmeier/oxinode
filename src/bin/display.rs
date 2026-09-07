@@ -249,21 +249,26 @@ async fn main(_spawner: Spawner) {
         Timer::after(Duration::from_secs(3)).await;
         let _ = panel.all_on(false).await;
 
-        // The test pattern. It is built to answer, in one look, the question
-        // the datasheet does not answer consistently: which way round the page
-        // and column axes run. See `oxinode_core::sh1107`.
+        // The test pattern. Asymmetric in three separate ways, because the
+        // first version of the axis mapping was wrong and looked *almost*
+        // right: see `oxinode_core::sh1107`.
         let mut frame = sh1107::Frame::new();
         // A border, to show how much of the panel the mapping actually covers.
         frame.frame_rect(0, 0, sh1107::WIDTH, sh1107::HEIGHT, true);
         // The origin: a solid block at what this firmware calls (0, 0).
         frame.rect(4, 4, 16, 16, true);
-        // A wide, short bar. Horizontal if the mapping is right, vertical if
-        // the page and column axes are the other way round -- and there is no
-        // way to mistake one for the other.
-        frame.rect(0, 40, 96, 8, true);
-        // One small block off to one side, so a mirrored picture is not
-        // mistaken for a correct one.
-        frame.rect(112, 60, 8, 8, true);
+        // A wide, short bar, well above centre. Horizontal if the mapping is
+        // right, vertical if the page and column axes are the other way round,
+        // and there is no way to mistake one for the other.
+        frame.rect(4, 40, 92, 8, true);
+        // A staircase down the lower half. Each step is a different length, so
+        // a picture that is mirrored or upside down cannot be read as correct.
+        for step in 0..6usize {
+            frame.rect(8, 72 + step * 8, 8 + step * 16, 4, true);
+        }
+        // And one lone block hard against the bottom-right, opposite the
+        // origin square.
+        frame.rect(108, 108, 12, 12, true);
 
         let started = Instant::now();
         match panel.flush(&mut frame).await {
@@ -275,10 +280,9 @@ async fn main(_spawner: Spawner) {
             Err(e) => defmt::error!("panel: flush failed: {}", e),
         }
 
-        defmt::info!("step 2 done. What is on the screen decides the axis mapping:");
-        defmt::info!("  - a border all the way round all four edges?");
-        defmt::info!("  - a solid square just inside ONE corner -- which one?");
-        defmt::info!("  - a long thin bar: does it run side to side, or top to bottom?");
+        defmt::info!("step 2 done. Expected: a border on all four edges, a solid");
+        defmt::info!("  square just inside the TOP-LEFT, a horizontal bar above centre,");
+        defmt::info!("  a staircase widening DOWNWARDS, and a small block bottom-right.");
 
         idle(&mut led, &mut log_rx, &control).await
     };

@@ -5,25 +5,34 @@
 //! inches, which the vendor states and which is *not* what the RNode protocol
 //! assumes. See `docs/phase-7-display.md`.
 //!
-//! # The RAM is not laid out the way an SSD1306's is
+//! # Which way the axes run, settled on the bench
 //!
-//! The SH1107 has 16 pages of 128 columns, and one byte covers eight adjacent
-//! bits — so far, familiar. What is different is which way those axes point.
-//! Figure 10 of the datasheet maps a byte's D0–D7 onto **segment** outputs and
-//! the column address onto **common** outputs, and the start-line command
-//! (`0xDC`) takes a *column* address to choose which line appears at COM0.
+//! The SH1107 has 16 pages of 128 columns and one byte covers eight adjacent
+//! pixels. Which axis those run along, the datasheet says twice and not
+//! consistently: Figure 10 maps a byte's D0–D7 onto **segment** outputs and the
+//! column address onto **common** outputs, which would put the page axis along
+//! x; the reset section says "SEG0 is mapped to the top line of the display",
+//! which puts it along y.
 //!
-//! On a normal OLED the segments drive columns and the commons drive rows, so
-//! that puts the page axis along **x** and the column axis along **y** — the
-//! whole thing rotated ninety degrees from an SSD1306. This controller is
-//! designed for portrait panels and it shows.
+//! **The reset section is right.** A test pattern with a deliberately
+//! horizontal bar came out vertical, and a square drawn just inside the
+//! top-left corner appeared just inside the bottom-right — which between them
+//! fix the map exactly:
 //!
-//! The datasheet is not perfectly consistent about this: its reset section says
-//! "SEG0 is mapped to the top line of the display", which reads the other way
-//! round. That is exactly the kind of disagreement this project settles at the
-//! bench rather than by argument, so the mapping is one function —
-//! [`ram_position`] — and the test pattern in the `display` image is built to
-//! tell the two apart in a single glance.
+//! ```text
+//! page and bit -> y     column -> x     and both axes inverted
+//! ```
+//!
+//! So the layout is the familiar SSD1306 one after all, and the panel is
+//! mounted the other way up. The inversion is the controller's own to undo —
+//! [`cmd::SEGMENT_REMAP_REVERSE`] and [`cmd::COMMON_SCAN_REVERSE`] in the init
+//! sequence — rather than something [`ram_position`] should be doing on every
+//! pixel.
+//!
+//! Two facts are worth keeping for whoever meets this next: reading the
+//! datasheet more carefully would not have settled it, because the datasheet
+//! disagrees with itself; and the wrong answer looked *almost* right, which is
+//! why the test pattern is asymmetric in three separate ways.
 
 /// Panel width in pixels.
 pub const WIDTH: usize = 128;
@@ -128,12 +137,11 @@ pub const ADDRESS_SA0_HIGH: u8 = 0x3D;
 
 /// Whether the page axis runs along x.
 ///
-/// `true` is the reading of Figure 10 — pages along the segments, columns along
-/// the commons — and is what the bench is asked to confirm. It is a constant
-/// rather than a parameter because the panel is soldered to the board: there is
-/// one right answer for this hardware, and carrying both would mean carrying an
-/// untested one forever.
-pub const PAGE_AXIS_IS_X: bool = true;
+/// `false`, measured rather than assumed: see the module docs. It is a constant
+/// rather than a parameter because the panel is soldered to the board — there
+/// is one right answer for this hardware, and carrying both would mean carrying
+/// an untested one forever.
+pub const PAGE_AXIS_IS_X: bool = false;
 
 /// Where a screen pixel lives in display RAM: `(index, bit)`.
 ///
@@ -272,6 +280,12 @@ impl Frame {
 /// * **`0xA8 0x7f`** — 128 commons, matching the panel. This is also the
 ///   power-on value; it is stated because a shorter panel would need it
 ///   changed and a silent default would hide that.
+/// * **`0xA1` and `0xC8`** — both axes reversed, because this panel is mounted
+///   upside down relative to the controller's power-on orientation. Measured:
+///   a square drawn at the top-left came out at the bottom-right. Doing it
+///   here costs two bytes once; doing it in [`ram_position`] would cost two
+///   subtractions per pixel and would make the framebuffer disagree with the
+///   controller's own idea of where things are.
 /// * everything else is the power-on value, written out so that a controller
 ///   which was *not* freshly reset ends up in the same state as one that was.
 ///
@@ -285,10 +299,10 @@ pub fn init_sequence(contrast: u8, out: &mut [u8; INIT_LEN]) -> &[u8] {
         cmd::PAGE_ADDRESSING,
         cmd::CONTRAST,
         contrast,
-        cmd::SEGMENT_REMAP_NORMAL,
+        cmd::SEGMENT_REMAP_REVERSE,
         cmd::MULTIPLEX,
         0x7F,
-        cmd::COMMON_SCAN_NORMAL,
+        cmd::COMMON_SCAN_REVERSE,
         cmd::DISPLAY_OFFSET,
         0x00,
         cmd::START_LINE,
