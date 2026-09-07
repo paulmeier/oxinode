@@ -84,14 +84,23 @@ pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() ->
     }
 }
 
-/// Read the current line state and ask [`oxinode_core::usb::is_bootloader_touch`]
+/// Milliseconds since boot, for the touch grace window.
+pub fn uptime_ms() -> u64 {
+    embassy_time::Instant::now().as_millis()
+}
+
+/// Read the current line state and ask [`oxinode_core::usb::is_bootloader_touch_after`]
 /// what it means. The rule itself is tested on the host; this is just the part
-/// that has to touch the USB stack.
+/// that has to touch the USB stack and the clock.
 pub fn is_bootloader_touch<'d, D: Driver<'d>>(
     rx: &Receiver<'d, D>,
     control: &ControlChanged<'d>,
 ) -> bool {
-    oxinode_core::usb::is_bootloader_touch(rx.line_coding().data_rate(), control.dtr())
+    oxinode_core::usb::is_bootloader_touch_after(
+        rx.line_coding().data_rate(),
+        control.dtr(),
+        uptime_ms(),
+    )
 }
 
 /// The same question, asked from the other half of the port.
@@ -103,5 +112,9 @@ pub fn is_bootloader_touch_tx<'d, D: Driver<'d>>(
     tx: &Sender<'d, D>,
     control: &ControlChanged<'d>,
 ) -> bool {
-    oxinode_core::usb::is_bootloader_touch(tx.line_coding().data_rate(), control.dtr())
+    oxinode_core::usb::is_bootloader_touch_after(
+        tx.line_coding().data_rate(),
+        control.dtr(),
+        uptime_ms(),
+    )
 }

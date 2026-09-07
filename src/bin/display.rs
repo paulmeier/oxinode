@@ -19,13 +19,47 @@ use embassy_futures::select::select;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, twim};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::class::cdc_acm::{ControlChanged, Receiver};
+use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use oxinode::board::{self, Led};
-use oxinode::display::{self, Boost};
+use oxinode::display::{self, Boost, Panel};
 use oxinode::{boot, usb_log};
+use oxinode_core::sh1107;
 use static_cell::StaticCell;
+
+/// Blink, and watch for the 1200-baud touch.
+///
+/// This image has one serial port and it is this one, so the touch has to be
+/// checked here or reflashing means walking over to the reset button. It can
+/// arrive at any moment, so it is re-checked on every wake rather than waited
+/// for on an edge.
+async fn idle<'d, D: UsbDriverTrait<'d>>(
+    led: &mut Led<'_>,
+    rx: &mut Receiver<'d, D>,
+    control: &ControlChanged<'d>,
+) -> ! {
+    let mut buf = [0u8; 64];
+    let mut ticks = 0u32;
+    loop {
+        if usb_log::is_bootloader_touch(rx, control) {
+            boot::reboot_to_bootloader();
+        }
+        // 20 ms, for the reason in `bring_up`: the touch window is short and
+        // missing it costs a walk to the reset button.
+        if ticks % 25 == 0 {
+            led.toggle();
+        }
+        ticks = ticks.wrapping_add(1);
+        let _ = select(
+            rx.read_packet(&mut buf),
+            Timer::after(Duration::from_millis(20)),
+        )
+        .await;
+    }
+}
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
@@ -40,18 +74,21 @@ const USB_PID: u16 = 0x0004;
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     boot::relocate_vector_table();
-    let p = embassy_nrf::init(board::embassy_config());
+    let mut p = embassy_nrf::init(board::embassy_config());
 
     // The rail is claimed before the bus, and starts off, so the first scan
     // below is a real control rather than a scan of a panel that happened to
     // already be powered.
     let mut boost = Boost::new(p.P0_23);
 
-    // The nRF52's EasyDMA cannot read from flash, so the driver needs somewhere
-    // in RAM to stage a write whose source is a `const`. Command sequences are
-    // exactly that.
+    // The nRF52's EasyDMA cannot read from flash, so the driver needs
+    // somewhere in RAM to stage a write whose source is a `const`. Command
+    // sequences are exactly that.
     static TWIM_RAM: StaticCell<[u8; 256]> = StaticCell::new();
-    let mut i2c = display::new_i2c(p.TWISPI0, Irqs, p.P0_24, p.P0_25, TWIM_RAM.init([0; 256]));
+
+    // Both bus lines are looked at as plain inputs before anything drives
+    // them. See `display::line_levels`.
+    let idle_levels = display::line_levels(p.P0_24.reborrow(), p.P0_25.reborrow());
 
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
     let serial = board::take_device_serial();
@@ -97,11 +134,25 @@ async fn main(_spawner: Spawner) {
     let bring_up = async {
         // Hold everything until a terminal opens the port: the startup log is
         // the entire output of this image.
+        //
+        // Sampled every 20 ms, and the touch is checked on every one of them.
+        // A 1200-baud open/close is over in tens of milliseconds, so a loop
+        // that looked once a second could miss the window entirely -- and this
+        // image did, twice, rebooting into the bootloader seconds after the
+        // flasher had given up waiting for it. Two trips to the reset button.
+        let mut ticks = 0u32;
         while !control.dtr() {
-            led.on();
-            Timer::after(Duration::from_millis(60)).await;
-            led.off();
-            Timer::after(Duration::from_millis(940)).await;
+            if usb_log::is_bootloader_touch(&log_rx, &control) {
+                boot::reboot_to_bootloader();
+            }
+            // Slow blink: enumerated, waiting for someone to look.
+            if ticks % 50 == 0 {
+                led.on();
+            } else if ticks % 50 == 3 {
+                led.off();
+            }
+            ticks = ticks.wrapping_add(1);
+            Timer::after(Duration::from_millis(20)).await;
         }
         led.on();
 
@@ -111,65 +162,125 @@ async fn main(_spawner: Spawner) {
             boot::APP_FLASH_ORIGIN
         );
 
+        defmt::info!(
+            "i2c: at boot, SDA high {=bool}, SCL high {=bool}",
+            idle_levels.0,
+            idle_levels.1
+        );
+        if !idle_levels.0 || !idle_levels.1 {
+            defmt::warn!(
+                "i2c: a line was low with nothing driving it -- either the bus is held \
+                 or the Super IO board is not attached and the pins are floating"
+            );
+        }
+
+        // Free the bus if something is holding SDA, before the peripheral ever
+        // sees it. A stuck line makes every transaction fail identically.
+        boost.on().await;
+        Timer::after(Duration::from_millis(50)).await;
+        let after_boost = display::line_levels(p.P0_24.reborrow(), p.P0_25.reborrow());
+        defmt::info!(
+            "i2c: with the 12 V rail on, SDA high {=bool}, SCL high {=bool}",
+            after_boost.0,
+            after_boost.1
+        );
+        if !after_boost.0 {
+            let freed = display::recover_bus(p.P0_24.reborrow(), p.P0_25.reborrow()).await;
+            defmt::warn!(
+                "i2c: SDA was held low; clocked it out -- freed {=bool}",
+                freed
+            );
+        }
+
+        let mut i2c = display::new_i2c(p.TWISPI0, Irqs, p.P0_24, p.P0_25, TWIM_RAM.init([0; 256]));
+
         if display::check_pin_selection() {
             defmt::info!("i2c: TWIM0 up at 100 kHz, external pull-ups");
         } else {
             defmt::error!("i2c: peripheral did not claim the pins we asked for");
         }
 
-        // The control. The SH1107's logic runs off 3V3 and only its panel bias
-        // comes from the 12 V rail, so a display that answers here would be
-        // telling us that "it answered on the bus" is *not* evidence it can
-        // show anything -- which is worth knowing before a dark screen gets
-        // blamed on a driver.
-        defmt::info!("boost: off (P0.{=u8}); scanning", display::BOOST_EN.1);
-        let dark = display::scan(&mut i2c).await;
-
-        boost.on().await;
-        defmt::info!("boost: on; scanning again");
-        let lit = display::scan(&mut i2c).await;
-
-        if dark == lit {
+        // Before any scan: ask the two addresses an SH1107 can use, one
+        // question at a time, and report exactly what came back. A scan that
+        // reduces every failure to "did not answer" cannot tell "nobody there"
+        // apart from "the peripheral refused", and this bus has now produced
+        // both.
+        defmt::info!("boost: on (P0.{=u8})", display::BOOST_EN.1);
+        for address in display::SH1107_ADDRESSES {
+            let read = display::probe(&mut i2c, address, false).await;
+            let write = display::probe(&mut i2c, address, true).await;
+            let read_again = display::probe(&mut i2c, address, false).await;
             defmt::info!(
-                "boost: the bus answers the same either way -- {=usize} device(s). \
-                 So answering proves the controller is alive, not that the panel is lit.",
-                lit.found
-            );
-        } else {
-            defmt::warn!(
-                "boost: the bus changed with the rail -- {=usize} device(s) off, {=usize} on. \
-                 The 12 V rail feeds more than the panel bias.",
-                dark.found,
-                lit.found
+                "probe {=u8:#04x}: read {=str}, write {=str}, read again {=str}",
+                address,
+                read,
+                write,
+                read_again
             );
         }
 
-        match lit.display {
-            Some(addr) => defmt::info!(
-                "step 1 done: display controller at {=u8:#04x}. Nothing has been drawn.",
-                addr
+        defmt::info!("scanning the whole bus");
+        let lit = display::scan(&mut i2c).await;
+        let dark = lit;
+
+        let _ = dark;
+        let Some(addr) = lit.display else {
+            defmt::error!("step 1 failed: no SH1107 answered. Check the Super IO board is seated.");
+            idle(&mut led, &mut log_rx, &control).await
+        };
+        defmt::info!("step 1 done: display controller at {=u8:#04x}", addr);
+
+        // ---- step 2: say something to it -------------------------------
+        let mut panel = Panel::new(i2c, addr);
+        if let Err(e) = panel.init(0x80).await {
+            defmt::error!("panel: init failed: {}", e);
+            idle(&mut led, &mut log_rx, &control).await
+        }
+        defmt::info!("panel: initialised, 128x128, external VPP, display on");
+
+        // Every pixel, straight from the controller's own test mode. This
+        // needs no RAM to be right -- only power, an address and glass -- so
+        // a screen that stays dark here is a supply or a panel, and one that
+        // lights here and shows nothing later is this firmware's fault.
+        if let Err(e) = panel.all_on(true).await {
+            defmt::error!("panel: entire-display-on failed: {}", e);
+        }
+        defmt::info!("panel: ENTIRE DISPLAY ON for 3 s -- the whole screen should be lit");
+        Timer::after(Duration::from_secs(3)).await;
+        let _ = panel.all_on(false).await;
+
+        // The test pattern. It is built to answer, in one look, the question
+        // the datasheet does not answer consistently: which way round the page
+        // and column axes run. See `oxinode_core::sh1107`.
+        let mut frame = sh1107::Frame::new();
+        // A border, to show how much of the panel the mapping actually covers.
+        frame.frame_rect(0, 0, sh1107::WIDTH, sh1107::HEIGHT, true);
+        // The origin: a solid block at what this firmware calls (0, 0).
+        frame.rect(4, 4, 16, 16, true);
+        // A wide, short bar. Horizontal if the mapping is right, vertical if
+        // the page and column axes are the other way round -- and there is no
+        // way to mistake one for the other.
+        frame.rect(0, 40, 96, 8, true);
+        // One small block off to one side, so a mirrored picture is not
+        // mistaken for a correct one.
+        frame.rect(112, 60, 8, 8, true);
+
+        let started = Instant::now();
+        match panel.flush(&mut frame).await {
+            Ok(()) => defmt::info!(
+                "panel: test pattern sent, {=u32} us for {=usize} bytes at 100 kHz",
+                started.elapsed().as_micros() as u32,
+                sh1107::BUFFER_LEN
             ),
-            None => defmt::error!(
-                "step 1 failed: no SH1107 answered. Check the Super IO board is seated."
-            ),
+            Err(e) => defmt::error!("panel: flush failed: {}", e),
         }
 
-        // Idle, blinking, so the board is visibly alive -- and watching for the
-        // 1200-baud touch, since this image has one port and it is this one.
-        // A touch can arrive at any moment, so it is re-checked on every wake
-        // rather than waited for on an edge.
-        let mut buf = [0u8; 64];
-        loop {
-            if usb_log::is_bootloader_touch(&log_rx, &control) {
-                boot::reboot_to_bootloader();
-            }
-            led.toggle();
-            let _ = select(
-                log_rx.read_packet(&mut buf),
-                Timer::after(Duration::from_millis(500)),
-            )
-            .await;
-        }
+        defmt::info!("step 2 done. What is on the screen decides the axis mapping:");
+        defmt::info!("  - a border all the way round all four edges?");
+        defmt::info!("  - a solid square just inside ONE corner -- which one?");
+        defmt::info!("  - a long thin bar: does it run side to side, or top to bottom?");
+
+        idle(&mut led, &mut log_rx, &control).await
     };
 
     join3(run_usb, pump, bring_up).await;
