@@ -1,9 +1,18 @@
 # Phase 10 — the navigation pad driver
 
-Where phase 10 stands: **built, not yet confirmed on hardware.** The driver
-compiles into the product image, every timing decision in it is tested on the
-host, and the product image logs what the hardware checklist at the end needs
-read. What remains is a board, a terminal on the log port, and a finger.
+Where phase 10 stands: **built, flashed, the UICR question answered; the
+switches not yet exercised.** The driver compiles into the product image,
+every timing decision in it is tested on the host, and the product image logs
+what the hardware checklist at the end needs read. The first boot on the
+board said:
+
+```
+board: nav pad usable=true (UICR.NFCPINS), regulator=3.3 V
+board: mode switch P1.09=low P0.12=high -> middle (polarity unconfirmed)
+```
+
+What remains is a finger on each switch and the mode switch in its other two
+positions.
 
 The interface models six gestures; the Super IO has exactly six switches. This
 phase connects the two, and most of it is about *time* rather than pins.
@@ -199,6 +208,30 @@ neither for the bottom, both is invalid — is in the core and tested.
 The switch does nothing yet. What it *should* do is a question for the GPS
 phase, since the GPS is what Meshtastic uses it for.
 
+## Getting the boot log at all
+
+The first attempt to read that line got eighteen bytes of it. The product
+image's log pump sent whether or not anything was listening, on the theory
+that the log is continuous rather than a startup sequence — and the host
+discards what arrives on a port nobody has open. A board re-enumerates
+faster than a terminal can be attached to it, so the lines that say what the
+hardware *is* were gone every time, and a reset over the KISS port to
+provoke them again just lost them again.
+
+So the pump now waits for DTR on the log port, as the bring-up images always
+did. The ring behind it holds 4 KB, which is the whole of boot; a terminal
+that opens seconds later gets it from the top, and a board nobody listens to
+fills the ring and drops the oldest, as before. Reading it is:
+
+```bash
+python3 -c "import serial,sys; s=serial.Serial(sys.argv[1],115200); \
+  sys.stdout.buffer.write(s.read(4096))" /dev/cu.usbmodemXXX3 \
+  | defmt-print -e target/thumbv7em-none-eabihf/release/rnode
+```
+
+with an explicit baud rate, because macOS re-applies whatever the port was
+last opened at — including a flash tool's 1200-baud touch.
+
 ## What it does not do
 
 * Nothing in the interface answers a gesture yet. Phase 10 is the driver; the
@@ -213,10 +246,10 @@ phase, since the GPS is what Meshtastic uses it for.
 
 What the issue's "done when" needs, and the log line that answers each:
 
-- [ ] **`UICR.NFCPINS` read on hardware.** `board: nav pad usable=…` at boot.
-      Record the value in the README — and read it from the *current* image
-      first, before flashing this one, so the answer is the board's and not
-      this image's.
+- [x] **`UICR.NFCPINS` read on hardware.** `usable=true, regulator=3.3 V`
+      on 2026-09-07, on the first boot of the phase 10 image. The bit was
+      already clear, so the feature's write was a no-op and `REGOUT0` is
+      still what the bootloader set. Recorded in the README.
 - [ ] **All six switches produce their gesture.** Press each; expect
       `pad: <name> press, settled in …` for `up`, `down`, `left`, `right`,
       `ok`, `back`, and at debug level `ui: <gesture>` from the modem loop.

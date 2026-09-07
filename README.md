@@ -25,7 +25,7 @@ Being precise about that:
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
 | 9 | An on-device interface, and a simulator to build it with | **done** — the shell is pure code and every screen has a golden image, [notes](docs/phase-9-simulator.md) |
-| 10 | The navigation pad driver | **built, awaiting the board** — debounce and repeat tested on the host, [notes](docs/phase-10-pad.md) |
+| 10 | The navigation pad driver | **in progress** — `UICR.NFCPINS` read and clear, the switches not yet exercised on the board, [notes](docs/phase-10-pad.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -309,9 +309,11 @@ bring-up means charging, not a fault in anything oxinode did.
   board: nav pad usable=true (UICR.NFCPINS), regulator=3.3 V
   ```
 
-  **Read on hardware:** not yet. Read it from whatever image is on the board
-  *before* flashing a phase 10 image, and record the answer here. See
-  [docs/phase-10-pad.md](docs/phase-10-pad.md) for the whole of it.
+  **Read on hardware, 2026-09-07:** `usable=true`, `regulator=3.3 V`. The bit
+  was already clear, as expected from a board that shipped running Meshtastic,
+  so the first boot of the phase 10 image wrote nothing and `REGOUT0` was
+  never at risk. See [docs/phase-10-pad.md](docs/phase-10-pad.md) for the
+  whole of it.
 * **`USE_SX1262` and `USE_LR1121` are both defined because there are two
   modules, not two wiring options.** Elecrow's **nRFLR1121** (nRF52840 +
   LR1121) and **nRFLR1262** (nRF52840 + SX1262, despite the name) share a

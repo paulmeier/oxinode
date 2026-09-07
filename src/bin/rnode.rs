@@ -239,7 +239,7 @@ async fn main(_spawner: Spawner) {
         LOG_STATE.init(State::new()),
         usb_log::MAX_PACKET_SIZE,
     );
-    let (mut log_tx, _, _) = logs.split_with_control();
+    let (mut log_tx, _, log_control) = logs.split_with_control();
 
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
@@ -274,10 +274,15 @@ async fn main(_spawner: Spawner) {
     ));
 
     let run_usb = usb.run();
-    // `|| true` rather than waiting for DTR: this image's log is continuous
-    // rather than a one-shot startup sequence, and the port that has DTR is
-    // the KISS port, not this one.
-    let pump = usb_log::pump(&mut log_tx, || true);
+    // Held until a terminal opens the log port. This used to be `|| true` on
+    // the grounds that the log is continuous rather than a startup sequence,
+    // and that cost the startup sequence: the host discards what arrives on a
+    // port nobody has open, and a board re-enumerates faster than a terminal
+    // can be attached to it, so the lines that say what the hardware is --
+    // `UICR.NFCPINS`, the mode switch, the panel address -- were gone every
+    // time. The ring holds 4 KB, which is the whole of boot; with nobody ever
+    // listening it simply fills and drops the oldest, as it always did.
+    let pump = usb_log::pump(&mut log_tx, || log_control.dtr());
 
     // The Bluetooth controller, unconditionally: the product image does not
     // wait for a keystroke. The stall guard stays, because a controller that
