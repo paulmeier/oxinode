@@ -22,7 +22,7 @@ Being precise about that:
 | 4 | Runtime-configurable freq/SF/BW/power over `lr11xx` | **done** — verified on hardware, [notes](docs/phase-4-config.md) |
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
-| 7 | SH1107 OLED status display | not started |
+| 7 | SH1107 OLED status display | **in progress** — bus, driver and status page on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | interop constants pinned; stack not started |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
@@ -195,7 +195,7 @@ to work from.
 | LR1121 SPI NSS / SCK / MOSI / MISO | P1.12 / P1.13 / P1.14 / P1.15 | module-internal |
 | LR1121 TCXO | — | 3.0 V via DIO3, which therefore cannot serve as an IRQ |
 | LR1121 RF switch | — | the chip's own DIO5/DIO6, set by an on-chip command, not MCU GPIO |
-| OLED I²C SDA / SCL | P0.24 / P0.25 | SH1107 controller; 5.1 kΩ pull-ups on board |
+| OLED I²C SDA / SCL | P0.24 / P0.25 | SH1107 at **0x3c**; 128 × 128, 1.12"; 5.1 kΩ pull-ups on board |
 | OLED 12 V boost enable | P0.23 | must be driven **high** or the panel is dark |
 | QSPI SCK / CS / IO0-3 | P0.03 / P0.26 / P0.30, P0.29, P0.28, P0.02 | W25Q128, 16 MB |
 | LF clock | — | external 32.768 kHz crystal (LFXO) |
@@ -292,6 +292,20 @@ bring-up means charging, not a fault in anything oxinode did.
   so `rnodeconf --update` refuses rather than offering to flash a RAK4631 image
   onto an LR1121; being wrong about the band in a printout is the cheaper of
   the two.
+* **The nRF52's TWIM locks up after a NACK, and lies rather than failing.** A
+  transaction that ends in an address NACK can leave the peripheral in a state
+  it does not come out of, and `embassy-nrf` implements no workaround. It does
+  not report an error — it produces *plausible* answers: the same address
+  answers a read one moment and not the next, a scan disagrees with a probe run
+  half a millisecond earlier. `oxinode::display::reset_peripheral` cycles
+  `ENABLE`, which clears it; anything that NACKs by design (a bus scan) must do
+  that after every transaction.
+* **The 1200-baud touch is state on the *host*.** macOS caches terminal
+  settings per device path and re-applies them, so a failed touch leaves the
+  port at 1200 — and then anything that opens it, including `cat` reading the
+  log, performs another touch and sends the board back to its bootloader.
+  `tools/dfu-flash.sh` resets the cached rate after every flash, and firmware
+  ignores the condition for the first two seconds after boot.
 * **There *are* SWD pads.** This README says repeatedly that the board has no
   debug probe, and no image here assumes one. But SWDIO and SWDCLK come out to
   test pads TP1/TP2, so if the no-probe constraint ever gets expensive enough,
@@ -492,6 +506,11 @@ core/src/rnode/       phase 5: KISS framing, the command set, the protocol state
 core/src/rnode/eeprom.rs      phase 6: the EEPROM image, as rnodeconf reads it
 core/src/rnode/store.rs       phase 6: the record that survives a power cycle, and its checksum
 core/src/hash/        phase 6: MD5 (because the EEPROM checksum is one) and SHA-256
+core/src/sh1107.rs    phase 7: the OLED controller's commands and framebuffer
+core/src/font.rs      phase 7: a 5x7 font, drawn as art and generated into a table
+core/src/status.rs    phase 7: the status page, rendered from a value
+src/display.rs        phase 7: the I2C bus, the 12 V rail, and the panel transport
+src/bin/display.rs    phase 7: the display bring-up image
 src/store.rs          phase 6: that record, in the flash a reflash cannot reach
 src/bringup.rs        phase 5: the radio bring-up sequence, without the instrumentation
 src/bin/rnode.rs      phase 5: the product image -- KISS on the first port, log on the second

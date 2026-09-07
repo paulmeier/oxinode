@@ -140,6 +140,60 @@ overhead. 400 kHz will bring it under 60 ms when there is a reason to want it.
 The framebuffer tracks which of the sixteen pages have changed, so an update
 that touches one line costs 12 ms rather than 218.
 
+## Step 3 — a status page
+
+The panel is the only thing this board can say to somebody holding it rather
+than sitting at the host, so it shows what is otherwise hard to find out: what
+the radio is tuned to, whether it is on air, whether anything has been heard,
+and how strong it was.
+
+### The font is uppercase, and it was drawn rather than typed
+
+Fifty-five glyphs — space, the digits, `A`–`Z` and fifteen symbols — at 5 × 7.
+Lowercase folds to uppercase rather than being dropped, so `"Freq"` renders as
+`FREQ`; anything outside the table renders as a hollow box, so a missing glyph
+looks like a missing glyph rather than like a space.
+
+Uppercase-only is a chosen limitation. A status panel reads perfectly well in
+capitals, and the alternative was twenty-six more glyphs of hand-drawn art for
+a screen that shows numbers and four-letter labels.
+
+They were written as readable ASCII art and converted to the table by a
+generator. Fifty-five glyphs of hand-entered hex is two hundred and seventy-five
+chances to make a mistake whose only symptom is a wrong pixel. The tests render
+glyphs *back* into art and compare against the shape they were drawn as, which
+is what would catch a generator that transposed rows and columns or numbered
+the bits from the bottom.
+
+### The test that matters is that every field reaches the screen
+
+`changing_any_field_changes_the_picture` renders the page thirteen times,
+altering one field each time, and asserts the framebuffer differs. That is the
+test that catches a field somebody added to the struct and forgot to draw —
+which is invisible in every other way, because the page still renders and still
+looks plausible.
+
+### Redrawing a page is not the same as changing it
+
+The first version updated in 218 ms, which is the cost of the whole panel, for
+a change of one digit. The framebuffer tracks which of its sixteen pages have
+changed, but a renderer that clears and redraws marks all sixteen whatever the
+picture ends up looking like — and clearing first is the only sane way to
+write a renderer, because the alternative is erasing exactly what you drew last
+time.
+
+So the page is rendered into a scratch frame and committed with
+`Frame::copy_from`, which compares the *result* rather than the process and
+dirties only the pages that actually differ. Measured on hardware:
+
+```
+full flush        218566 us
+partial update     27313 us   (one line of text: two pages)
+```
+
+Eight times faster, and the difference between a display that can be refreshed
+while the radio is working and one that cannot.
+
 ## Flashing this phase cost more resets than the last three phases together
 
 Worth writing down, because none of it was about the display.

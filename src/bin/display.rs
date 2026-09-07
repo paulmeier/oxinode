@@ -283,8 +283,78 @@ async fn main(_spawner: Spawner) {
         defmt::info!("step 2 done. Expected: a border on all four edges, a solid");
         defmt::info!("  square just inside the TOP-LEFT, a horizontal bar above centre,");
         defmt::info!("  a staircase widening DOWNWARDS, and a small block bottom-right.");
+        Timer::after(Duration::from_secs(5)).await;
 
-        idle(&mut led, &mut log_rx, &control).await
+        // ---- step 3: something worth looking at -------------------------
+        //
+        // Plausible values rather than real ones: this image has no radio. The
+        // point here is the layout and the refresh, both of which are the same
+        // whatever the numbers are.
+        let mut status = oxinode_core::status::Status {
+            name: [
+                serial.as_bytes()[12],
+                serial.as_bytes()[13],
+                serial.as_bytes()[14],
+                serial.as_bytes()[15],
+            ],
+            frequency_hz: 915_000_000,
+            bandwidth_hz: 125_000,
+            spreading_factor: 8,
+            coding_rate: 5,
+            tx_power_dbm: 17,
+            radio_on: true,
+            tnc: true,
+            provisioned: true,
+            rx_count: 0,
+            tx_count: 7,
+            last_rssi_dbm: Some(-69),
+            last_snr_quarter_db: Some(45),
+        };
+
+        // Rendered into a scratch frame and committed by comparison, so an
+        // update sends the pages that changed rather than the pages that were
+        // redrawn. See `Frame::copy_from`.
+        let mut scratch = sh1107::Frame::new();
+        oxinode_core::status::render(&status, &mut scratch);
+        frame.copy_from(&scratch);
+        let started = Instant::now();
+        match panel.flush(&mut frame).await {
+            Ok(()) => defmt::info!(
+                "panel: status page drawn, full flush {=u32} us",
+                started.elapsed().as_micros() as u32
+            ),
+            Err(e) => defmt::error!("panel: status flush failed: {}", e),
+        }
+        defmt::info!("step 3 done: the panel should show a status page, title bar at the top.");
+
+        // Now tick the received-packet counter once a second. Only the pages
+        // that change are sent, so this also measures what a partial update
+        // costs -- which is the number that decides whether the display can be
+        // refreshed while the radio is busy.
+        loop {
+            if usb_log::is_bootloader_touch(&log_rx, &control) {
+                boot::reboot_to_bootloader();
+            }
+            led.toggle();
+            Timer::after(Duration::from_secs(1)).await;
+
+            status.rx_count = status.rx_count.wrapping_add(1);
+            oxinode_core::status::render(&status, &mut scratch);
+            frame.copy_from(&scratch);
+            let started = Instant::now();
+            match panel.flush(&mut frame).await {
+                Ok(()) => {
+                    if status.rx_count % 5 == 0 {
+                        defmt::info!(
+                            "panel: partial update {=u32} us (rx {=u32})",
+                            started.elapsed().as_micros() as u32,
+                            status.rx_count
+                        );
+                    }
+                }
+                Err(e) => defmt::error!("panel: update failed: {}", e),
+            }
+        }
     };
 
     join3(run_usb, pump, bring_up).await;

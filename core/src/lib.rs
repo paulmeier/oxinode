@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ble;
+pub mod font;
 pub mod gpio;
 pub mod hash;
 pub mod linker_script;
@@ -25,4 +26,5 @@ pub mod meshtastic;
 pub mod rnode;
 pub mod serial;
 pub mod sh1107;
+pub mod status;
 pub mod usb;

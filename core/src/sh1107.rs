@@ -238,6 +238,28 @@ impl Frame {
         }
     }
 
+    /// Adopt another frame's contents, marking only the pages that differ.
+    ///
+    /// This is what makes the dirty tracking worth having. A renderer that
+    /// redraws a whole page from scratch — which is the only kind worth
+    /// writing, because the alternative is erasing exactly what you drew last
+    /// time — starts by clearing the frame, and that marks all sixteen pages
+    /// dirty whatever the picture ends up looking like. Drawing into a scratch
+    /// frame and committing it here compares the result instead of the process.
+    ///
+    /// The difference is 218 ms against 14 on this bus, which is the difference
+    /// between a display that can be refreshed while the radio is working and
+    /// one that cannot.
+    pub fn copy_from(&mut self, other: &Self) {
+        for page in 0..PAGES {
+            let range = page * COLUMNS..(page + 1) * COLUMNS;
+            if self.buf[range.clone()] != other.buf[range.clone()] {
+                self.buf[range.clone()].copy_from_slice(&other.buf[range]);
+                self.dirty |= 1 << page;
+            }
+        }
+    }
+
     /// Set every pixel to `on`.
     pub fn fill(&mut self, on: bool) {
         self.buf = [if on { 0xFF } else { 0x00 }; BUFFER_LEN];
@@ -425,7 +447,7 @@ mod tests {
     }
 
     /// Only the page a pixel lands in is sent again. Sixteen pages at 100 kHz
-    /// is 186 ms of bus time; sending one is 12.
+    /// is 218 ms of bus time; sending one is 14.
     #[test]
     fn only_the_page_that_changed_is_dirty() {
         let mut f = Frame::new();
@@ -453,6 +475,46 @@ mod tests {
         assert!(f.is_clean());
         f.set_pixel(10, 10, false);
         assert!(!f.is_clean());
+    }
+
+    /// Committing an identical frame changes nothing and sends nothing.
+    #[test]
+    fn copying_an_identical_frame_dirties_no_pages() {
+        let mut live = Frame::new();
+        live.rect(10, 10, 20, 20, true);
+        for page in 0..PAGES {
+            live.mark_sent(page);
+        }
+        let scratch = live.clone();
+        live.copy_from(&scratch);
+        assert!(live.is_clean(), "an identical frame should send nothing");
+    }
+
+    /// And committing one that differs in a single pixel sends exactly the one
+    /// page that pixel is in -- which is the whole point, because a renderer
+    /// that clears and redraws would otherwise mark all sixteen.
+    #[test]
+    fn copying_a_frame_that_differs_by_a_pixel_dirties_one_page() {
+        let mut live = Frame::new();
+        live.rect(0, 0, WIDTH, HEIGHT, true);
+        for page in 0..PAGES {
+            live.mark_sent(page);
+        }
+
+        // The scratch is built the way a renderer builds one: cleared first,
+        // which on the live frame would have dirtied everything.
+        let mut scratch = Frame::new();
+        scratch.fill(true);
+        scratch.set_pixel(40, 70, false);
+        assert!(!scratch.is_clean(), "the scratch itself is fully dirty");
+
+        live.copy_from(&scratch);
+        let (index, _) = ram_position(40, 70).unwrap();
+        let expected = index / COLUMNS;
+        for page in 0..PAGES {
+            assert_eq!(live.is_dirty(page), page == expected, "page {page}");
+        }
+        assert!(!live.pixel(40, 70));
     }
 
     #[test]

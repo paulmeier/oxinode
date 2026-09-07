@@ -1,0 +1,365 @@
+//! A 5 × 7 bitmap font, and just enough text rendering for a status page.
+//!
+//! # Uppercase only, deliberately
+//!
+//! The table covers space, the digits, `A`–`Z` and fifteen symbols — fifty-five
+//! glyphs. Lowercase input is folded to uppercase rather than being dropped or
+//! boxed, so `"Freq"` renders as `FREQ`.
+//!
+//! That is a real limitation and it is a chosen one. A status panel reads
+//! perfectly well in capitals, and the alternative was twenty-six more glyphs
+//! of hand-drawn art for a screen that shows numbers and four-letter labels.
+//! Anything outside the table renders as a hollow box, so a missing glyph looks
+//! like a missing glyph rather than like a space.
+//!
+//! # How the glyphs got here
+//!
+//! Written as readable ASCII art and converted to this table by a generator,
+//! rather than typed as hex. Fifty-five glyphs of hand-entered hex is two
+//! hundred and seventy-five chances to make a mistake whose only symptom is a
+//! wrong pixel on a screen nobody is looking at closely.
+//!
+//! Column-major: byte *n* is column *n*, and bit *k* of it is row *k*, top
+//! first. That is the orientation the SH1107 wants for a vertical run of eight
+//! pixels, so a glyph column is one byte of display RAM when the text lands on
+//! a page boundary — which is worth having even though the renderer below does
+//! not currently exploit it.
+
+use crate::sh1107::Frame;
+
+/// Glyph width in pixels.
+pub const WIDTH: usize = 5;
+/// Glyph height in pixels.
+pub const HEIGHT: usize = 7;
+/// Pixels between one glyph and the next.
+pub const SPACING: usize = 1;
+/// Width of one character cell, including the gap after it.
+pub const ADVANCE: usize = WIDTH + SPACING;
+/// Height of one line, including the gap below it.
+pub const LINE_HEIGHT: usize = HEIGHT + 2;
+
+pub const GLYPHS: [(u8, [u8; WIDTH]); 55] = [
+    (b' ', [0x00, 0x00, 0x00, 0x00, 0x00]),
+    (b'!', [0x00, 0x00, 0x5f, 0x00, 0x00]),
+    (b'#', [0x14, 0x7f, 0x14, 0x7f, 0x14]),
+    (b'%', [0x63, 0x13, 0x08, 0x64, 0x63]),
+    (b'\'', [0x00, 0x00, 0x03, 0x00, 0x00]),
+    (b'(', [0x1c, 0x22, 0x41, 0x41, 0x00]),
+    (b')', [0x00, 0x41, 0x41, 0x22, 0x1c]),
+    (b'*', [0x2a, 0x1c, 0x3e, 0x1c, 0x2a]),
+    (b'+', [0x08, 0x08, 0x3e, 0x08, 0x08]),
+    (b',', [0x00, 0x70, 0x30, 0x00, 0x00]),
+    (b'-', [0x08, 0x08, 0x08, 0x08, 0x08]),
+    (b'.', [0x00, 0x60, 0x60, 0x00, 0x00]),
+    (b'/', [0x40, 0x30, 0x08, 0x06, 0x01]),
+    (b'0', [0x3e, 0x51, 0x49, 0x45, 0x3e]),
+    (b'1', [0x00, 0x42, 0x7f, 0x40, 0x00]),
+    (b'2', [0x42, 0x61, 0x51, 0x49, 0x46]),
+    (b'3', [0x21, 0x41, 0x45, 0x4b, 0x31]),
+    (b'4', [0x18, 0x14, 0x12, 0x7f, 0x10]),
+    (b'5', [0x27, 0x45, 0x45, 0x45, 0x39]),
+    (b'6', [0x3c, 0x4a, 0x49, 0x49, 0x30]),
+    (b'7', [0x01, 0x71, 0x09, 0x05, 0x03]),
+    (b'8', [0x36, 0x49, 0x49, 0x49, 0x36]),
+    (b'9', [0x06, 0x49, 0x49, 0x29, 0x1e]),
+    (b':', [0x00, 0x36, 0x36, 0x00, 0x00]),
+    (b'<', [0x08, 0x14, 0x22, 0x41, 0x00]),
+    (b'=', [0x14, 0x14, 0x14, 0x14, 0x14]),
+    (b'>', [0x00, 0x41, 0x22, 0x14, 0x08]),
+    (b'?', [0x02, 0x01, 0x51, 0x09, 0x06]),
+    (b'A', [0x7e, 0x09, 0x09, 0x09, 0x7e]),
+    (b'B', [0x7f, 0x49, 0x49, 0x49, 0x36]),
+    (b'C', [0x3e, 0x41, 0x41, 0x41, 0x22]),
+    (b'D', [0x7f, 0x41, 0x41, 0x22, 0x1c]),
+    (b'E', [0x7f, 0x49, 0x49, 0x49, 0x41]),
+    (b'F', [0x7f, 0x09, 0x09, 0x09, 0x01]),
+    (b'G', [0x3e, 0x41, 0x49, 0x49, 0x7a]),
+    (b'H', [0x7f, 0x08, 0x08, 0x08, 0x7f]),
+    (b'I', [0x00, 0x41, 0x7f, 0x41, 0x00]),
+    (b'J', [0x30, 0x40, 0x40, 0x40, 0x3f]),
+    (b'K', [0x7f, 0x08, 0x14, 0x22, 0x41]),
+    (b'L', [0x7f, 0x40, 0x40, 0x40, 0x40]),
+    (b'M', [0x7f, 0x02, 0x0c, 0x02, 0x7f]),
+    (b'N', [0x7f, 0x04, 0x08, 0x10, 0x7f]),
+    (b'O', [0x3e, 0x41, 0x41, 0x41, 0x3e]),
+    (b'P', [0x7f, 0x09, 0x09, 0x09, 0x06]),
+    (b'Q', [0x3e, 0x41, 0x51, 0x21, 0x5e]),
+    (b'R', [0x7f, 0x09, 0x19, 0x29, 0x46]),
+    (b'S', [0x46, 0x49, 0x49, 0x49, 0x31]),
+    (b'T', [0x01, 0x01, 0x7f, 0x01, 0x01]),
+    (b'U', [0x3f, 0x40, 0x40, 0x40, 0x3f]),
+    (b'V', [0x1f, 0x20, 0x40, 0x20, 0x1f]),
+    (b'W', [0x7f, 0x20, 0x18, 0x20, 0x7f]),
+    (b'X', [0x63, 0x14, 0x08, 0x14, 0x63]),
+    (b'Y', [0x03, 0x04, 0x78, 0x04, 0x03]),
+    (b'Z', [0x61, 0x51, 0x49, 0x45, 0x43]),
+    (b'_', [0x40, 0x40, 0x40, 0x40, 0x40]),
+];
+
+/// The columns for one character, or `None` if it is not in the table.
+///
+/// Lowercase is folded to uppercase; see the module docs.
+pub fn glyph(c: u8) -> Option<&'static [u8; WIDTH]> {
+    let c = c.to_ascii_uppercase();
+    let mut lo = 0usize;
+    let mut hi = GLYPHS.len();
+    // The table is sorted by character, so this is a binary search rather than
+    // a scan. It is not about speed -- fifty-five entries is nothing -- but a
+    // sorted table is checkable, and a test checks it.
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        match GLYPHS[mid].0.cmp(&c) {
+            core::cmp::Ordering::Less => lo = mid + 1,
+            core::cmp::Ordering::Greater => hi = mid,
+            core::cmp::Ordering::Equal => return Some(&GLYPHS[mid].1),
+        }
+    }
+    None
+}
+
+/// The columns drawn for a character that is not in the table: a hollow box.
+///
+/// Not a space. A missing glyph that looked like a space would make a wrong
+/// string look like a correctly rendered shorter one.
+pub const MISSING: [u8; WIDTH] = [0x7F, 0x41, 0x41, 0x41, 0x7F];
+
+/// Draw one character with its top-left corner at `(x, y)`.
+///
+/// Returns where the next character starts.
+pub fn draw_char(frame: &mut Frame, x: usize, y: usize, c: u8, on: bool) -> usize {
+    let columns = glyph(c).unwrap_or(&MISSING);
+    for (dx, column) in columns.iter().enumerate() {
+        for dy in 0..HEIGHT {
+            if column & (1 << dy) != 0 {
+                frame.set_pixel(x + dx, y + dy, on);
+            }
+        }
+    }
+    x + ADVANCE
+}
+
+/// Draw a string. Returns where the next character would start.
+///
+/// Characters that would fall off the right edge are not drawn — the frame
+/// clips them anyway, but stopping means the cursor returned is honest about
+/// how far it got.
+pub fn draw(frame: &mut Frame, x: usize, y: usize, text: &str, on: bool) -> usize {
+    let mut cursor = x;
+    for c in text.bytes() {
+        if cursor + WIDTH > crate::sh1107::WIDTH {
+            break;
+        }
+        cursor = draw_char(frame, cursor, y, c, on);
+    }
+    cursor
+}
+
+/// How wide a string will be, in pixels, including the gap after the last
+/// character.
+pub const fn width_of(text: &str) -> usize {
+    text.len() * ADVANCE
+}
+
+/// Draw a string right-aligned so that it ends at `right`.
+///
+/// Numbers on a status page belong in a column, and a column of numbers that
+/// are not the same length has to be aligned from the right or it does not read
+/// as a column.
+pub fn draw_right(frame: &mut Frame, right: usize, y: usize, text: &str, on: bool) {
+    let width = width_of(text).saturating_sub(SPACING);
+    let x = right.saturating_sub(width);
+    draw(frame, x, y, text, on);
+}
+
+// A glyph column is seven rows in the low bits, so the top bit is always clear.
+// If it were not, a glyph would draw a pixel one row below its own box and into
+// whatever is on the next line.
+const _: () = {
+    let mut i = 0;
+    while i < GLYPHS.len() {
+        let mut c = 0;
+        while c < WIDTH {
+            assert!(GLYPHS[i].1[c] < (1 << HEIGHT));
+            c += 1;
+        }
+        i += 1;
+    }
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sh1107;
+
+    /// Render a glyph back into art, so a test can state what it should look
+    /// like in the same form the generator took it in.
+    fn art(c: u8) -> Vec<String> {
+        let columns = glyph(c).unwrap_or(&MISSING);
+        (0..HEIGHT)
+            .map(|row| {
+                (0..WIDTH)
+                    .map(|col| {
+                        if columns[col] & (1 << row) != 0 {
+                            '#'
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The table has to be sorted, because `glyph` binary-searches it.
+    #[test]
+    fn the_table_is_sorted_and_has_no_duplicates() {
+        for pair in GLYPHS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "{:?} then {:?} is out of order",
+                pair[0].0 as char,
+                pair[1].0 as char
+            );
+        }
+    }
+
+    /// Every character the table claims to have can be found again.
+    #[test]
+    fn every_glyph_in_the_table_is_reachable() {
+        for (c, columns) in GLYPHS {
+            assert_eq!(glyph(c), Some(&columns), "{:?}", c as char);
+        }
+        assert_eq!(GLYPHS.len(), 55);
+    }
+
+    /// Everything a status page needs, present. Stated as a list rather than a
+    /// range so that removing one from the table fails here rather than on a
+    /// screen.
+    #[test]
+    fn the_characters_a_status_page_needs_are_all_there() {
+        for c in b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ .,:-+/%()!?=<>*#'_" {
+            assert!(glyph(*c).is_some(), "{:?} is missing", *c as char);
+        }
+    }
+
+    /// Lowercase renders as uppercase rather than as a box.
+    #[test]
+    fn lowercase_folds_to_uppercase() {
+        for (lower, upper) in b"abcxyz".iter().zip(b"ABCXYZ") {
+            assert_eq!(glyph(*lower), glyph(*upper), "{:?}", *lower as char);
+        }
+    }
+
+    /// Anything else is a visible box, not a space. A missing glyph that looked
+    /// like a space would make a wrong string read as a correct shorter one.
+    #[test]
+    fn an_unknown_character_is_a_box_and_not_a_gap() {
+        for c in [b'~', b'^', b'{', b'|', 0x00, 0xFF] {
+            assert_eq!(glyph(c), None, "{c:#04x}");
+        }
+        assert_ne!(MISSING, [0; WIDTH]);
+        assert_ne!(Some(&MISSING), glyph(b' '));
+    }
+
+    /// Space is the only glyph that draws nothing.
+    #[test]
+    fn only_space_is_blank() {
+        for (c, columns) in GLYPHS {
+            let blank = columns.iter().all(|&b| b == 0);
+            assert_eq!(blank, c == b' ', "{:?}", c as char);
+        }
+    }
+
+    /// Two glyphs picked out and checked against the art they were drawn as.
+    /// This is what would catch a generator that transposed rows and columns,
+    /// or numbered the bits from the bottom.
+    #[test]
+    fn the_glyphs_are_the_shapes_they_were_drawn_as() {
+        assert_eq!(
+            art(b'A'),
+            vec![".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"]
+        );
+        assert_eq!(
+            art(b'1'),
+            vec!["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."]
+        );
+        // Asymmetric top to bottom *and* left to right, so a flip either way
+        // fails.
+        assert_eq!(
+            art(b'F'),
+            vec!["#####", "#....", "#....", "####.", "#....", "#....", "#...."]
+        );
+    }
+
+    /// Drawing puts pixels where the glyph says, at the offset asked for.
+    #[test]
+    fn a_character_lands_where_it_is_put() {
+        let mut f = sh1107::Frame::new();
+        let next = draw_char(&mut f, 10, 20, b'F', true);
+        assert_eq!(next, 10 + ADVANCE);
+        // Top bar of the F, all five columns.
+        for dx in 0..WIDTH {
+            assert!(f.pixel(10 + dx, 20), "top bar column {dx}");
+        }
+        // Left stem, all seven rows.
+        for dy in 0..HEIGHT {
+            assert!(f.pixel(10, 20 + dy), "stem row {dy}");
+        }
+        // And nothing outside its box.
+        assert!(!f.pixel(9, 20));
+        assert!(!f.pixel(10 + WIDTH, 20));
+        assert!(!f.pixel(10, 20 + HEIGHT));
+    }
+
+    #[test]
+    fn a_string_advances_one_cell_per_character() {
+        let mut f = sh1107::Frame::new();
+        let end = draw(&mut f, 0, 0, "ABC", true);
+        assert_eq!(end, 3 * ADVANCE);
+    }
+
+    /// A string that would run off the right edge stops rather than wrapping,
+    /// and says how far it got.
+    #[test]
+    fn a_string_stops_at_the_right_edge() {
+        let mut f = sh1107::Frame::new();
+        let long = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let end = draw(&mut f, 0, 0, long, true);
+        assert!(end <= sh1107::WIDTH + ADVANCE);
+        // Nothing wrapped onto the row below.
+        for y in HEIGHT..LINE_HEIGHT {
+            for x in 0..sh1107::WIDTH {
+                assert!(!f.pixel(x, y), "({x},{y}) wrapped");
+            }
+        }
+    }
+
+    /// Right alignment puts the last pixel column of the text at `right`.
+    #[test]
+    fn right_aligned_text_ends_where_it_is_told() {
+        let mut f = sh1107::Frame::new();
+        draw_right(&mut f, 100, 0, "12", true);
+        // "12" is two cells wide less the trailing gap: 11 pixels, so it starts
+        // at 89 and its last column is 99 -- the pixel before `right`.
+        assert_eq!(width_of("12") - SPACING, 11);
+        let lit: Vec<usize> = (0..sh1107::WIDTH).filter(|&x| f.pixel(x, 0)).collect();
+        assert!(!lit.is_empty());
+        assert!(*lit.iter().max().unwrap() < 100);
+        assert!(*lit.iter().min().unwrap() >= 89);
+    }
+
+    /// Two numbers of different lengths line up on the right. That is the whole
+    /// reason `draw_right` exists.
+    #[test]
+    fn numbers_of_different_lengths_share_a_right_edge() {
+        let mut f = sh1107::Frame::new();
+        draw_right(&mut f, 60, 0, "7", true);
+        draw_right(&mut f, 60, LINE_HEIGHT, "1234", true);
+        let right_of = |y: usize| (0..sh1107::WIDTH).filter(|&x| f.pixel(x, y)).max();
+        // The rightmost lit pixel of each row is within one glyph column of the
+        // other: the digits themselves differ in which columns they use.
+        let a = right_of(0).unwrap();
+        let b = right_of(LINE_HEIGHT).unwrap();
+        assert!(a.abs_diff(b) <= 1, "{a} vs {b}");
+    }
+}
