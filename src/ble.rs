@@ -34,14 +34,14 @@
 //! `nrf_mpsl::Flash` — which schedules the write inside a timeslot — a
 //! provisioning run while a phone is connected will drop the connection.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use embassy_nrf::config::Config;
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
-use embassy_time::{Duration, Timer};
+
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
@@ -67,45 +67,6 @@ use static_cell::StaticCell;
 /// `P2` rather than `P4`: it leaves room below us for MPSL's own low-priority
 /// processing, which is where it does work that is allowed to be interrupted.
 pub const APP_PRIORITY: Priority = Priority::P2;
-
-/// Make a pending interrupt wake `WFE`, whether or not it is enabled.
-///
-/// # Why the controller needs this and embassy does not provide it
-///
-/// MPSL waits for things by executing `WFE` in a loop. Disassembling its wait
-/// helper shows a **plain** `WFE` on this part: no `SEV` before it and no
-/// `SEVONPEND` management around it. That is only correct in an environment
-/// where `SEVONPEND` is already set, and in Nordic's own — Zephyr — it is.
-///
-/// `embassy-executor` does not set it. Its own `WFE` is woken by the `SEV`
-/// its pender issues, so it never needed to.
-///
-/// The difference decides whether the Bluetooth controller starts. Without
-/// `SEVONPEND`, a `WFE` only wakes for an interrupt the NVIC will actually
-/// take — and MPSL disables its own during initialisation, so the event it is
-/// waiting for pends and does not wake it. What does wake it is any *other*
-/// enabled interrupt that happens to fire: USB traffic, mostly. So the
-/// bring-up succeeds when the host is busy and sleeps forever when it is
-/// quiet, which is exactly the behaviour observed — the same configuration
-/// coming up one time and hanging the next.
-///
-/// Call once, before `mpsl_init`, and then leave it alone: the MPSL header
-/// warns that changing `SEVONPEND` *during* initialisation can deadlock.
-///
-/// The cost to everything else is that `embassy-executor` wakes from `WFE`
-/// slightly more often than it needs to and finds nothing to do. That is a
-/// little current, against a Bluetooth stack that starts.
-pub fn set_sevonpend() {
-    const SEVONPEND: u32 = 1 << 4;
-    // SAFETY: `SCR` is a plain read/write system register, and this is a
-    // single bit set with interrupts in whatever state the caller had.
-    unsafe {
-        let scb = &*cortex_m::peripheral::SCB::PTR;
-        scb.scr.modify(|scr| scr | SEVONPEND);
-    }
-    cortex_m::asm::dsb();
-    cortex_m::asm::isb();
-}
 
 /// The board's usual `embassy-nrf` configuration, with priorities MPSL can
 /// live with.
@@ -220,71 +181,136 @@ pub fn report_lfclk() {
     let clock = embassy_nrf::pac::CLOCK;
     let stat = clock.lfclkstat().read();
     defmt::info!(
-        "lfclk: running={=bool} src={=u8} started_event={=u32}",
+        "lfclk: running={=bool} src={=u8} started_event={=u32} inten={=u32:#05x}",
         stat.state(),
         stat.src() as u8,
         clock.events_lfclkstarted().read(),
+        power::read(power::INTENSET),
     );
 }
 
-/// USB VBUS detection for an image that cannot have the `CLOCK_POWER`
-/// interrupt.
+/// USB VBUS detection on the interrupt MPSL owns.
 ///
 /// # The conflict
 ///
-/// On the nRF52840 the `POWER` and `CLOCK` peripherals share one interrupt.
-/// `embassy-usb` normally binds it through `HardwareVbusDetect`, which is how
-/// every image before this one learns that a cable was plugged in. MPSL needs
-/// the same interrupt for the low-frequency clock, and only one handler can be
-/// bound to a vector.
+/// On the nRF52840 the `POWER` and `CLOCK` peripherals share one interrupt
+/// vector *and* one interrupt-enable register, with disjoint bits.
+/// `embassy-usb` normally binds the vector through `HardwareVbusDetect`, which
+/// is how every image before phase 8 learns that a cable was plugged in. MPSL
+/// needs the same vector for the clock, and only one handler can be bound.
 ///
-/// # Why this polls
+/// # What happens if `POWER` is left to nobody
 ///
-/// The obvious repair is `SoftwareVbusDetect` fed from MPSL's power events,
-/// and MPSL does not have any: its clock handler services `CLOCK`, and the
-/// `USBDETECTED`, `USBREMOVED` and `USBPWRRDY` events belong to `POWER`.
-/// Enabling those in `INTENSET` would deliver them to *MPSL's* handler, which
-/// would not clear them — an interrupt that re-fires forever, at priority
-/// zero, on a device that then does nothing else at all.
+/// It is not left to nobody. When the bootloader starts the application
+/// **from DFU** — which is every boot that follows a flash — its own USB
+/// stack has run, and it hands over with `USBDETECTED`, `USBREMOVED` and
+/// `USBPWRRDY` still enabled in the shared word: `0x380`, read back at boot.
+/// After a plain press of reset the word reads `0`. `USBPWRRDY` is latched
+/// from the moment the regulator comes up.
 ///
-/// So nothing is enabled and `USBREGSTATUS` is read instead. It is a status
-/// register with the same two bits the events announce, it belongs to `POWER`
-/// rather than to the clock MPSL was told to manage, and reading it costs one
-/// load. The price is latency: a cable plugged in is noticed up to
-/// [`Self::INTERVAL`] late, once, before enumeration that takes a hundred
-/// times longer.
+/// Phases 1 to 7 never noticed, because `HardwareVbusDetect` clears those
+/// events. The first Bluetooth image bound the vector to MPSL's handler
+/// alone, and the moment `mpsl_init` unmasked it the line was high with
+/// nothing to lower it — 841,653 handler entries in two seconds, at the
+/// lowest priority there is, so USB control transfers kept working while
+/// everything in thread mode stopped. It took a captured program counter to
+/// see. And it looked like a race for a week of resets only because every
+/// boot after a flash hung and every boot after the reset button worked,
+/// and nobody was keeping track of which was which.
+///
+/// So this handler services `POWER` and then hands `CLOCK` to MPSL: the
+/// events are cleared and folded into a `SoftwareVbusDetect`, which is what
+/// `embassy-usb` was designed to be fed by exactly this. The polling version
+/// that stood here before is gone; it was a workaround for a conflict that
+/// turns out to be a shared line, not a shared owner.
 pub struct Vbus {
     detect: &'static SoftwareVbusDetect,
-    /// Mirrors what was last reported, because `SoftwareVbusDetect` is
-    /// write-only from here: it has no getter, and reporting the same state
-    /// repeatedly would wake the USB stack forever.
-    reported_detected: AtomicBool,
-    reported_ready: AtomicBool,
+    inherited: u32,
+}
+
+/// The one detector, for the handler to reach.
+static DETECT: AtomicPtr<SoftwareVbusDetect> = AtomicPtr::new(core::ptr::null_mut());
+
+/// `POWER` register offsets from the shared base. Raw, because the point of
+/// the handler is what is *in* the registers, and the PAC's view of `POWER`
+/// and `CLOCK` as two peripherals hides that they are one address space.
+mod power {
+    pub const BASE: usize = 0x4000_0000;
+    pub const EVENTS_USBDETECTED: usize = 0x11C;
+    pub const EVENTS_USBREMOVED: usize = 0x120;
+    pub const EVENTS_USBPWRRDY: usize = 0x124;
+    pub const INTENSET: usize = 0x304;
+    pub const INTENCLR: usize = 0x308;
+    pub const USBREGSTATUS: usize = 0x438;
+    /// The three this module wants.
+    pub const USB_INTS: u32 = (1 << 7) | (1 << 8) | (1 << 9);
+
+    pub fn read(offset: usize) -> u32 {
+        // SAFETY: memory-mapped registers inside the POWER/CLOCK block.
+        unsafe { core::ptr::read_volatile((BASE + offset) as *const u32) }
+    }
+    pub fn write(offset: usize, value: u32) {
+        // SAFETY: as above.
+        unsafe { core::ptr::write_volatile((BASE + offset) as *mut u32, value) }
+    }
 }
 
 impl Vbus {
-    /// How often `USBREGSTATUS` is read.
+    /// Take ownership of the `POWER` side of the shared interrupt.
     ///
-    /// 20 ms is the same interval the log pump and the bootloader-touch check
-    /// already poll at, and is far below the millisecond budget of anything it
-    /// delays.
-    pub const INTERVAL: Duration = Duration::from_millis(20);
-
-    /// Read the current state and hand back something `embassy-usb` can use.
+    /// Clears whatever the bootloader left enabled, clears any latched event,
+    /// seeds the detector from the live register, and then enables exactly
+    /// the three USB events — so nothing is inherited, and the handler below
+    /// is the only thing that ever sees them.
     ///
-    /// Seeded from the register rather than from `false`, so a board that is
-    /// already plugged in — which is every board being flashed — enumerates
-    /// without waiting for the first poll.
-    ///
-    /// Call this once per image; it hands out a `StaticCell`.
+    /// Call once per image, before MPSL is initialised; MPSL is what unmasks
+    /// the vector, and it must find `POWER` already quiet.
     pub fn take() -> Self {
         static VBUS: StaticCell<SoftwareVbusDetect> = StaticCell::new();
-        let (detected, ready) = Self::read();
-        Self {
-            detect: VBUS.init(SoftwareVbusDetect::new(detected, ready)),
-            reported_detected: AtomicBool::new(detected),
-            reported_ready: AtomicBool::new(ready),
+        let inherited = power::read(power::INTENSET);
+        // The whole word, not just the `POWER` half. The bootloader's clock
+        // driver leaves `HFCLKSTARTED` and `LFCLKSTARTED` enabled too, and
+        // `embassy_nrf::init` leaves both of those events latched -- so
+        // unmasking the vector below with those bits still set is a storm
+        // before `main` has printed a line. That is what the first build of
+        // this function did on every soft reboot. MPSL enables the `CLOCK`
+        // bits it wants when it initialises; nothing before that needs any.
+        power::write(power::INTENCLR, 0xFFFF_FFFF);
+        for ev in [
+            power::EVENTS_USBDETECTED,
+            power::EVENTS_USBREMOVED,
+            power::EVENTS_USBPWRRDY,
+        ] {
+            power::write(ev, 0);
         }
+        let status = power::read(power::USBREGSTATUS);
+        let (detected, ready) = (status & 1 != 0, status & 2 != 0);
+        let detect: &'static SoftwareVbusDetect =
+            VBUS.init(SoftwareVbusDetect::new(detected, ready));
+        DETECT.store(detect as *const _ as *mut _, Ordering::Release);
+        power::write(power::INTENSET, power::USB_INTS);
+        // Unmask the vector now, at an application priority; MPSL re-sets the
+        // priority to its own when it initialises. Without this the regulator
+        // transition that `usb.run()` waits for is latched but never
+        // delivered, and the board never enumerates -- which the first build
+        // of this function established.
+        interrupt::CLOCK_POWER.set_priority(APP_PRIORITY);
+        interrupt::CLOCK_POWER.unpend();
+        unsafe { interrupt::CLOCK_POWER.enable() };
+        defmt::info!(
+            "vbus: inherited interrupt enables {=u32:#010x}, now {=u32:#05x}; detected={=bool} ready={=bool}",
+            inherited,
+            power::USB_INTS,
+            detected,
+            ready
+        );
+        Self { detect, inherited }
+    }
+
+    /// What was in the shared interrupt-enable word when this image took it
+    /// over: the bootloader's leavings.
+    pub fn inherited(&self) -> u32 {
+        self.inherited
     }
 
     /// The handle to give to `embassy_nrf::usb::Driver::new`.
@@ -292,40 +318,43 @@ impl Vbus {
         self.detect
     }
 
-    /// Watch the register forever. Join this with the rest of the image.
-    pub async fn run(&self) -> ! {
-        loop {
-            Timer::after(Self::INTERVAL).await;
-            let (detected, ready) = Self::read();
-
-            if detected != self.reported_detected.swap(detected, Ordering::Relaxed) {
-                // `detected` also clears the ready flag inside
-                // `SoftwareVbusDetect`, which is why the mirror below is
-                // cleared too rather than left claiming the rail is up.
-                self.detect.detected(detected);
-                self.reported_ready.store(false, Ordering::Relaxed);
-                defmt::info!("vbus: {=bool}", detected);
-            }
-            if ready && !self.reported_ready.swap(true, Ordering::Relaxed) {
-                self.detect.ready();
-            }
-        }
-    }
-
-    /// Whether the VBUS comparator currently sees a cable.
+    /// The `POWER` half of the shared handler. Cheap when nothing is set,
+    /// which is every call MPSL's clock work causes.
     ///
-    /// Exposed so an image can say so without USB — see the blink rate in
-    /// `src/bin/ble.rs`. If this ever reads `false` on a board that is being
-    /// powered through its USB socket, then it is this that is wrong and not
-    /// anything above it.
-    pub fn present() -> bool {
-        Self::read().0
+    /// # Safety
+    /// Interrupt context only.
+    pub unsafe fn on_interrupt() {
+        let detect = DETECT.load(Ordering::Acquire);
+        let fire = |offset: usize, f: &dyn Fn(&SoftwareVbusDetect)| {
+            if power::read(offset) != 0 {
+                power::write(offset, 0);
+                if !detect.is_null() {
+                    // SAFETY: points at a `StaticCell` that lives forever.
+                    f(unsafe { &*detect });
+                }
+            }
+        };
+        fire(power::EVENTS_USBDETECTED, &|d| d.detected(true));
+        fire(power::EVENTS_USBREMOVED, &|d| d.detected(false));
+        fire(power::EVENTS_USBPWRRDY, &|d| d.ready());
     }
+}
 
-    /// `(VBUS present, regulator output ready)`.
-    fn read() -> (bool, bool) {
-        let status = embassy_nrf::pac::POWER.usbregstatus().read();
-        (status.vbusdetect(), status.outputrdy())
+/// The one handler for the one vector: `POWER` first, then MPSL's `CLOCK`.
+///
+/// Bind this to `CLOCK_POWER`, and also declare — by hand, since
+/// `bind_interrupts!` will not — that the image binds
+/// `mpsl::ClockInterruptHandler` there. That is the marker trait MPSL's
+/// constructor asks for, and this handler calls exactly what it promises.
+pub struct PowerAndClockHandler;
+
+impl interrupt::typelevel::Handler<interrupt::typelevel::CLOCK_POWER> for PowerAndClockHandler {
+    unsafe fn on_interrupt() {
+        stall::CLOCK_IRQS.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            Vbus::on_interrupt();
+            mpsl::raw::MPSL_IRQ_CLOCK_Handler();
+        }
     }
 }
 
@@ -549,4 +578,245 @@ pub mod fault {
             _ => defmt::warn!("fault: unrecognised code {=u8:#04x}", code),
         }
     }
+}
+
+/// Where the controller's initialiser stops, when it stops.
+///
+/// The one fact the phase 8 investigation never had was *where* `mpsl_init`
+/// spins. Everything else about the hang — that it is not a fault, not an
+/// assertion, not the executor, not the clock — was established by exclusion.
+/// This module gets the address.
+///
+/// # How
+///
+/// `TIMER1` is armed before the call, at a priority above everything of ours
+/// and below the link layer's, and disarmed after it. If the call returns in
+/// time nothing happens. If it does not, the timer's handler runs in the
+/// middle of whatever `mpsl_init` is doing, reads the program counter that
+/// was interrupted out of the exception frame, writes it somewhere a reset
+/// does not clear, and resets into the application — which reads it back and
+/// says so.
+///
+/// The handler is written in assembly rather than Rust because the exception
+/// frame sits at the stack pointer *at entry*, and a compiled function's
+/// prologue moves the stack pointer before any Rust code can read it. Two
+/// instructions are enough: which stack was in use (bit 2 of `EXC_RETURN`),
+/// then a branch into Rust with the frame's address as the first argument.
+///
+/// # What it costs to be wrong
+///
+/// If the spin holds interrupts disabled, the timer never fires and the board
+/// hangs exactly as before, telling you that much. If MPSL later claims
+/// `TIMER1` for something, this has to move. It does not: the controller takes
+/// `TIMER0`, and `embassy-time` here is on `RTC1`.
+pub mod stall {
+    use core::mem::MaybeUninit;
+
+    use embassy_nrf::interrupt::{self, InterruptExt, Priority};
+    use embassy_nrf::pac;
+
+    /// Kept in RAM the linker does not zero and reset does not clear.
+    ///
+    /// The MBR and the dormant SoftDevice use the bottom of RAM when they run
+    /// at all, and a reset that goes straight to the application gives them
+    /// no reason to. This sits above 20 KB of `.data` and `.bss`.
+    #[link_section = ".uninit.OXINODE_STALL"]
+    static mut RECORD: MaybeUninit<Record> = MaybeUninit::uninit();
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Record {
+        magic: u32,
+        pc: u32,
+        lr: u32,
+        xpsr: u32,
+        /// Times the `CLOCK_POWER` handler ran between arming and capture.
+        clock_irqs: u32,
+        /// The shared `POWER`/`CLOCK` interrupt enable word, read back
+        /// through `INTENSET`.
+        inten: u32,
+        /// `EVENTS_*` at `0x100 + 4n`, for `n` in `0..10`: HFCLKSTARTED,
+        /// LFCLKSTARTED, POFWARN, DONE, CTTO, SLEEPENTER, SLEEPEXIT,
+        /// USBDETECTED, USBREMOVED, USBPWRRDY.
+        events: [u32; 10],
+        /// NVIC priority of `CLOCK_POWER` at the moment of capture.
+        clock_prio: u32,
+    }
+
+    /// Bumped by the `CLOCK_POWER` handler in the bring-up image, so the
+    /// record can say how many times it ran. A stalled board whose clock
+    /// handler ran ten thousand times in two seconds is not stalled; it is
+    /// being interrupted to death.
+    pub static CLOCK_IRQS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+    /// `POWER` and `CLOCK` share one base address and one interrupt enable
+    /// register, with disjoint bits. Read raw, because the question is
+    /// "what is in the register", not "what does the driver think".
+    const POWER_CLOCK: usize = 0x4000_0000;
+    fn reg(offset: usize) -> u32 {
+        // SAFETY: a read of a memory-mapped register inside the POWER/CLOCK
+        // block, which exists on every nRF52840.
+        unsafe { core::ptr::read_volatile((POWER_CLOCK + offset) as *const u32) }
+    }
+
+    /// Anything else in uninitialised RAM is noise, and noise does not spell
+    /// this.
+    const MAGIC: u32 = 0x5354_414C; // "STAL"
+
+    /// What the previous run recorded, if anything.
+    #[derive(Clone, Copy, defmt::Format)]
+    pub struct Stall {
+        /// The address that was executing when the timer fired.
+        pub pc: u32,
+        /// The return address at that moment, which names the caller when
+        /// `pc` is inside a helper.
+        pub lr: u32,
+        /// The program status, whose low nine bits say which exception was
+        /// active — zero means thread mode, which is where a spin is expected
+        /// to be.
+        pub xpsr: u32,
+        /// See [`CLOCK_IRQS`].
+        pub clock_irqs: u32,
+        /// See [`Record::inten`].
+        pub inten: u32,
+        /// See [`Record::events`].
+        pub events: [u32; 10],
+        /// See [`Record::clock_prio`].
+        pub clock_prio: u32,
+    }
+
+    /// Arm the timer: `millis` from now, the address is taken.
+    ///
+    /// 1 MHz from the 16 MHz timer clock, 32-bit, so the count is in
+    /// microseconds and cannot wrap for over an hour.
+    pub fn arm(millis: u32) {
+        let t = pac::TIMER1;
+        t.tasks_stop().write_value(1);
+        t.tasks_clear().write_value(1);
+        t.mode()
+            .write(|w| w.set_mode(pac::timer::vals::Mode::Timer));
+        t.bitmode()
+            .write(|w| w.set_bitmode(pac::timer::vals::Bitmode::_32bit));
+        t.prescaler().write(|w| w.set_prescaler(4));
+        t.cc(0).write_value(millis.saturating_mul(1_000));
+        t.events_compare(0).write_value(0);
+        t.intenset().write(|w| w.set_compare(0, true));
+        // Above every application interrupt, so a USB transfer in progress
+        // cannot delay it; below the link layer's own, so it cannot corrupt
+        // the thing it is observing.
+        interrupt::TIMER1.set_priority(Priority::P1);
+        interrupt::TIMER1.unpend();
+        unsafe { interrupt::TIMER1.enable() };
+        CLOCK_IRQS.store(0, core::sync::atomic::Ordering::Relaxed);
+        t.tasks_start().write_value(1);
+    }
+
+    /// The call returned: stand down.
+    pub fn disarm() {
+        let t = pac::TIMER1;
+        t.tasks_stop().write_value(1);
+        t.intenclr().write(|w| w.set_compare(0, true));
+        interrupt::TIMER1.disable();
+        t.events_compare(0).write_value(0);
+    }
+
+    /// Read and clear whatever the previous run left.
+    pub fn take() -> Option<Stall> {
+        // SAFETY: single-threaded, at boot, before anything else touches it.
+        let record = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(RECORD)) };
+        let record = unsafe { record.assume_init() };
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(RECORD),
+                MaybeUninit::new(Record { magic: 0, ..record }),
+            );
+        }
+        (record.magic == MAGIC).then_some(Stall {
+            pc: record.pc,
+            lr: record.lr,
+            xpsr: record.xpsr,
+            clock_irqs: record.clock_irqs,
+            inten: record.inten,
+            events: record.events,
+            clock_prio: record.clock_prio,
+        })
+    }
+
+    /// Say what was found, in a form that can be looked up in a disassembly.
+    pub fn report(stall: Option<Stall>) {
+        match stall {
+            None => defmt::info!("stall: nothing recorded by the previous run"),
+            Some(s) => {
+                defmt::error!(
+                    "stall: the previous bring-up was still at pc={=u32:#010x} lr={=u32:#010x} xpsr={=u32:#010x} when the timer fired",
+                    s.pc,
+                    s.lr,
+                    s.xpsr
+                );
+                defmt::error!(
+                    "stall: CLOCK_POWER ran {=u32} times, prio {=u32}, inten={=u32:#010x}",
+                    s.clock_irqs,
+                    s.clock_prio,
+                    s.inten
+                );
+                defmt::error!(
+                    "stall: events hfclk={=u32} lfclk={=u32} pofwarn={=u32} done={=u32} ctto={=u32} sleepin={=u32} sleepout={=u32} usbdet={=u32} usbrem={=u32} usbrdy={=u32}",
+                    s.events[0], s.events[1], s.events[2], s.events[3], s.events[4],
+                    s.events[5], s.events[6], s.events[7], s.events[8], s.events[9]
+                );
+            }
+        }
+    }
+
+    /// The Rust half of the handler. `frame` is the exception frame:
+    /// `r0 r1 r2 r3 r12 lr pc xpsr`, in that order.
+    #[no_mangle]
+    extern "C" fn oxinode_stall_capture(frame: *const u32) -> ! {
+        // SAFETY: the frame was pushed by the hardware on exception entry and
+        // is eight words long; only the last three are read.
+        let (lr, pc, xpsr) = unsafe {
+            (
+                core::ptr::read_volatile(frame.add(5)),
+                core::ptr::read_volatile(frame.add(6)),
+                core::ptr::read_volatile(frame.add(7)),
+            )
+        };
+        let mut events = [0u32; 10];
+        for (n, slot) in events.iter_mut().enumerate() {
+            *slot = reg(0x100 + 4 * n);
+        }
+        let record = Record {
+            magic: MAGIC,
+            pc,
+            lr,
+            xpsr,
+            clock_irqs: CLOCK_IRQS.load(core::sync::atomic::Ordering::Relaxed),
+            // INTENSET reads back the enabled mask; this block has no INTEN.
+            inten: reg(0x304),
+            events,
+            clock_prio: cortex_m::peripheral::NVIC::get_priority(interrupt::CLOCK_POWER) as u32,
+        };
+        unsafe {
+            core::ptr::write_volatile(core::ptr::addr_of_mut!(RECORD), MaybeUninit::new(record));
+        }
+        // Into the application, not the bootloader: RAM survives this and the
+        // bootloader is what would overwrite it.
+        crate::boot::reboot()
+    }
+
+    // The vector-table entry for TIMER1. `device.x` provides it as a weak
+    // alias of `DefaultHandler`; a strong definition here replaces it.
+    core::arch::global_asm!(
+        ".section .text.oxinode_stall_timer1, \"ax\", %progbits",
+        ".global TIMER1",
+        ".type TIMER1, %function",
+        ".thumb_func",
+        "TIMER1:",
+        // Bit 2 of EXC_RETURN says which stack the frame was pushed on.
+        "    tst lr, #4",
+        "    ite eq",
+        "    mrseq r0, msp",
+        "    mrsne r0, psp",
+        "    b oxinode_stall_capture",
+    );
 }

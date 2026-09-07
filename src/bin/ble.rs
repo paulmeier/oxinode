@@ -54,9 +54,8 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::{join, join5};
+use embassy_futures::join::{join, join4};
 use embassy_futures::select::{select, Either};
-use embassy_nrf::interrupt::InterruptExt;
 use embassy_nrf::mode::Blocking;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::usb::{self, Driver};
@@ -85,9 +84,19 @@ bind_interrupts!(struct Irqs {
     RTC0 => mpsl::HighPrioInterruptHandler;
     EGU0_SWI0 => mpsl::LowPrioInterruptHandler;
     // Not `usb::vbus_detect::InterruptHandler`, which is what every other
-    // image binds here. See `oxinode::ble::Vbus` for why it cannot be.
-    CLOCK_POWER => mpsl::ClockInterruptHandler;
+    // image binds here, and not MPSL's handler alone, which is what the first
+    // version of this image bound and what stormed. See `oxinode::ble::Vbus`.
+    CLOCK_POWER => ble::PowerAndClockHandler;
 });
+
+// `MultiprotocolServiceLayer::new` asks for a binding to *its* handler type,
+// and `PowerAndClockHandler` calls exactly that handler, so the promise the
+// marker trait makes is kept.
+unsafe impl
+    interrupt::typelevel::Binding<interrupt::typelevel::CLOCK_POWER, mpsl::ClockInterruptHandler>
+    for Irqs
+{
+}
 
 /// Same prototyping VID as the other images, with its own PID.
 const USB_VID: u16 = 0x1209;
@@ -123,6 +132,13 @@ unsafe fn DefaultHandler(irqn: i16) {
     ble::fault::record_and_reboot(code)
 }
 
+/// How long the controller gets to start before its address is taken.
+///
+/// A successful bring-up is over in milliseconds, and the longest thing it
+/// could legitimately wait for is a crystal, at a quarter of a second. Two
+/// seconds is an order of magnitude past that.
+const STALL_AFTER_MS: u32 = 2_000;
+
 /// Set when a byte arrives on the log port, which is how the Bluetooth
 /// bring-up is started.
 ///
@@ -139,7 +155,7 @@ unsafe fn DefaultHandler(irqn: i16) {
 /// ordinary USB device that takes a touch and a new image.
 /// `CriticalSectionRawMutex` rather than `NoopRawMutex` only because a
 /// `static` has to be `Sync`; both halves run on the one executor.
-static START: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static START: Signal<CriticalSectionRawMutex, u8> = Signal::new();
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -147,14 +163,13 @@ async fn main(_spawner: Spawner) {
     // Read and clear before anything else can fault, so this is the *previous*
     // run's verdict rather than this one's.
     let last_fault = ble::fault::take();
+    let last_stall = ble::stall::take();
     let p = embassy_nrf::init(ble::embassy_config());
 
     // Before the USB driver is built, because its constructor enables the
     // interrupt and lowering the priority afterwards leaves a window where a
     // transfer can delay the radio.
     ble::yield_to_mpsl(&[interrupt::USBD]);
-    // Before anything the controller does. See the function.
-    ble::set_sevonpend();
 
     // Before USB, before anything waits on a timer: if this says the clock is
     // dead then every stall after it is explained, and none of them are
@@ -162,6 +177,7 @@ async fn main(_spawner: Spawner) {
     ble::report_clock();
     ble::report_lfclk();
     ble::fault::report(last_fault);
+    ble::stall::report(last_stall);
 
     // The blue LED is this image's last channel: everything else -- the log,
     // the bootloader touch, the blink -- needs the executor, and a spin inside
@@ -230,6 +246,7 @@ async fn main(_spawner: Spawner) {
     // A shared reference is `Copy`, so the `async move` below takes a copy of
     // this one and `idle` can still borrow the same thing.
     let control = &log_control;
+    let vbus = &vbus;
 
     // # Why the bring-up waits for a keystroke
     //
@@ -252,28 +269,42 @@ async fn main(_spawner: Spawner) {
         if last_fault == ble::fault::BRINGUP_CRYSTAL || last_fault == ble::fault::BRINGUP_RC {
             defmt::warn!("ble: the previous attempt hung; press a key to try again anyway");
         }
-        defmt::info!("ble: send any byte on this port to bring the controller up");
-        START.wait().await;
+        defmt::info!(
+            "ble: send a byte to bring the controller up: 'i' for the internal RC, anything else for the crystal; 'Q' reboots"
+        );
+        let key = START.wait().await;
 
-        // # Why the internal RC and not the crystal
-        //
-        // Both have been seen to hang and both have been seen to work, which
-        // is the single most useful thing established about this failure: it
-        // is a race, not a configuration error. `InternalRc` is the one that
-        // has been seen to get all the way to advertising, so it is what this
-        // tries. See `docs/phase-8-bluetooth.md`.
-        //
-        // It would be the wrong choice if it worked: the RC oscillator is
-        // specified at 250 ppm against the crystal's 20, and BLE spends that
-        // drift on wider receive windows, which costs current at both ends of
-        // every connection. It is somewhere to stand, not somewhere to ship.
-        let source = ble::LfSource::InternalRc;
+        // Said again here, because the boot-time copy goes out before any
+        // terminal can be open to read it, and this is the first moment one
+        // is certain to be. A short pause lets the pump deliver it before the
+        // bring-up below can stop the world.
+        ble::fault::report(last_fault);
+        ble::stall::report(last_stall);
+        defmt::info!(
+            "vbus: the bootloader left interrupt enables {=u32:#010x}",
+            vbus.inherited()
+        );
+        Timer::after(Duration::from_millis(200)).await;
+
+        // The crystal is the board's clock and the default. The RC oscillator
+        // stays selectable because it was the control that showed the failure
+        // was a race and not a configuration -- see docs/phase-8-bluetooth.md
+        // -- and a control is worth keeping.
+        let source = if key == b'i' {
+            ble::LfSource::InternalRc
+        } else {
+            ble::LfSource::Crystal
+        };
         ble::fault::mark(match source {
             ble::LfSource::Crystal => ble::fault::BRINGUP_CRYSTAL,
             ble::LfSource::InternalRc => ble::fault::BRINGUP_RC,
         });
         stage_led.on();
+        // If the bring-up is still inside `mpsl_init` when this fires, the
+        // address it is at comes back on the next boot. See `ble::stall`.
+        ble::stall::arm(STALL_AFTER_MS);
         let built = bring_up(mpsl_p, sdc_p, rng, source);
+        ble::stall::disarm();
         stage_led.off();
         ble::fault::mark(ble::fault::NONE);
 
@@ -283,10 +314,9 @@ async fn main(_spawner: Spawner) {
         join(mpsl.run(), run(controller, device_id)).await;
     };
 
-    join5(
+    join4(
         usb.run(),
         pump,
-        vbus.run(),
         // The 1200-baud touch and the blink share this image's one port, so
         // they are joined with the Bluetooth work rather than raced against
         // it: a board that cannot be reflashed from the keyboard is a board
@@ -311,12 +341,6 @@ fn bring_up(
     &'static MultiprotocolServiceLayer<'static>,
     sdc::SoftdeviceController<'static>,
 )> {
-    // MPSL drives its deferred work from this interrupt. It enables it itself
-    // at the end of `mpsl_init`, which is too late to be of use to anything
-    // `mpsl_init` waits for -- so it is enabled first. The handler is bound and
-    // harmless before init, since all it does is wake a waker.
-    unsafe { interrupt::EGU0_SWI0.enable() };
-
     defmt::info!("mpsl: init on {}", source);
     static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
     let mpsl = match MultiprotocolServiceLayer::new(mpsl_p, Irqs, ble::lfclk_config(source)) {
@@ -485,6 +509,13 @@ async fn run(controller: sdc::SoftdeviceController<'static>, device_id: u64) {
     }
 }
 
+/// Whether the VBUS comparator currently sees a cable, straight from the
+/// register — the LED's one bit must not depend on anything that could be
+/// what is broken.
+fn vbus_present() -> bool {
+    embassy_nrf::pac::POWER.usbregstatus().read().vbusdetect()
+}
+
 /// Blink, and watch for the 1200-baud touch.
 ///
 /// This image has one serial port and it is this one, so the touch has to be
@@ -505,7 +536,7 @@ async fn idle<'d, D: UsbDriverTrait<'d>>(
         // enumerates, and then the LED is the only channel left. Slow is
         // normal. Fast means the register says there is no cable, on a board
         // that is being powered through one.
-        let period = if Vbus::present() { 25 } else { 5 };
+        let period = if vbus_present() { 25 } else { 5 };
         if ticks % period == 0 {
             led.toggle();
         }
@@ -531,7 +562,15 @@ async fn idle<'d, D: UsbDriverTrait<'d>>(
         )
         .await
         {
-            Either::First(Some(n)) if n > 0 => START.signal(()),
+            // Handled here rather than where `START` is consumed, because
+            // that future moves on once the stack is up and would never see
+            // it: a reboot has to be reachable from any state.
+            Either::First(Some(n)) if n > 0 && buf[0] == b'Q' => {
+                defmt::info!("ble: rebooting");
+                Timer::after(Duration::from_millis(100)).await;
+                boot::reboot();
+            }
+            Either::First(Some(n)) if n > 0 => START.signal(buf[0]),
             Either::First(_) => {}
             Either::Second(()) => {}
         }

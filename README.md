@@ -23,7 +23,7 @@ Being precise about that:
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
-| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **in progress** — the stack runs and advertises, but not reliably, [notes](docs/phase-8-bluetooth.md) |
+| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **in progress** — the stack comes up and advertises, 20 of 20; no service yet, [notes](docs/phase-8-bluetooth.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -47,14 +47,16 @@ Phase 7 gave it a screen: a 128 × 128 OLED showing what the modem is doing, and
 the RNode display protocol so a host can push pictures to it. See
 [docs/phase-7-display.md](docs/phase-7-display.md).
 
-Phase 8 has a Bluetooth stack that builds, links, and has been seen to
-advertise as `RNode 7F23` — and that does not start reliably. `mpsl_init`
-sometimes never returns, on the same image and the same board that worked a
-moment earlier. What has been ruled out, and how, is in
-[docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md); it is a longer list
-than the bug deserves and most of it is reusable.
+Phase 8 has a Bluetooth stack that comes up and advertises as `RNode 7F23`
+on every boot — twenty of twenty — with nothing yet behind the advertisement.
+Getting there took a captured program counter: the bootloader hands over
+from DFU with USB power interrupts still enabled, and MPSL's clock handler,
+sharing that vector, never clears them. See
+[docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md) for the bug and for
+the longer list of things it was not.
 
-Phases 1 to 7 are confirmed on hardware. Phase 8 is not.
+Phases 1 to 7 are confirmed on hardware; phase 8's controller is, and the
+rest of it is not started.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -371,10 +373,11 @@ using anyway.
 * **`nrf-mpsl` claims `RTC0`, `TIMER0`, several PPI channels, and the highest
   interrupt priorities.** `embassy-time` here runs on `RTC1`, so that part is
   already clear.
-* **`CLOCK_POWER` is contested.** `src/bin/usb_cdc.rs` binds that interrupt to
-  `HardwareVbusDetect`, and MPSL needs it too. An image serving both USB and BLE
-  has to switch to `SoftwareVbusDetect`, fed from MPSL's own power events. A
-  known pattern, but a real change to code that by then will be working.
+* **`CLOCK_POWER` is shared.** `POWER` and `CLOCK` have one vector and one
+  interrupt-enable word between them, and MPSL's clock handler knows nothing
+  about `POWER`. An image serving both USB and BLE binds one handler that does
+  both jobs, and clears what the bootloader left enabled before MPSL unmasks
+  the vector. Done, and it cost a week: see the phase 8 notes.
 * **Pairing is not optional.** The stock firmware requires LE Secure
   Connections with MITM protection, generates a six-digit passkey, and
   explicitly refuses "Just Works". That passkey needs a display, which is why

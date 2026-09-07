@@ -1,12 +1,15 @@
 # Phase 8: Bluetooth LE
 
-Where phase 8 stands: **the stack builds, links, and has been seen to run all
-the way to advertising as `RNode 7F23` — and it does not do so reliably.**
-`mpsl_init` sometimes does not return. The same image, the same configuration,
-the same board: it comes up one time and hangs the next.
+Where phase 8 stands: **the stack builds, links, and comes up every time** —
+twenty fresh boots out of twenty reached `ble: advertising` as `RNode 7F23`,
+sixteen on the crystal and four on the internal RC oscillator as a control.
 
-That is written first because it is the honest summary. What follows is what
-was established, what was ruled out and how, and what is left.
+It did not start out that way. The first working image hung on every boot
+that followed a flash and came up on every boot that followed the reset
+button, and for a long stretch that looked like a race. The bug, the tool that
+found it, and the list of things that were ruled out along the way are all
+below, because the ruling-out is most of what a next problem of this kind
+will reuse.
 
 ## What works
 
@@ -16,10 +19,8 @@ was established, what was ruled out and how, and what is left.
   single biggest risk going in.
 * **Coexistence with USB.** The board enumerates, logs, and takes the
   1200-baud touch with MPSL's critical section, MPSL's interrupt priorities,
-  and `CLOCK_POWER` bound to MPSL rather than to `HardwareVbusDetect`. See
-  `oxinode::ble::Vbus` for how VBUS is detected without that interrupt.
-* **Everything above the controller.** When `mpsl_init` does return, the rest
-  follows without complaint:
+  and the shared `CLOCK_POWER` vector serving both. See `oxinode::ble::Vbus`.
+* **Everything above the controller:**
 
   ```text
   ble: address [fd, 1d, 3b, 15, 24, d2] (reversed on the wire), name RNode 7F23
@@ -35,59 +36,84 @@ was established, what was ruled out and how, and what is left.
   address, the name carries the `RNode ` prefix Reticulum scans for, and the
   controller accepted every advertising command it was given.
 
-## The failure
+## The failure, and what it was
 
-`MultiprotocolServiceLayer::new` — that is, Nordic's `mpsl_init` — enters and
-does not leave.
+`MultiprotocolServiceLayer::new` — Nordic's `mpsl_init` — entered and did not
+leave. The board still enumerated over USB and still answered control
+transfers, and did nothing else at all.
 
-It is **not** any of the following, and each was excluded by evidence rather
-than by argument:
+### What it was not
+
+Each of these was excluded by evidence rather than by argument, and the way
+each was excluded is reusable:
 
 | Ruled out | How |
 |---|---|
-| A crash | A `HardFault` handler and a `DefaultHandler` were added that record the cause in `GPREGRET2` and reboot into the bootloader. The board never lands in DFU. |
-| MPSL's own assertion | Its assert path with no handler registered ends in `AIRCR = SYSRESETREQ` — it resets the chip. The board does not reset. With a handler registered it panics, and this firmware's panic handler also reboots into the bootloader. |
-| The executor, or `embassy-time` | `Instant::now()` twice around a cycle-counted busy wait shows the RTC advancing correctly, and the image's own heartbeat arrives every 1.0025 s until the bring-up is asked for. |
-| A stopped or missing low-frequency clock | `LFCLKSTAT` reads running, source = crystal, and `EVENTS_LFCLKSTARTED` set, immediately before the call. |
-| `skip_wait_lfclk_started` | All three settings — false, true, and false after handing the clock back stopped — reach the same point. Disassembly explains why: on an already-running clock with a matching source, the wait finds its condition already true. |
-| The order of bring-up against USB | Every published example starts MPSL before anything else is running. Doing it that way here hangs identically, before enumeration instead of after. |
+| A crash | A `HardFault` handler and a `DefaultHandler` record the cause in `GPREGRET2` and reboot into the bootloader. The board never landed in DFU. |
+| MPSL's own assertion | Its assert path with no handler registered ends in `AIRCR = SYSRESETREQ` — it resets the chip. With a handler registered it panics, and this firmware's panic handler also reboots into the bootloader. Neither happened. |
+| The executor, or `embassy-time` | `Instant::now()` twice around a cycle-counted busy wait shows the RTC advancing; the image's heartbeat arrives every 1.0025 s until the bring-up is asked for. |
+| A stopped or missing low-frequency clock | `LFCLKSTAT` reads running, source = crystal, `EVENTS_LFCLKSTARTED` set, immediately before the call. |
+| `skip_wait_lfclk_started` | All three settings reach the same point. Disassembly explains why: on an already-running clock with a matching source, the wait finds its condition already true. |
+| The oscillator | The internal RC hung and worked in exactly the same pattern as the crystal. |
+| The order of bring-up against USB | Starting MPSL before anything else runs, as every example does, hung identically. |
+| `SEVONPEND` | MPSL's wait helper on this part is a bare `WFE`, and `embassy-executor` does not set `SEVONPEND` where Zephyr does. Setting it changed nothing; it has been removed. |
 | An unhandled interrupt MPSL enabled | Covered by the `DefaultHandler` above. |
 
-Two things are known that a next attempt should start from.
+### What it was
 
-**It is a race.** The internal RC oscillator was seen to bring the whole stack
-up, and then hung on the very next boot with nothing changed. That single
-observation is worth more than everything above: it rules out every static
-explanation — wrong constant, wrong peripheral, wrong build — and points at
-timing or at something that depends on what else is happening.
+**An interrupt storm on `CLOCK_POWER`, at the lowest priority there is.**
 
-**MPSL waits with a bare `WFE`.** Disassembling its wait helper out of the
-linked image shows, on this part, no `SEV` before it and no `SEVONPEND`
-management around it. A bare `WFE` only wakes for an interrupt the NVIC will
-actually take, and `mpsl_init` disables its own while it runs. In Nordic's own
-environment `SEVONPEND` is set globally, so a *pending* interrupt is enough;
-`embassy-executor` has no reason to set it and does not, because its own `WFE`
-is woken by the `SEV` its pender issues.
+`POWER` and `CLOCK` share one vector and one interrupt-enable word. When the
+bootloader starts the application from DFU — every boot after a flash — its
+own USB stack has run, and it hands over with `USBDETECTED`, `USBREMOVED` and
+`USBPWRRDY` still enabled: `0x380`, read back at boot. After a press of the
+reset button the same word reads `0`. `USBPWRRDY` is latched from the moment
+the regulator comes up.
 
-That would explain the race exactly — the bring-up escapes when some unrelated
-enabled interrupt happens to fire, and sleeps forever when the port is quiet.
-`ble::set_sevonpend` sets it before the call. **It did not fix the hang.** It
-may still be necessary; it is not sufficient, and the reasoning behind it is
-the best lead there is.
+Phases 1 to 7 never noticed, because `HardwareVbusDetect` clears those events.
+The Bluetooth image bound the vector to MPSL's clock handler alone, which
+knows nothing about `POWER`, and the instant `mpsl_init` unmasked the vector
+the line was high with nothing to lower it. MPSL puts that interrupt at
+priority 7, so USB at priority 2 kept answering the host while everything in
+thread mode — the log, the touch, the executor — stopped for good.
 
-## What to try next
+The "race" was the boot path. Every hang followed a flash; every success
+followed the reset button; and the investigation alternated between them
+without knowing it mattered.
 
-* Capture the program counter. Arm an unused timer at high priority before the
-  call, read the stacked `PC` out of the exception frame in its handler, and
-  record it across a reset. The wait loops are already located in the
-  disassembly; the address would say which one, and that is the one fact this
-  investigation never got.
-* Compare against a bare-metal build of the same crate versions with no
-  SoftDevice and no bootloader in flash, linked at zero. This board boots at
-  `0x26000` behind an MBR and a dormant S140, which is the one part of the
-  environment that no example shares.
-* Ask upstream. `nrf-sdc` is actively maintained and the bare `WFE` is a real
-  observation about the shipped binary, whether or not it is the cause here.
+### How it was found
+
+By capturing the program counter. `TIMER1` is armed before the call and
+disarmed after it; if it fires, its handler — two instructions of assembly,
+because the exception frame sits at the stack pointer *at entry* and a
+compiled prologue moves it — reads the interrupted `PC`, `LR` and `xPSR` out
+of the frame, snapshots the shared enable word and every `POWER`/`CLOCK`
+event, writes them to RAM the linker does not zero, and resets into the
+application, which reports them on the next keystroke. See
+`oxinode::ble::stall`.
+
+The first sample put the `PC` inside `MPSL_IRQ_CLOCK_Handler` with `xPSR`
+saying exception 16 was active — not a spin in thread mode at all. The second
+added a count: the handler had run **841,653 times** in two seconds, with
+`INTENSET = 0x380` and `USBPWRRDY` set.
+
+### The fix
+
+One handler for the one vector: `oxinode::ble::PowerAndClockHandler`
+services `POWER` — clears the USB events and folds them into a
+`SoftwareVbusDetect`, which is what `embassy-usb` was designed to be fed by
+exactly this — and then hands `CLOCK` to MPSL. `Vbus::take` clears the whole
+inherited enable word before the vector is ever unmasked, and enables only
+the three USB bits it will service.
+
+That also retires the polling VBUS detector that stood in for this while the
+conflict was misunderstood: it was a workaround for what turned out to be a
+shared line, not a shared owner. And it corrects an earlier claim in this
+file and in the README that the interrupt-driven repair "does not exist".
+
+Two hedges added during the hunt — setting `SEVONPEND`, and enabling MPSL's
+low-priority interrupt by hand — were each removed and re-tested. Six of six
+without them.
 
 ## Design notes worth keeping
 
@@ -154,17 +180,25 @@ images keep the cheap one, `src/lib.rs` refuses a build that enables both, and
   handler — it *delays* it, which is worse. `embassy-nrf` sets a priority for
   exactly two things, GPIOTE and the time driver, both from its `Config`; every
   other bound interrupt keeps whatever the NVIC had.
-* **`CLOCK_POWER`**: `POWER` and `CLOCK` share one interrupt on this part.
-  `embassy-usb` normally binds it through `HardwareVbusDetect`; MPSL needs it
-  for the clock. Only one handler can be bound to a vector, and the repair —
-  `SoftwareVbusDetect` fed from MPSL's power events — does not exist, because
-  MPSL's clock handler services `CLOCK` and the USB events belong to `POWER`.
-  Enabling them in `INTENSET` would deliver them to MPSL's handler, which would
-  not clear them: an interrupt that re-fires forever at priority zero. So
-  `oxinode::ble::Vbus` reads `USBREGSTATUS` on a 20 ms poll instead. It is one
-  load, and it works.
+* **`CLOCK_POWER`**: `POWER` and `CLOCK` share one interrupt on this part,
+  and one interrupt-enable register with disjoint bits. Only one handler can
+  be bound to the vector, so it is one that does both jobs — see above.
 
-### What is still owed, beyond the hang
+### Debugging tools that stay in the image
+
+`src/bin/ble.rs` keeps four things that were built for this hunt and are
+worth keeping for the next one:
+
+* **A keystroke gate.** The bring-up is never attempted on its own. A board
+  that comes up is always an enumerated, reflashable board.
+* **A breadcrumb** in `GPREGRET2`, written before the bring-up and cleared
+  after, so the next boot can say the last one did not come back.
+* **Fault and unhandled-interrupt handlers** that record and reboot into the
+  bootloader, so a crash is visible from the host and looks different from a
+  stall.
+* **The stall capture** described above, armed around every bring-up.
+
+### What is still owed
 
 * **`NVMC` stalls the CPU.** A flash page erase takes about 85 ms during which
   the core does not execute, and MPSL cannot hold a connection through that.
