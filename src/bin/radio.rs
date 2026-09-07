@@ -681,7 +681,12 @@ where
                     }
                 }
             }
-            Either3::First(Err(_)) => {} // host went away; wait for the next one
+            // The host went away. Waiting here rather than falling through:
+            // `read_packet` on a disabled endpoint returns immediately and
+            // forever, so looping straight back would spin without ever
+            // yielding and starve the USB task that would bring the endpoint
+            // back. See `usb_log::read_for`.
+            Either3::First(Err(_)) => Timer::after(Duration::from_millis(200)).await,
             Either3::Second(()) => {}
             Either3::Third(()) => {
                 // Roughly every five seconds, and only when nothing is keyed --

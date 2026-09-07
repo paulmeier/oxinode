@@ -4,6 +4,7 @@
 //! way anything says anything. See `src/logger.rs` for the buffer it drains.
 
 use crate::logger;
+use embassy_futures::select::{select, Either};
 use embassy_time::{with_timeout, Duration, Timer};
 use embassy_usb::class::cdc_acm::{ControlChanged, Receiver, Sender};
 use embassy_usb::driver::Driver;
@@ -81,6 +82,41 @@ pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() ->
                 }
             }
         }
+    }
+}
+
+/// Wait up to `period` for a packet from the host — and always wait.
+///
+/// # Why this is not just `select(rx.read_packet(..), Timer::after(..))`
+///
+/// `read_packet` on a **disabled** endpoint does not pend: it returns an error
+/// immediately, and goes on returning one for as long as the endpoint stays
+/// disabled. That is the state before the host has enumerated the device, and
+/// again after it suspends or the cable comes out.
+///
+/// A loop that races that against a timer therefore stops awaiting anything at
+/// all. `select` hands back the ready error, the loop goes round, and the
+/// executor never gets another chance to poll `usb.run()` — which is the task
+/// that would have enabled the endpoint. The board becomes a device that will
+/// not enumerate, with no log and no bootloader, and nothing anywhere says
+/// why. That is exactly what the first two phase 8 images did, and it cost two
+/// walks to the reset button to work out that the Bluetooth stack was not
+/// involved at all.
+///
+/// So a disabled endpoint is treated as "nothing to read for a while" rather
+/// than as an event: `None` comes back, after `period` has actually elapsed.
+pub async fn read_for<'d, D: Driver<'d>>(
+    rx: &mut Receiver<'d, D>,
+    buf: &mut [u8],
+    period: Duration,
+) -> Option<usize> {
+    match select(rx.read_packet(buf), Timer::after(period)).await {
+        Either::First(Ok(n)) => Some(n),
+        Either::First(Err(_)) => {
+            Timer::after(period).await;
+            None
+        }
+        Either::Second(()) => None,
     }
 }
 

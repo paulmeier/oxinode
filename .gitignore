@@ -35,3 +35,6 @@ __pycache__/
 /tools/.venv/
 *.hex
 *.zip
+
+# Session scratch: throwaway scripts, virtualenvs and captures
+/scratchpad/

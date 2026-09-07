@@ -15,7 +15,6 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
-use embassy_futures::select::select;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals, twim};
@@ -53,11 +52,7 @@ async fn idle<'d, D: UsbDriverTrait<'d>>(
             led.toggle();
         }
         ticks = ticks.wrapping_add(1);
-        let _ = select(
-            rx.read_packet(&mut buf),
-            Timer::after(Duration::from_millis(20)),
-        )
-        .await;
+        let _ = usb_log::read_for(rx, &mut buf, Duration::from_millis(20)).await;
     }
 }
 
