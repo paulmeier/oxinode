@@ -56,8 +56,6 @@
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join4};
 use embassy_futures::select::{select, Either};
-use embassy_nrf::mode::Blocking;
-use embassy_nrf::rng::Rng;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, interrupt, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -66,7 +64,6 @@ use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
-use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
@@ -308,7 +305,7 @@ async fn main(_spawner: Spawner) {
         // If the bring-up is still inside `mpsl_init` when this fires, the
         // address it is at comes back on the next boot. See `ble::stall`.
         ble::stall::arm(STALL_AFTER_MS);
-        let built = bring_up(mpsl_p, sdc_p, rng, source);
+        let built = ble::bring_up(mpsl_p, sdc_p, rng, Irqs, source);
         ble::stall::disarm();
         stage_led.off();
         ble::fault::mark(ble::fault::NONE);
@@ -330,51 +327,6 @@ async fn main(_spawner: Spawner) {
         bluetooth,
     )
     .await;
-}
-
-/// Start MPSL and the SoftDevice Controller, or say why not.
-///
-/// Straight-line and synchronous: there is nothing to await, and nothing that
-/// could usefully be awaited. Every log line it writes is buffered until USB
-/// comes up a few milliseconds later.
-fn bring_up(
-    mpsl_p: mpsl::Peripherals<'static>,
-    sdc_p: sdc::Peripherals<'static>,
-    rng: embassy_nrf::Peri<'static, peripherals::RNG>,
-    source: ble::LfSource,
-) -> Option<(
-    &'static MultiprotocolServiceLayer<'static>,
-    sdc::SoftdeviceController<'static>,
-)> {
-    defmt::info!("mpsl: init on {}", source);
-    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
-    let mpsl = match MultiprotocolServiceLayer::new(mpsl_p, Irqs, ble::lfclk_config(source)) {
-        Ok(mpsl) => MPSL.init(mpsl),
-        Err(e) => {
-            defmt::error!("mpsl: would not start: {}", e);
-            return None;
-        }
-    };
-    defmt::info!("mpsl: running");
-
-    // Blocking, so the RNG interrupt is not bound at all. The controller pulls
-    // random numbers from a callback it makes at its own priority, and an
-    // asynchronous source there would be one more thing to get out of MPSL's
-    // way for no benefit.
-    static RNG: StaticCell<Rng<'static, Blocking>> = StaticCell::new();
-    let rng = RNG.init(Rng::new_blocking(rng));
-    static SDC_MEM: StaticCell<sdc::Mem<{ ble::SDC_MEM }>> = StaticCell::new();
-    defmt::info!("sdc: init");
-    let controller = match ble::build_controller(sdc_p, rng, mpsl, SDC_MEM.init(sdc::Mem::new())) {
-        Ok(controller) => controller,
-        Err(e) => {
-            defmt::error!("sdc: would not start: {}", e);
-            return None;
-        }
-    };
-    defmt::info!("sdc: running");
-    ble::report_versions();
-    Some((mpsl, controller))
 }
 
 /// Advertise, accept a connection, and say what happened.

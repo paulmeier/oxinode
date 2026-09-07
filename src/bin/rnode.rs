@@ -1,12 +1,29 @@
 //! The RNode image: a Reticulum host opens the serial port and finds a modem.
 //!
-//! Two CDC-ACM ports. The **first** carries the KISS stream and is the one
+//! Two CDC-ACM ports and, since phase 8, a Bluetooth peripheral. The USB
+//! **first** port carries the KISS stream and is the one
 //! `rnsd` is pointed at; the **second** carries the defmt log. That order is
 //! the contract with the host — it decides which tty gets the lower number —
 //! and it is also forced by DTR, which is only visible on the first CDC
 //! function of a composite device. The KISS port needs DTR for the 1200-baud
 //! bootloader touch, so it has to be first, and the log port therefore cannot
 //! have it.
+//!
+//! # Bluetooth is a second pipe
+//!
+//! The Nordic UART Service carries the identical KISS stream. It does not get
+//! its own protocol instance: the modem loop is the one owner of the protocol
+//! and the radio, exactly as it was for USB alone, and Bluetooth is one more
+//! place bytes come from and go to -- through a pipe in each direction, pumped
+//! by `oxinode::nus::pump`, with its own decoder and its own outbox so that a
+//! frame arriving on one transport can never be spliced into a frame arriving
+//! on the other.
+//!
+//! Who gets a frame nobody asked for -- a received packet, a modem error -- is
+//! decided by one rule: **a connected phone is the host.** Answers to commands
+//! always go back the way the command came, so `rnodeconf` over USB keeps
+//! working while a phone is on the line; unsolicited frames go to the phone
+//! while there is one, and to USB otherwise.
 //!
 //! # What this image does that `radio` does not
 //!
@@ -26,24 +43,29 @@
 #![no_std]
 #![no_main]
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_executor::Spawner;
-use embassy_futures::join::join4;
-use embassy_futures::select::{select, Either};
+use embassy_futures::join::{join, join5};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_futures::yield_now;
-use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
-use embassy_nrf::{bind_interrupts, peripherals, spim, twim};
+use embassy_nrf::{bind_interrupts, interrupt, peripherals, spim, twim};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::pipe::{Pipe, Reader};
+use embassy_sync::pipe::{Pipe, Reader, Writer};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Sender, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
+use nrf_sdc::{self as sdc, mpsl};
+use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
 use oxinode::modem::Modem;
+use oxinode::nus;
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
+use oxinode_core::ble as interop;
 use oxinode_core::lr1121::config::ValidConfig;
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
@@ -51,15 +73,78 @@ use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::outbox::Outbox;
 use oxinode_core::rnode::protocol::{Action, Protocol, Sink};
 use oxinode_core::rnode::store::DeviceStore;
+use oxinode_core::status::Bluetooth;
 use oxinode_core::{sh1107, status};
 use static_cell::StaticCell;
+use trouble_host::prelude::*;
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
-    CLOCK_POWER => usb::vbus_detect::InterruptHandler;
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    // The link layer's own. MPSL sets their priorities itself.
+    RADIO => mpsl::HighPrioInterruptHandler;
+    TIMER0 => mpsl::HighPrioInterruptHandler;
+    RTC0 => mpsl::HighPrioInterruptHandler;
+    EGU0_SWI0 => mpsl::LowPrioInterruptHandler;
+    // `POWER` and `CLOCK` share this vector, and the bootloader leaves USB
+    // power interrupts enabled when it starts the application from DFU. One
+    // handler services both, or the second one storms. See `oxinode::ble::Vbus`.
+    CLOCK_POWER => ble::PowerAndClockHandler;
 });
+
+// `MultiprotocolServiceLayer::new` asks for a binding to *its* handler type,
+// and `PowerAndClockHandler` calls exactly that handler, so the promise the
+// marker trait makes is kept.
+unsafe impl
+    interrupt::typelevel::Binding<interrupt::typelevel::CLOCK_POWER, mpsl::ClockInterruptHandler>
+    for Irqs
+{
+}
+
+// A fault must look different from a hang. See `src/bin/ble.rs` for why these
+// are here and `oxinode::ble::fault` for what they record.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(_frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    ble::fault::record_and_reboot(ble::fault::HARD_FAULT)
+}
+
+#[cortex_m_rt::exception]
+unsafe fn DefaultHandler(irqn: i16) {
+    let code = if irqn >= 0 {
+        ble::fault::UNHANDLED | (irqn as u8 & 0x3F)
+    } else {
+        ble::fault::HARD_FAULT
+    };
+    ble::fault::record_and_reboot(code)
+}
+
+/// Whether a phone is on the line. Written by the Bluetooth task, read by the
+/// modem loop to decide where unsolicited frames go and what the title bar
+/// says.
+static BLE_CONNECTED: AtomicBool = AtomicBool::new(false);
+/// Whether the stack came up at all. Also for the title bar.
+static BLE_UP: AtomicBool = AtomicBool::new(false);
+
+/// Bytes from the phone to the modem loop. The same size as the USB pipe and
+/// for the same reason: a full one is back-pressure, not loss.
+const BLE_IN: usize = 1024;
+/// Bytes from the modem loop to the phone. Sized like an outbox, because it is
+/// where the modem loop's Bluetooth outbox drains to without waiting.
+const BLE_OUT: usize = 4096;
+const _: () = assert!(BLE_OUT >= OUTBOX);
+
+/// How long the controller gets to start before its address is taken and the
+/// board restarts itself. See `oxinode::ble::stall`.
+const STALL_AFTER_MS: u32 = 2_000;
+
+/// Which transport a command arrived on, for the one action that has to flush
+/// before it acts.
+#[derive(Clone, Copy)]
+enum Via {
+    Usb,
+    Ble,
+}
 
 /// Same prototyping VID as the other images, with its own PID.
 const USB_VID: u16 = 0x1209;
@@ -91,13 +176,24 @@ const PERSIST_IDLE: Duration = Duration::from_millis(250);
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     boot::relocate_vector_table();
-    let p = embassy_nrf::init(board::embassy_config());
+    // Read and clear before anything else can fault, so this is the previous
+    // run's verdict rather than this one's.
+    let last_fault = ble::fault::take();
+    let last_stall = ble::stall::take();
+    let p = embassy_nrf::init(ble::embassy_config());
+    // Before any of these peripherals is built: their constructors enable
+    // their interrupts, and the NVIC's reset priority is the one the link
+    // layer runs at.
+    ble::yield_to_mpsl(&[interrupt::USBD, interrupt::SPI2, interrupt::TWISPI0]);
 
     let spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
     let reset = radio::RadioReset::new(p.P1_10, p.P1_11);
     let mut irq = radio::RadioIrq::new(p.P1_08);
 
-    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    // Takes over the `POWER` half of the shared interrupt before MPSL unmasks
+    // it; see the binding above.
+    let vbus = Vbus::take();
+    let driver = Driver::new(p.USBD, Irqs, vbus.detector());
     let serial = board::take_device_serial();
 
     let mut config = UsbConfig::new(USB_VID, USB_PID);
@@ -169,6 +265,44 @@ async fn main(_spawner: Spawner) {
     // rather than a one-shot startup sequence, and the port that has DTR is
     // the KISS port, not this one.
     let pump = usb_log::pump(&mut log_tx, || true);
+
+    // The Bluetooth controller, unconditionally: the product image does not
+    // wait for a keystroke. The stall guard stays, because a controller that
+    // stops with the executor is a board that has to restart itself and say
+    // why, and the guard is what makes both happen.
+    ble::fault::report(last_fault);
+    ble::stall::report(last_stall);
+    let mpsl_p =
+        mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    let sdc_p = sdc::Peripherals::new(
+        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
+        p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+    );
+    ble::stall::arm(STALL_AFTER_MS);
+    let stack_parts = ble::bring_up(mpsl_p, sdc_p, p.RNG, Irqs, ble::LfSource::Crystal);
+    ble::stall::disarm();
+    BLE_UP.store(stack_parts.is_some(), Ordering::Relaxed);
+
+    // One pipe in each direction between the phone and the modem loop. See
+    // the module docs: Bluetooth is a source and a sink of bytes and nothing
+    // else, and the loop owns everything that understands them.
+    static BLE_RX: StaticCell<Pipe<NoopRawMutex, BLE_IN>> = StaticCell::new();
+    static BLE_TX: StaticCell<Pipe<NoopRawMutex, BLE_OUT>> = StaticCell::new();
+    let (mut ble_reader, ble_writer) = BLE_RX.init(Pipe::new()).split();
+    let (ble_out_reader, ble_out_writer) = BLE_TX.init(Pipe::new()).split();
+
+    let bluetooth = async {
+        let Some((mpsl, controller)) = stack_parts else {
+            defmt::error!("ble: no controller; this board is USB only until it is reset");
+            core::future::pending::<()>().await;
+            unreachable!()
+        };
+        join(
+            mpsl.run(),
+            serve_bluetooth(controller, mcu_id, &ble_writer, &ble_out_reader),
+        )
+        .await;
+    };
 
     // Everything the host sends goes through here, and the reason is
     // cancellation.
@@ -286,6 +420,8 @@ async fn main(_spawner: Spawner) {
                 serve_without_a_radio(
                     &mut kiss_tx,
                     &mut host_reader,
+                    &mut ble_reader,
+                    &ble_out_writer,
                     &control,
                     &mut led,
                     &mut storage,
@@ -303,6 +439,8 @@ async fn main(_spawner: Spawner) {
             &mut irq,
             &mut kiss_tx,
             &mut host_reader,
+            &mut ble_reader,
+            &ble_out_writer,
             &control,
             &mut led,
             &mut storage,
@@ -313,7 +451,141 @@ async fn main(_spawner: Spawner) {
         .await
     };
 
-    join4(run_usb, pump, feed_host_rx, modem).await;
+    join5(run_usb, pump, feed_host_rx, modem, bluetooth).await;
+}
+
+/// Advertise, and pump bytes for every connection that comes.
+///
+/// One connection at a time, which is what the controller was sized for and
+/// what an RNode means: a modem has a host, not an audience. While a phone is
+/// connected the board is not advertising, so a second one sees nothing
+/// until the first has gone.
+async fn serve_bluetooth(
+    controller: sdc::SoftdeviceController<'static>,
+    device_id: u64,
+    to_modem: &Writer<'_, NoopRawMutex, BLE_IN>,
+    from_modem: &Reader<'_, NoopRawMutex, BLE_OUT>,
+) {
+    let address = interop::static_random_address(device_id);
+    let name = interop::advertised_name(device_id);
+    let name = core::str::from_utf8(&name).expect("advertised_name is ASCII");
+
+    static RESOURCES: StaticCell<
+        HostResources<DefaultPacketPool, { ble::CONNECTIONS }, { ble::L2CAP_CHANNELS }>,
+    > = StaticCell::new();
+    let stack = trouble_host::new(controller, RESOURCES.init(HostResources::new()))
+        .set_random_address(Address::random(address))
+        .build();
+    let mut runner = stack.runner();
+    let mut peripheral = stack.peripheral();
+
+    let server = match nus::Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name,
+        appearance: &appearance::UNKNOWN,
+    })) {
+        Ok(server) => server,
+        Err(e) => {
+            defmt::error!("ble: could not build the GATT server: {}", e);
+            return;
+        }
+    };
+    defmt::info!("ble: {=str}, address {=[u8; 6]:02x}", name, address);
+
+    // Flags and the name in the advertisement; the service UUID in the scan
+    // response. All three will not fit in one legacy packet, and the name is
+    // what Reticulum's scan filters on.
+    let mut adv_data = [0u8; 31];
+    let adv_len = AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::CompleteLocalName(name.as_bytes()),
+        ],
+        &mut adv_data,
+    )
+    .expect("advertisement does not fit");
+    let mut scan_data = [0u8; 31];
+    let scan_len = AdStructure::encode_slice(
+        &[AdStructure::CompleteServiceUuids128(&[
+            interop::uuid_le_bytes(interop::NUS_SERVICE),
+        ])],
+        &mut scan_data,
+    )
+    .expect("scan response does not fit");
+
+    let advertise = async {
+        loop {
+            let advertiser = match peripheral
+                .advertise(
+                    &Default::default(),
+                    Advertisement::ConnectableScannableUndirected {
+                        adv_data: &adv_data[..adv_len],
+                        scan_data: &scan_data[..scan_len],
+                    },
+                )
+                .await
+            {
+                Ok(advertiser) => advertiser,
+                Err(_) => {
+                    defmt::error!("ble: could not start advertising");
+                    Timer::after(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let conn = match advertiser.accept().await {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let conn = match conn.with_attribute_server(&server) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    defmt::error!("ble: could not attach the GATT server: {}", e);
+                    continue;
+                }
+            };
+            BLE_CONNECTED.store(true, Ordering::Relaxed);
+            let end = nus::pump(&conn, &server, to_modem, from_modem).await;
+            BLE_CONNECTED.store(false, Ordering::Relaxed);
+            defmt::info!("ble: session over: {}", end);
+        }
+    };
+
+    match select(runner.run(), advertise).await {
+        Either::First(Err(_)) => defmt::error!("ble: the host stack stopped"),
+        Either::First(Ok(())) | Either::Second(()) => {}
+    }
+}
+
+/// Hand a Bluetooth outbox to the pump, without waiting for the phone.
+///
+/// `try_write` rather than `write`: the modem loop must never block on a
+/// phone. What does not fit stays in the outbox for the next pass, and a
+/// phone that has gone gets its frames dropped, counted, rather than a modem
+/// loop that stops servicing the radio.
+fn push_to_ble(outbox: &mut Outbox<OUTBOX>, out: &Writer<'_, NoopRawMutex, BLE_OUT>) {
+    if !BLE_CONNECTED.load(Ordering::Relaxed) {
+        outbox.abandon();
+    }
+    while !outbox.is_empty() {
+        match out.try_write(outbox.pending()) {
+            Ok(n) if n > 0 => outbox.consume(n),
+            _ => break,
+        }
+    }
+    let dropped = outbox.take_dropped();
+    if dropped > 0 {
+        defmt::warn!("ble outbox: {=u32} frames dropped", dropped);
+    }
+}
+
+/// What the title bar should say about Bluetooth.
+fn bluetooth_state() -> Bluetooth {
+    if BLE_CONNECTED.load(Ordering::Relaxed) {
+        Bluetooth::Connected
+    } else if BLE_UP.load(Ordering::Relaxed) {
+        Bluetooth::Advertising
+    } else {
+        Bluetooth::Absent
+    }
 }
 
 /// The main loop: host bytes in one direction, radio packets in the other.
@@ -323,6 +595,8 @@ async fn run<'d, D, S, B>(
     irq: &mut radio::RadioIrq<'_>,
     tx: &mut Sender<'d, D>,
     host: &mut Reader<'_, NoopRawMutex, 1024>,
+    ble: &mut Reader<'_, NoopRawMutex, BLE_IN>,
+    ble_out: &Writer<'_, NoopRawMutex, BLE_OUT>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
     storage: &mut Storage<'_>,
@@ -338,6 +612,11 @@ where
     let mut protocol = Protocol::with_storage(device, mcu_id);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     let mut outbox = Outbox::<OUTBOX>::new();
+    // The phone's own decoder and outbox: a frame in progress on one
+    // transport is never spliced with the other's.
+    let mut ble_decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+    let mut ble_outbox = Outbox::<OUTBOX>::new();
+    let mut ble_buf = [0u8; 256];
     let mut usb_buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut rx_buf = [0u8; kiss::HW_MTU];
     // When the EEPROM was last changed, and therefore when it should be
@@ -405,67 +684,83 @@ where
             // loser, and a cancelled pipe read consumes nothing -- whereas a
             // cancelled `read_packet` loses whatever it had already taken.
             let from_host = host.read(&mut usb_buf);
+            let from_phone = ble.read(&mut ble_buf);
             // A bounded wait rather than an indefinite one, so that the loop
             // also serves as a housekeeping tick.
             let radio_irq = irq.wait_asserted(Duration::from_millis(50));
-            select(from_host, radio_irq).await
+            select3(from_host, from_phone, radio_irq).await
         };
 
-        match event {
-            Either::First(n) => {
-                for &byte in &usb_buf[..n] {
-                    match decoder.feed(byte) {
-                        kiss::Step::Pending => {}
-                        kiss::Step::Error(e) => {
-                            defmt::warn!("kiss: {=str}", e.message());
-                        }
-                        kiss::Step::Frame => {
-                            let command = command::decode(decoder.command(), decoder.payload());
-                            match protocol.handle(command, &mut outbox) {
-                                // Not a radio action, and not "write it out
-                                // now" either: the timer restarts on every
-                                // write, so a burst of them costs one erase.
-                                Action::Persist => dirty_since = Some(Instant::now()),
-                                // Everything queued is written before the
-                                // reset, because the host asked for this and
-                                // will look at the result afterwards.
-                                Action::Reset => {
-                                    defmt::info!("reset requested by the host");
-                                    flush(&mut outbox, tx).await;
-                                    commit(storage, &protocol);
-                                    boot::reboot();
-                                }
-                                // Force the next pass to redraw rather than
-                                // waiting for the tick.
-                                Action::Redraw => {
-                                    last_render = Instant::now() - RENDER_INTERVAL;
-                                }
-                                // The pixels the host wants are the ones on
-                                // the panel, and those are here rather than in
-                                // the protocol.
-                                Action::ReportDisplay => {
-                                    let mut image = [0u8; rnode_display::DISP_LEN];
-                                    rnode_display::read_display(&live, &mut image);
-                                    outbox.frame(command::cmd::DISP_READ, &image);
-                                }
-                                action => {
-                                    act(
-                                        dev,
-                                        irq,
-                                        &mut protocol,
-                                        action,
-                                        &mut applied,
-                                        &mut receiving,
-                                        &mut outbox,
-                                    )
-                                    .await;
+        // Bytes from either host go through the same steps; only the decoder
+        // and the outbox differ, so that answers go back the way the command
+        // came. `Reset` is the one action that has to flush before it acts,
+        // and it flushes the transport that asked.
+        let (bytes, dec, out, via) = match &event {
+            Either3::First(n) => (&usb_buf[..*n], &mut decoder, &mut outbox, Via::Usb),
+            Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, &mut ble_outbox, Via::Ble),
+            Either3::Third(_) => (&usb_buf[..0], &mut decoder, &mut outbox, Via::Usb),
+        };
+        for &byte in bytes {
+            match dec.feed(byte) {
+                kiss::Step::Pending => {}
+                kiss::Step::Error(e) => {
+                    defmt::warn!("kiss: {=str}", e.message());
+                }
+                kiss::Step::Frame => {
+                    let command = command::decode(dec.command(), dec.payload());
+                    match protocol.handle(command, out) {
+                        // Not a radio action, and not "write it out now"
+                        // either: the timer restarts on every write, so a
+                        // burst of them costs one erase.
+                        Action::Persist => dirty_since = Some(Instant::now()),
+                        // Everything queued is written before the reset,
+                        // because the host asked for this and will look at the
+                        // result afterwards.
+                        Action::Reset => {
+                            defmt::info!("reset requested by the host");
+                            match via {
+                                Via::Usb => flush(out, tx).await,
+                                Via::Ble => {
+                                    push_to_ble(out, ble_out);
+                                    // Give the pump a moment to notify it.
+                                    Timer::after(Duration::from_millis(200)).await;
                                 }
                             }
+                            commit(storage, &protocol);
+                            boot::reboot();
+                        }
+                        // Force the next pass to redraw rather than waiting
+                        // for the tick.
+                        Action::Redraw => {
+                            last_render = Instant::now() - RENDER_INTERVAL;
+                        }
+                        // The pixels the host wants are the ones on the panel,
+                        // and those are here rather than in the protocol.
+                        Action::ReportDisplay => {
+                            let mut image = [0u8; rnode_display::DISP_LEN];
+                            rnode_display::read_display(&live, &mut image);
+                            out.frame(command::cmd::DISP_READ, &image);
+                        }
+                        action => {
+                            act(
+                                dev,
+                                irq,
+                                &mut protocol,
+                                action,
+                                &mut applied,
+                                &mut receiving,
+                                out,
+                            )
+                            .await;
                         }
                     }
                 }
             }
-            Either::Second(Ok(())) => {
+        }
+
+        match event {
+            Either3::First(_) | Either3::Second(_) => {}
+            Either3::Third(Ok(())) => {
                 if !receiving {
                     // The line is asserted and nothing is listening for it, so
                     // clearing it is the only thing that will put it down --
@@ -487,6 +782,13 @@ where
                     }
                 } else {
                     let mut modem = Modem::new(dev, irq);
+                    // A frame nobody asked for goes to whoever is the host
+                    // right now: the phone if there is one, USB otherwise.
+                    let listener = if BLE_CONNECTED.load(Ordering::Relaxed) {
+                        &mut ble_outbox
+                    } else {
+                        &mut outbox
+                    };
                     match modem.receive(&mut rx_buf, Duration::from_millis(20)).await {
                         Ok(Some(report)) => {
                             led.off();
@@ -498,19 +800,19 @@ where
                                 // way, so nothing is rounded in between.
                                 report.snr_quarter_db,
                                 &rx_buf[..report.len],
-                                &mut outbox,
+                                listener,
                             );
                             led.on();
                         }
                         Ok(None) => {}
                         Err(e) => {
                             defmt::error!("rx: {}", e);
-                            protocol.report_error(error::MODEM_TIMEOUT, &mut outbox);
+                            protocol.report_error(error::MODEM_TIMEOUT, listener);
                         }
                     }
                 }
             }
-            Either::Second(Err(_)) => {
+            Either3::Third(Err(_)) => {
                 // Housekeeping tick. Nothing to do but keep the light moving,
                 // which is the only sign of life this board has when the log
                 // port is not open.
@@ -552,6 +854,7 @@ where
                             tx_count,
                             last_rssi_dbm: last_signal.map(|(rssi, _)| rssi),
                             last_snr_quarter_db: last_signal.map(|(_, snr)| snr),
+                            bluetooth: bluetooth_state(),
                         },
                         &mut scratch,
                     );
@@ -577,6 +880,7 @@ where
         }
 
         flush(&mut outbox, tx).await;
+        push_to_ble(&mut ble_outbox, ble_out);
 
         // Belt and braces. Every path above is *supposed* to await something
         // that can actually pend, but a loop that can complete an iteration
@@ -653,7 +957,19 @@ async fn act<S, B>(
             }
             *receiving = false;
             if let Some(reason) = protocol.last_error() {
-                defmt::warn!("radio stays off: {=str}", reason.message());
+                // With the numbers, because "above the rating" on its own
+                // sends whoever reads it to the host's settings screen
+                // without telling them what to type there.
+                let c = protocol.config();
+                defmt::warn!(
+                    "radio stays off: {=str} (asked for {=u32} Hz, BW {=u32}, SF{=u8}, CR4/{=u8}, {=i8} dBm)",
+                    reason.message(),
+                    c.frequency_hz,
+                    c.bandwidth_hz,
+                    c.spreading_factor,
+                    c.coding_rate,
+                    c.tx_power_dbm
+                );
             }
         }
 
@@ -706,6 +1022,8 @@ async fn act<S, B>(
 async fn serve_without_a_radio<'d, D>(
     tx: &mut Sender<'d, D>,
     host: &mut Reader<'_, NoopRawMutex, 1024>,
+    ble: &mut Reader<'_, NoopRawMutex, BLE_IN>,
+    ble_out: &Writer<'_, NoopRawMutex, BLE_OUT>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
     storage: &mut Storage<'_>,
@@ -719,7 +1037,10 @@ where
     let mut protocol = Protocol::with_storage(device, mcu_id);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     let mut outbox = Outbox::<OUTBOX>::new();
+    let mut ble_decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
+    let mut ble_outbox = Outbox::<OUTBOX>::new();
     let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
+    let mut ble_buf = [0u8; 256];
     let mut dirty_since: Option<Instant> = None;
 
     // Say so on the panel, which is the only place somebody holding the board
@@ -741,12 +1062,22 @@ where
         }
         // Fast blink: alive, enumerated, no radio.
         led.on();
-        let read = host.read(&mut buf);
-        if let Either::First(n) = select(read, Timer::after(Duration::from_millis(100))).await {
-            for &byte in &buf[..n] {
-                if decoder.feed(byte) == kiss::Step::Frame {
-                    let command = command::decode(decoder.command(), decoder.payload());
-                    match protocol.handle(command, &mut outbox) {
+        let event = select3(
+            host.read(&mut buf),
+            ble.read(&mut ble_buf),
+            Timer::after(Duration::from_millis(100)),
+        )
+        .await;
+        let (bytes, dec, out, via) = match &event {
+            Either3::First(n) => (&buf[..*n], &mut decoder, &mut outbox, Via::Usb),
+            Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, &mut ble_outbox, Via::Ble),
+            Either3::Third(()) => (&buf[..0], &mut decoder, &mut outbox, Via::Usb),
+        };
+        {
+            for &byte in bytes {
+                if dec.feed(byte) == kiss::Step::Frame {
+                    let command = command::decode(dec.command(), dec.payload());
+                    match protocol.handle(command, out) {
                         Action::None => {}
                         // Provisioning has nothing to do with the radio, and
                         // works here exactly as it does when one came up. A
@@ -755,7 +1086,13 @@ where
                         // dependency that is not there.
                         Action::Persist => dirty_since = Some(Instant::now()),
                         Action::Reset => {
-                            flush(&mut outbox, tx).await;
+                            match via {
+                                Via::Usb => flush(out, tx).await,
+                                Via::Ble => {
+                                    push_to_ble(out, ble_out);
+                                    Timer::after(Duration::from_millis(200)).await;
+                                }
+                            }
                             commit(storage, &protocol);
                             boot::reboot();
                         }
@@ -769,11 +1106,11 @@ where
                             page.name = *b"DEAD";
                             status::render(&page, &mut frame);
                             rnode_display::read_display(&frame, &mut image);
-                            outbox.frame(command::cmd::DISP_READ, &image);
+                            out.frame(command::cmd::DISP_READ, &image);
                         }
                         // Anything that needed the radio: say why it cannot
                         // happen, rather than leaving the host to time out.
-                        _ => protocol.report_error(error::INITRADIO, &mut outbox),
+                        _ => protocol.report_error(error::INITRADIO, out),
                     }
                 }
             }
@@ -787,6 +1124,7 @@ where
         led.off();
         Timer::after(Duration::from_millis(100)).await;
         flush(&mut outbox, tx).await;
+        push_to_ble(&mut ble_outbox, ble_out);
     }
 }
 

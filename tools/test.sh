@@ -65,7 +65,7 @@ step "flash runner smoke test"
 try python3 tools/test_dfu_flash.py
 
 step "image layout vs memory.x"
-for bin in blink usb-cdc radio rnode display; do
+for bin in blink usb-cdc radio display; do
     elf="target/thumbv7em-none-eabihf/release/$bin"
     [[ -f "$elf" ]] || { echo "missing $elf"; fail=1; continue; }
     rust-objcopy -O binary "$elf" "$elf.bin"
@@ -74,23 +74,22 @@ for bin in blink usb-cdc radio rnode display; do
     try tools/check_layout.py "$elf" --uf2 "$elf.uf2"
 done
 
-# Last, and `--bin ble` only, so the images checked above are not quietly
-# replaced by BLE-flavoured rebuilds of themselves. `--bin ble` emits one
-# binary and leaves the rest of target/ alone.
-step "build firmware (ble)"
-try cargo build --release --no-default-features --features ble --bin ble
+# Last, and named binaries only, so the images checked above are not quietly
+# replaced by BLE-flavoured rebuilds of themselves. `rnode` -- the product
+# image -- lives here since phase 8: it carries the Bluetooth stack and so
+# needs this feature set.
+step "build firmware (ble: rnode, ble)"
+try cargo build --release --no-default-features --features ble --bin rnode --bin ble
 
-step "ble image layout vs memory.x"
-elf="target/thumbv7em-none-eabihf/release/ble"
-if [[ -f "$elf" ]]; then
+step "ble image layouts vs memory.x"
+for bin in rnode ble; do
+    elf="target/thumbv7em-none-eabihf/release/$bin"
+    [[ -f "$elf" ]] || { echo "missing $elf"; fail=1; continue; }
     rust-objcopy -O binary "$elf" "$elf.bin"
     tools/uf2conv.py "$elf.bin" -o "$elf.uf2" \
         -b "$(tools/layout.py memory.x --field FLASH.origin)" 2>/dev/null
     try tools/check_layout.py "$elf" --uf2 "$elf.uf2"
-else
-    echo "missing $elf"
-    fail=1
-fi
+done
 
 if (( fail )); then
     printf '\n\033[31msome checks failed\033[0m\n'

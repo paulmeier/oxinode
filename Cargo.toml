@@ -134,10 +134,13 @@ name = "radio"
 path = "src/bin/radio.rs"
 
 # Phase 5: the product image. A Reticulum host opens the first serial port and
-# finds a modem; the second carries the log.
+# finds a modem; the second carries the log. Since phase 8 it also carries the
+# Bluetooth stack, and therefore the `ble` feature's critical section:
+#     cargo build --release --no-default-features --features ble --bin rnode
 [[bin]]
 name = "rnode"
 path = "src/bin/rnode.rs"
+required-features = ["ble"]
 
 # Phase 7 bring-up image for the Super IO board's OLED. Separate from `rnode`
 # for the same reason `radio` was: with no debug probe, a failure you can

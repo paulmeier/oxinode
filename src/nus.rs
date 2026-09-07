@@ -17,6 +17,9 @@
 //! [`Protocol`] and the same [`Outbox`] the USB port uses. That is the point:
 //! Bluetooth is a second pipe, and everything that is not the pipe is shared.
 
+use embassy_futures::select::{select, Either};
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::pipe::{Reader, Writer};
 use embassy_time::{with_timeout, Duration};
 use heapless::Vec;
 use oxinode_core::ble as interop;
@@ -253,4 +256,101 @@ pub async fn flush<P: PacketPool>(
         defmt::warn!("nus: {=u32} frames dropped", dropped);
     }
     Ok(())
+}
+
+/// Run one connection as a byte pump between two pipes.
+///
+/// This is what the product image uses. There, the modem loop is the one
+/// owner of the protocol and the radio, exactly as it is for USB, and
+/// Bluetooth is one more place bytes come from and go to: writes to RX go
+/// into `to_modem`, and whatever the modem loop puts in `from_modem` is
+/// notified on TX in pieces the link can carry. Nothing here knows what a
+/// KISS frame is.
+///
+/// # Back-pressure
+///
+/// Filling `to_modem` waits, which stalls this task and only this task: the
+/// phone's writes are NAKed at the link layer until the modem catches up,
+/// which is the same thing that happens to a USB host. `from_modem` is the
+/// modem loop's problem and is filled without waiting -- see the product
+/// image -- so a phone that stops reading costs it frames, not time.
+pub async fn pump<P: PacketPool, M: RawMutex, const IN: usize, const OUT: usize>(
+    conn: &GattConnection<'_, '_, P>,
+    server: &Server<'_>,
+    to_modem: &Writer<'_, M, IN>,
+    from_modem: &Reader<'_, M, OUT>,
+) -> End {
+    let rx_handle = server.nus.rx.handle;
+    defmt::info!(
+        "nus: pumping for {=[u8; 6]:02x}, att mtu {=u16}",
+        conn.raw().peer_address().addr.into_inner(),
+        conn.raw().att_mtu()
+    );
+    let mut out = [0u8; VALUE_LEN];
+    loop {
+        // `Reader::read` on an empty pipe pends, and cancelling it consumes
+        // nothing, so racing it against the connection is safe -- which is
+        // the property the USB path had to be restructured to get.
+        match select(conn.next(), from_modem.read(&mut out)).await {
+            Either::Second(n) => {
+                let piece = interop::notification_payload_len(conn.raw().att_mtu());
+                let mut sent = 0;
+                while sent < n {
+                    let end = (sent + piece).min(n);
+                    match with_timeout(
+                        Duration::from_millis(2_000),
+                        server.nus.tx.notify_raw(conn, &out[sent..end], false),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => sent = end,
+                        Ok(Err(e)) => {
+                            defmt::warn!("nus: notify failed: {}", e);
+                            return End::Stalled;
+                        }
+                        Err(_) => return End::Stalled,
+                    }
+                }
+            }
+            Either::First(GattConnectionEvent::Disconnected { reason }) => {
+                return End::Disconnected(reason.into_inner());
+            }
+            Either::First(GattConnectionEvent::Gatt {
+                event: GattEvent::Write(event),
+            }) => {
+                let mut bytes = Vec::<u8, VALUE_LEN>::new();
+                let is_rx = event.handle() == rx_handle;
+                if is_rx {
+                    event.with_data(|_, data| {
+                        let _ = bytes.extend_from_slice(data);
+                    });
+                }
+                match event.accept() {
+                    Ok(reply) => reply.send().await,
+                    Err(e) => defmt::warn!("nus: could not accept a write: {}", e),
+                }
+                if is_rx {
+                    let mut rest: &[u8] = &bytes;
+                    while !rest.is_empty() {
+                        let n = to_modem.write(rest).await;
+                        rest = &rest[n..];
+                    }
+                }
+            }
+            Either::First(GattConnectionEvent::Gatt { event }) => match event.accept() {
+                Ok(reply) => reply.send().await,
+                Err(e) => defmt::warn!("nus: {}", e),
+            },
+            Either::First(GattConnectionEvent::ConnectionParamsUpdated {
+                conn_interval,
+                supervision_timeout,
+                ..
+            }) => defmt::info!(
+                "nus: interval {=u64} us, supervision {=u64} ms",
+                conn_interval.as_micros(),
+                supervision_timeout.as_millis()
+            ),
+            Either::First(_) => {}
+        }
+    }
 }

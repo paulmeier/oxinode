@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode with a screen, and Bluetooth half up
+## Status: a provisioned RNode with a screen, over USB or Bluetooth
 
 Being precise about that:
 
@@ -23,7 +23,7 @@ Being precise about that:
 | 5 | RNode KISS protocol + command set, over USB | **done** — `rnsd` brings it up, [notes](docs/phase-5-rnode.md) |
 | 6 | `rnodeconf` provisioning: EEPROM, device hash, signature | **done** — verified on hardware, [notes](docs/phase-6-provisioning.md) |
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
-| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **in progress** — the stack comes up and advertises, 20 of 20; no service yet, [notes](docs/phase-8-bluetooth.md) |
+| 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **working** — iOS Sideband drives the radio over BLE; pairing not yet required, [notes](docs/phase-8-bluetooth.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -47,16 +47,16 @@ Phase 7 gave it a screen: a 128 × 128 OLED showing what the modem is doing, and
 the RNode display protocol so a host can push pictures to it. See
 [docs/phase-7-display.md](docs/phase-7-display.md).
 
-Phase 8 has a Bluetooth stack that comes up and advertises as `RNode 7F23`
-on every boot — twenty of twenty — with nothing yet behind the advertisement.
-Getting there took a captured program counter: the bootloader hands over
-from DFU with USB power interrupts still enabled, and MPSL's clock handler,
-sharing that vector, never clears them. See
-[docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md) for the bug and for
-the longer list of things it was not.
+Phase 8 gave it Bluetooth: the same KISS stream, over the Nordic UART
+Service, into the same protocol core and the same radio. iOS Sideband finds
+`RNode 7F23`, configures it, and brings the interface online; USB keeps
+working alongside, and the panel says which host is on the line. What it
+does not yet do is require pairing. See
+[docs/phase-8-bluetooth.md](docs/phase-8-bluetooth.md) — including the bug
+that stood between advertising and this, which took a captured program
+counter to find.
 
-Phases 1 to 7 are confirmed on hardware; phase 8's controller is, and the
-rest of it is not started.
+Phases 1 to 8 are confirmed on hardware; phase 8's pairing is not built.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -433,6 +433,12 @@ Double-tap the board's reset button, then:
 
 ```bash
 cargo run --release --bin blink
+```
+
+The product image carries the Bluetooth stack and so needs that feature set:
+
+```bash
+cargo run --release --no-default-features --features ble --bin rnode
 ```
 
 `cargo run` builds the ELF, checks it against `memory.x`, packages it, and sends

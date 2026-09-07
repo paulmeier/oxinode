@@ -1,8 +1,15 @@
 # Phase 8: Bluetooth LE
 
-Where phase 8 stands: **the stack builds, links, and comes up every time** —
-twenty fresh boots out of twenty reached `ble: advertising` as `RNode 7F23`,
-sixteen on the crystal and four on the internal RC oscillator as a control.
+Where phase 8 stands: **iOS Sideband connects to `RNode 7F23`, configures
+the radio, and brings the interface online**, over the Nordic UART Service,
+through the same protocol core and the same modem loop the USB port uses.
+USB keeps working alongside — `rnodeconf` validates the device signature with
+the stack running — and the panel's title bar shows `BT` while advertising and
+`BT*` with a phone on the line.
+
+Not yet done: pairing. The stock firmware requires LE Secure Connections with
+a passkey; this one accepts any connection. That is the remaining step, and
+the display it needs is there.
 
 It did not start out that way. The first working image hung on every boot
 that followed a flash and came up on every boot that followed the reset
@@ -10,6 +17,44 @@ button, and for a long stretch that looked like a race. The bug, the tool that
 found it, and the list of things that were ruled out along the way are all
 below, because the ruling-out is most of what a next problem of this kind
 will reuse.
+
+## How the two transports share one modem
+
+The modem loop in `src/bin/rnode.rs` is the one owner of the protocol and the
+radio, exactly as it was for USB alone. Bluetooth is one more place bytes come
+from and go to: a pipe in each direction, pumped by `oxinode::nus::pump`, with
+its own KISS decoder and its own outbox so a frame in progress on one
+transport can never be spliced into a frame on the other. The modem loop
+selects on the USB pipe, the Bluetooth pipe, and the radio's interrupt.
+
+Who gets a frame nobody asked for — a received packet, a modem error — is one
+rule: **a connected phone is the host.** Answers to commands always go back
+the way the command came, so `rnodeconf` over USB keeps working while a phone
+is on the line; unsolicited frames go to the phone while there is one, and to
+USB otherwise.
+
+The modem loop never waits on the phone. Its Bluetooth outbox drains into
+the pipe with `try_write`; what does not fit waits for the next pass, and a
+phone that has gone gets its frames dropped and counted rather than a modem
+that stops servicing the radio.
+
+## The one thing Sideband had to be told
+
+The first connection with a real radio behind it failed with "radio
+configuration failed: the RNode radio is locked because its modem
+configuration is incomplete". The board's log said why:
+
+```text
+radio stays off: power is above the module's 20 dBm rating
+```
+
+iOS Sideband's default transmit power is above what this module is rated for,
+and phase 4's rule stands: nothing clamps, because a clamp is a lie the host
+cannot detect, and Reticulum refuses an interface whose read-back differs from
+what it set in any case. With the app's TX power set to 14 dBm — the figure
+`rnodeconf` reports for this board — the interface came online. The refusal
+now logs the numbers it refused, so the next person is sent to the settings
+screen knowing what to type.
 
 ## What works
 
@@ -209,10 +254,6 @@ worth keeping for the next one:
   passkey, which is why phase 7 came first. `trouble-host`'s `security` feature
   and the `security-p256-cortex-m4` backend are the pieces; neither is enabled
   yet, and enabling them changes the memory sizing.
-* **Nothing to talk to.** There is no GATT server in this image on purpose.
-  Whether the controller runs at all is one question and whether the Nordic
-  UART Service definition is right is another, and answering them in separate
-  images means a failure says which.
 
 ## Licensing
 

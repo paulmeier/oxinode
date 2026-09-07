@@ -486,6 +486,70 @@ pub fn report_versions() {
     }
 }
 
+/// Start MPSL and the SoftDevice Controller, or say why not.
+///
+/// Straight-line and synchronous: there is nothing to await, and nothing that
+/// could usefully be awaited. `irqs` is the image's `bind_interrupts!` struct,
+/// which has to bind `RADIO`, `TIMER0` and `RTC0` to
+/// `mpsl::HighPrioInterruptHandler`, one software interrupt to
+/// `mpsl::LowPrioInterruptHandler`, and `CLOCK_POWER` to
+/// [`PowerAndClockHandler`] -- plus the hand-written `Binding` to MPSL's own
+/// clock handler that the constructor's bound asks for.
+///
+/// Call once per image; the statics inside are `StaticCell`s.
+pub fn bring_up<T, I>(
+    mpsl_p: mpsl::Peripherals<'static>,
+    sdc_p: sdc::Peripherals<'static>,
+    rng: embassy_nrf::Peri<'static, embassy_nrf::peripherals::RNG>,
+    irqs: I,
+    source: LfSource,
+) -> Option<(
+    &'static MultiprotocolServiceLayer<'static>,
+    sdc::SoftdeviceController<'static>,
+)>
+where
+    T: interrupt::typelevel::Interrupt,
+    I: interrupt::typelevel::Binding<T, mpsl::LowPrioInterruptHandler>
+        + interrupt::typelevel::Binding<interrupt::typelevel::RADIO, mpsl::HighPrioInterruptHandler>
+        + interrupt::typelevel::Binding<interrupt::typelevel::TIMER0, mpsl::HighPrioInterruptHandler>
+        + interrupt::typelevel::Binding<interrupt::typelevel::RTC0, mpsl::HighPrioInterruptHandler>
+        + interrupt::typelevel::Binding<
+            interrupt::typelevel::CLOCK_POWER,
+            mpsl::ClockInterruptHandler,
+        >,
+{
+    defmt::info!("mpsl: init on {}", source);
+    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
+    let mpsl = match MultiprotocolServiceLayer::new::<T, I>(mpsl_p, irqs, lfclk_config(source)) {
+        Ok(mpsl) => MPSL.init(mpsl),
+        Err(e) => {
+            defmt::error!("mpsl: would not start: {}", e);
+            return None;
+        }
+    };
+    defmt::info!("mpsl: running");
+
+    // Blocking, so the RNG interrupt is not bound at all. The controller pulls
+    // random numbers from a callback it makes at its own priority, and an
+    // asynchronous source there would be one more thing to get out of MPSL's
+    // way for no benefit.
+    static RNG: StaticCell<Rng<'static, Blocking>> = StaticCell::new();
+    let rng = RNG.init(Rng::new_blocking(rng));
+    static CONTROLLER_MEM: StaticCell<sdc::Mem<{ SDC_MEM }>> = StaticCell::new();
+    defmt::info!("sdc: init");
+    let controller = match build_controller(sdc_p, rng, mpsl, CONTROLLER_MEM.init(sdc::Mem::new()))
+    {
+        Ok(controller) => controller,
+        Err(e) => {
+            defmt::error!("sdc: would not start: {}", e);
+            return None;
+        }
+    };
+    defmt::info!("sdc: running");
+    report_versions();
+    Some((mpsl, controller))
+}
+
 /// How many connections the host keeps state for.
 ///
 /// One. A phone connects to a modem; nothing in the RNode protocol has a

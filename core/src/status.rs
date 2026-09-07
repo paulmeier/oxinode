@@ -89,6 +89,20 @@ pub struct Status {
     pub last_rssi_dbm: Option<i16>,
     /// Quarter-decibels, as the chip and the protocol both carry it.
     pub last_snr_quarter_db: Option<i8>,
+    /// The Bluetooth link, if the image has one.
+    pub bluetooth: Bluetooth,
+}
+
+/// What the Bluetooth transport is doing, for the title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Bluetooth {
+    /// No stack in this image, or it did not start.
+    #[default]
+    Absent,
+    /// Advertising and waiting.
+    Advertising,
+    /// A phone is connected.
+    Connected,
 }
 
 impl Default for Status {
@@ -113,6 +127,7 @@ impl Status {
             tx_count: 0,
             last_rssi_dbm: None,
             last_snr_quarter_db: None,
+            bluetooth: Bluetooth::Absent,
         }
     }
 }
@@ -158,6 +173,15 @@ pub fn render(status: &Status, frame: &mut Frame) {
         ),
     );
     font::draw_right(frame, RIGHT, 2, name.as_str(), false);
+    // Between the title and the name: nothing when there is no stack, `BT`
+    // while advertising, `BT*` with a phone on the line. The title bar is the
+    // one place on the page that is always visible and never scrolls.
+    let badge = match status.bluetooth {
+        Bluetooth::Absent => "",
+        Bluetooth::Advertising => "BT",
+        Bluetooth::Connected => "BT*",
+    };
+    font::draw(frame, 56, 2, badge, false);
 
     let mut line = FIRST_LINE;
 
@@ -279,6 +303,7 @@ mod tests {
             tx_count: 7,
             last_rssi_dbm: Some(-69),
             last_snr_quarter_db: Some(45),
+            bluetooth: Bluetooth::Absent,
         }
     }
 
@@ -322,8 +347,14 @@ mod tests {
         /// A named change to one field, so the failure message can say which.
         type Mutation = (&'static str, fn(&mut Status));
 
-        let mutations: [Mutation; 13] = [
+        let mutations: [Mutation; 15] = [
             ("name", |s| s.name = *b"BEEF"),
+            ("bluetooth advertising", |s| {
+                s.bluetooth = Bluetooth::Advertising
+            }),
+            ("bluetooth connected", |s| {
+                s.bluetooth = Bluetooth::Connected
+            }),
             ("frequency", |s| s.frequency_hz = 868_100_000),
             ("bandwidth", |s| s.bandwidth_hz = 250_000),
             ("spreading factor", |s| s.spreading_factor = 12),
