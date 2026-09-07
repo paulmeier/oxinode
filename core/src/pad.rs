@@ -387,43 +387,56 @@ impl Pad {
     }
 }
 
-/// The three-position mode switch, decoded from its two lines.
+/// The three-position switch on the Super IO, decoded from its two lines.
 ///
-/// Meshtastic names P1.09 `SWITCH_MODE1` ("Top Position") and P0.12
-/// `SWITCH_MODE2` ("Middle Position"), reads the second with no pull and
-/// treats it low as "GPS off". That is the whole of what the sources say.
-/// There is no Super IO schematic, so which level each position drives is a
-/// hypothesis until it is read on the board with the switch in all three
-/// positions: this decoder assumes each line is pulled to its active level in
-/// its own position and the bottom position drives neither.
+/// It is labelled on the board, and the labels are the truth of it: **Power
+/// OFF / Power ON / GPS ON**. It is a power switch first and a mode switch
+/// second. Read on the board on 2026-09-07, with the switch in each position
+/// and the firmware logging the raw levels:
+///
+/// | position  | P1.09 | P0.12 |
+/// |-----------|-------|-------|
+/// | Power ON  | high  | low   |
+/// | GPS ON    | low   | high  |
+/// | Power OFF | the board is unpowered, USB included |
+///
+/// So each line is driven *high* in its own position -- the opposite sense to
+/// the six pad switches beside it -- and there is no third reading, because
+/// in the third position nothing is running to take one. Meshtastic's names
+/// for the lines (`SWITCH_MODE1` "top", `SWITCH_MODE2` "middle", the second
+/// doubling as `PIN_GPS_SWITCH`) agree with this.
 ///
 /// The raw levels are what the firmware logs; this is only a reading of them.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Mode {
-    Top,
-    Middle,
-    Bottom,
-    /// Both lines active at once, which no position of a three-way switch
-    /// should produce.
+    /// P1.09 high: the switch is in its Power ON position.
+    PowerOn,
+    /// P0.12 high: the switch is in its GPS ON position.
+    GpsOn,
+    /// Neither line high. Not a position the firmware can be running in;
+    /// seen mid-travel, or with no Super IO attached, where both lines float.
+    Neither,
+    /// Both lines high at once, which no position of a three-way switch
+    /// produces.
     Invalid,
 }
 
 impl Mode {
-    /// Decode from the two lines, each `true` when active.
-    pub const fn decode(mode1_active: bool, mode2_active: bool) -> Mode {
-        match (mode1_active, mode2_active) {
-            (true, false) => Mode::Top,
-            (false, true) => Mode::Middle,
-            (false, false) => Mode::Bottom,
+    /// Decode from the two lines, `true` for high.
+    pub const fn decode(p1_09_high: bool, p0_12_high: bool) -> Mode {
+        match (p1_09_high, p0_12_high) {
+            (true, false) => Mode::PowerOn,
+            (false, true) => Mode::GpsOn,
+            (false, false) => Mode::Neither,
             (true, true) => Mode::Invalid,
         }
     }
 
     pub const fn name(self) -> &'static str {
         match self {
-            Mode::Top => "top",
-            Mode::Middle => "middle",
-            Mode::Bottom => "bottom",
+            Mode::PowerOn => "power on",
+            Mode::GpsOn => "gps on",
+            Mode::Neither => "neither",
             Mode::Invalid => "invalid",
         }
     }
@@ -830,17 +843,20 @@ mod tests {
         assert!(last_down < the_ok);
     }
 
+    /// The two readings taken on the board, as test vectors.
     #[test]
-    fn mode_switch_decodes_one_line_per_position() {
-        assert_eq!(Mode::decode(true, false), Mode::Top);
-        assert_eq!(Mode::decode(false, true), Mode::Middle);
-        assert_eq!(Mode::decode(false, false), Mode::Bottom);
+    fn mode_switch_decodes_what_the_board_read() {
+        // Power ON: P1.09=high P0.12=low.
+        assert_eq!(Mode::decode(true, false), Mode::PowerOn);
+        // GPS ON: P1.09=low P0.12=high.
+        assert_eq!(Mode::decode(false, true), Mode::GpsOn);
+        assert_eq!(Mode::decode(false, false), Mode::Neither);
         assert_eq!(Mode::decode(true, true), Mode::Invalid);
     }
 
     #[test]
     fn mode_names_are_distinct() {
-        let all = [Mode::Top, Mode::Middle, Mode::Bottom, Mode::Invalid];
+        let all = [Mode::PowerOn, Mode::GpsOn, Mode::Neither, Mode::Invalid];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a.name(), b.name());

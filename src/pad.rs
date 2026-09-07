@@ -189,13 +189,13 @@ pub fn drain(events: &Events, mut each: impl FnMut(ui::Input)) -> usize {
     }
 }
 
-/// The three-position mode switch on the Super IO: P1.09 and P0.12.
+/// The three-position switch on the Super IO: P1.09 and P0.12.
 ///
 /// Read with no pull, as Meshtastic reads it, because the Super IO's own
 /// resistors are unknown -- there is no schematic for that board -- and an
 /// internal pull fighting an external one would read the same in every
-/// position. What each position drives is a hypothesis until it is read on
-/// the board in all three; see [`Mode`] and the phase 10 notes.
+/// position. Both lines are driven high in their own position, and the third
+/// position cuts the board's power; see [`Mode`] for the readings.
 pub struct ModeSwitch<'d> {
     mode1: Input<'d>,
     mode2: Input<'d>,
@@ -215,13 +215,9 @@ impl<'d> ModeSwitch<'d> {
         (self.mode1.is_high(), self.mode2.is_high())
     }
 
-    /// The position, on the assumption that a line is driven *high* in its
-    /// position. That is the reading Meshtastic's use implies: it treats
-    /// P0.12 -- the line it names for the middle position -- low as "GPS
-    /// off", and the middle position is the one that switches the GPS on. It
-    /// is the opposite polarity to the six switches beside it, and it is a
-    /// hypothesis until the log of [`levels`](Self::levels) has been read in
-    /// all three positions. If it is wrong, the fix is two `!` here.
+    /// The position. Each line is driven high in its own position -- the
+    /// opposite polarity to the six switches beside it -- as read on the
+    /// board; see [`Mode`].
     pub fn read(&self) -> Mode {
         let (mode1, mode2) = self.levels();
         Mode::decode(mode1, mode2)
@@ -231,7 +227,7 @@ impl<'d> ModeSwitch<'d> {
     pub fn report(&self) {
         let (mode1, mode2) = self.levels();
         defmt::info!(
-            "board: mode switch P1.09={=str} P0.12={=str} -> {=str} (polarity unconfirmed)",
+            "board: mode switch P1.09={=str} P0.12={=str} -> {=str}",
             if mode1 { "high" } else { "low" },
             if mode2 { "high" } else { "low" },
             self.read().name()

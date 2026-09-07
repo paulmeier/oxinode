@@ -10,8 +10,8 @@ board: nav pad usable=true (UICR.NFCPINS), regulator=3.3 V
 board: mode switch P1.09=low P0.12=high -> middle (polarity unconfirmed)
 ```
 
-What remains is the mode switch in its other two positions, to confirm or
-flip the polarity.
+The mode switch has been read in every position it can be read in, and the
+third position turned out to be a power switch.
 
 The interface models six gestures; the Super IO has exactly six switches. This
 phase connects the two, and most of it is about *time* rather than pins.
@@ -183,33 +183,37 @@ Two consequences worth knowing:
   `regulator=3.3 V` half of the line is there to show `REGOUT0` survived,
   every boot, forever.
 
-## The mode switch
+## The mode switch is a power switch
 
 P1.09 and P0.12 carry a three-position switch. Meshtastic names them
 `SWITCH_MODE1` ("Top Position") and `SWITCH_MODE2` ("Middle Position"), reads
 the second with `pinMode(INPUT)` — no pull — and treats it low as "GPS off".
 That is the whole of what the sources say: there is no schematic for the Super
-IO, so how the switch is wired is not known.
-
-So the driver reads both lines with no pull, as Meshtastic does — an internal
+IO. The driver reads both lines with no pull, as Meshtastic does — an internal
 pull fighting an unknown external one could read the same in every position —
-and logs the raw levels and a reading of them at boot:
+and logs the raw levels and a reading of them at boot.
 
-```
-board: mode switch P1.09=low P0.12=high -> middle (polarity unconfirmed)
-```
+The board itself says more than the sources. The switch is labelled **Power
+OFF / Power ON / GPS ON**, and on 2026-09-07 it was read in each position by
+resetting the board over the KISS port and catching the boot log:
 
-The reading assumes each line is driven *high* in its own position, which is
-what Meshtastic's use implies: the line it names for the middle position is
-the GPS switch, low means off, and the middle position is the one that turns
-the GPS on. That is the opposite polarity to the six switches beside it, and
-it is a hypothesis until the line above has been read with the switch in all
-three positions. If it is wrong, the fix is two `!` in `ModeSwitch::read` and
-the log is what will say so. `Mode::decode` itself — one line per position,
-neither for the bottom, both is invalid — is in the core and tested.
+| position  | P1.09 | P0.12 | log |
+|-----------|-------|-------|-----|
+| Power ON  | high  | low   | `board: mode switch P1.09=high P0.12=low -> power on` |
+| GPS ON    | low   | high  | `board: mode switch P1.09=low P0.12=high -> gps on` |
+| Power OFF | —     | —     | the board left the USB bus; nothing runs to read anything |
 
-The switch does nothing yet. What it *should* do is a question for the GPS
-phase, since the GPS is what Meshtastic uses it for.
+So each line is driven *high* in its own position — the opposite polarity to
+the six switches beside it, and what Meshtastic's use implied — and the third
+position is not a mode: it cuts the board's power, USB included. `Mode::decode`
+is in the core with the two readings as test vectors; "neither high" is not a
+position but mid-travel, or a board with no Super IO on it, where both
+unpulled lines float.
+
+The firmware does nothing with the position yet. Whether GPS ON should switch
+the GPS on is the GPS phase's question, since that is what Meshtastic uses it
+for; Power ON versus GPS ON is otherwise the only distinction the firmware
+will ever see.
 
 ## Getting the boot log at all
 
@@ -222,18 +226,35 @@ hardware *is* were gone every time, and a reset over the KISS port to
 provoke them again just lost them again.
 
 So the pump now waits for DTR on the log port, as the bring-up images always
-did. The ring behind it holds 4 KB, which is the whole of boot; a terminal
-that opens seconds later gets it from the top, and a board nobody listens to
-fills the ring and drops the oldest, as before. Reading it is:
+did, and the ring behind it holds 4 KB, which is the whole of boot. That got
+the boot log, with a caveat that was measured rather than expected: **the
+port has to be opened within the first second or so of the device
+appearing.** Opened 300 ms after the node showed up, the port produced
+nothing; opened 20 ms after, it produced the whole boot. Toggling DTR on an
+already-open port produced nothing either. So DTR on the *second* CDC
+function is seen by the firmware only around enumeration — the same
+observation phase 2 made and worked around — and it is not yet understood.
+It is not a phase 10 problem, but it is a real one for anyone reading this
+log, so the recipe that works is written down here:
 
-```bash
-python3 -c "import serial,sys; s=serial.Serial(sys.argv[1],115200); \
-  sys.stdout.buffer.write(s.read(4096))" /dev/cu.usbmodemXXX3 \
-  | defmt-print -e target/thumbv7em-none-eabihf/release/rnode
+```python
+# Send the RNode reset over the KISS port, then open the log port the
+# instant it comes back. Decode with:
+#   defmt-print -e target/thumbv7em-none-eabihf/release/rnode < boot.bin
+import os, serial, time
+LOG, KISS = "/dev/cu.usbmodemXXX3", "/dev/cu.usbmodemXXX1"
+k = serial.Serial(KISS, 115200); k.write(b"\xc0\x55\xf8\xc0"); k.close()
+while os.path.exists(LOG): time.sleep(0.02)
+while True:
+    try: s = serial.Serial(LOG, 115200, timeout=0.2); break
+    except Exception: time.sleep(0.02)
+end = time.time() + 8
+with open("boot.bin", "wb") as f:
+    while time.time() < end: f.write(s.read(4096))
 ```
 
-with an explicit baud rate, because macOS re-applies whatever the port was
-last opened at — including a flash tool's 1200-baud touch.
+Explicit baud rate throughout, because macOS re-applies whatever the port
+was last opened at — including a flash tool's 1200-baud touch.
 
 ## What it does not do
 
@@ -264,6 +285,6 @@ What the issue's "done when" needs, and the log line that answers each:
 - [x] **Debounce settled against measurements.** Worst `settled in` over 130
       presses: 0 ms, 0 bounces. `DEBOUNCE_MS` lowered from 20 to 10; the
       reasoning is in the table section above.
-- [ ] **The mode switch read.** `board: mode switch …` with the switch in
-      each of its three positions; confirm or flip the polarity in
-      `ModeSwitch::read`, and record the three readings.
+- [x] **The mode switch read.** Power ON: `P1.09=high P0.12=low`. GPS ON:
+      `P1.09=low P0.12=high`. Power OFF: the board is unpowered. Active high
+      confirmed; the readings are the decoder's test vectors.

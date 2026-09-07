@@ -25,7 +25,7 @@ Being precise about that:
 | 7 | SH1107 OLED status display | **done** — verified on hardware, [notes](docs/phase-7-display.md) |
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
 | 9 | An on-device interface, and a simulator to build it with | **done** — the shell is pure code and every screen has a golden image, [notes](docs/phase-9-simulator.md) |
-| 10 | The navigation pad driver | **done** — all six switches, repeat and debounce verified on the board; mode switch polarity still to confirm, [notes](docs/phase-10-pad.md) |
+| 10 | The navigation pad driver | **done** — verified on hardware: six switches, repeat, debounce, and the mode switch read in every position it has, [notes](docs/phase-10-pad.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -75,7 +75,7 @@ settled against the board rather than guessed. It also turned up what
 `embassy-nrf` does to `UICR.NFCPINS` when asked for P0.10 — see
 [docs/phase-10-pad.md](docs/phase-10-pad.md) before flashing it.
 
-Phases 1 to 8 are confirmed on hardware.
+Phases 1 to 8 and 10 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -241,7 +241,7 @@ to work from.
 | LF clock | — | external 32.768 kHz crystal (LFXO) |
 | Navigation pad up / down / left / right | P0.21 / P0.17 / P1.05 / P0.16 | active low, internal pull-ups; auto-repeat |
 | Navigation pad OK / back | P0.10 / P0.15 | active low; **P0.10 is an NFC pin**, see below |
-| Mode switch (three positions) | P1.09 / P0.12 | read with no pull, polarity unconfirmed; see [phase 10](docs/phase-10-pad.md) |
+| Power OFF / Power ON / GPS ON switch | P1.09 / P0.12 | P1.09 high in Power ON, P0.12 high in GPS ON, no pull; Power OFF cuts the board's power |
 | SWDIO / SWDCLK | — | test pads TP1 / TP2, no header |
 
 Out of scope for now, recorded so nobody has to re-derive it: second I²C bus
