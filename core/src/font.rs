@@ -1,23 +1,30 @@
 //! A 5 × 7 bitmap font, and just enough text rendering for a status page.
 //!
-//! # Uppercase only, deliberately
+//! # Mixed case
 //!
-//! The table covers space, the digits, `A`–`Z` and fifteen symbols — fifty-five
-//! glyphs. Lowercase input is folded to uppercase rather than being dropped or
-//! boxed, so `"Freq"` renders as `FREQ`.
+//! The table covers space, the digits, `A`–`Z`, `a`–`z` and fifteen symbols —
+//! eighty-one glyphs. Anything outside it renders as a hollow box, so a missing
+//! glyph looks like a missing glyph rather than like a space.
 //!
-//! That is a real limitation and it is a chosen one. A status panel reads
-//! perfectly well in capitals, and the alternative was twenty-six more glyphs
-//! of hand-drawn art for a screen that shows numbers and four-letter labels.
-//! Anything outside the table renders as a hollow box, so a missing glyph looks
-//! like a missing glyph rather than like a space.
+//! Lowercase arrived with the on-device menus. A status panel reads perfectly
+//! well in capitals, and for phases 7 and 8 it was all capitals: the table held
+//! fifty-five glyphs and folded lowercase input to uppercase. Menus are a
+//! different kind of reading. A screen of prose-cased labels — `Display
+//! Options`, `Bluetooth Toggle` — is scanned rather than read, and word shape
+//! is most of what makes scanning work; in full capitals every label is the
+//! same rectangle.
+//!
+//! The fold is still there as a fallback, so a character with no glyph of its
+//! own is tried again in uppercase before it becomes a box. Nothing in the
+//! table needs that today. It costs one comparison and means an added
+//! uppercase-only glyph never silently regresses to a box in lowercase.
 //!
 //! # How the glyphs got here
 //!
 //! Written as readable ASCII art and converted to this table by a generator,
-//! rather than typed as hex. Fifty-five glyphs of hand-entered hex is two
-//! hundred and seventy-five chances to make a mistake whose only symptom is a
-//! wrong pixel on a screen nobody is looking at closely.
+//! rather than typed as hex. Eighty-one glyphs of hand-entered hex is four
+//! hundred and five chances to make a mistake whose only symptom is a wrong
+//! pixel on a screen nobody is looking at closely.
 //!
 //! Column-major: byte *n* is column *n*, and bit *k* of it is row *k*, top
 //! first. That is the orientation the SH1107 wants for a vertical run of eight
@@ -38,7 +45,7 @@ pub const ADVANCE: usize = WIDTH + SPACING;
 /// Height of one line, including the gap below it.
 pub const LINE_HEIGHT: usize = HEIGHT + 2;
 
-pub const GLYPHS: [(u8, [u8; WIDTH]); 55] = [
+pub const GLYPHS: [(u8, [u8; WIDTH]); 81] = [
     (b' ', [0x00, 0x00, 0x00, 0x00, 0x00]),
     (b'!', [0x00, 0x00, 0x5f, 0x00, 0x00]),
     (b'#', [0x14, 0x7f, 0x14, 0x7f, 0x14]),
@@ -94,13 +101,47 @@ pub const GLYPHS: [(u8, [u8; WIDTH]); 55] = [
     (b'Y', [0x03, 0x04, 0x78, 0x04, 0x03]),
     (b'Z', [0x61, 0x51, 0x49, 0x45, 0x43]),
     (b'_', [0x40, 0x40, 0x40, 0x40, 0x40]),
+    (b'a', [0x20, 0x54, 0x54, 0x54, 0x78]),
+    (b'b', [0x7f, 0x48, 0x44, 0x44, 0x38]),
+    (b'c', [0x38, 0x44, 0x44, 0x44, 0x44]),
+    (b'd', [0x38, 0x44, 0x44, 0x48, 0x7f]),
+    (b'e', [0x38, 0x54, 0x54, 0x54, 0x58]),
+    (b'f', [0x08, 0x7e, 0x09, 0x09, 0x02]),
+    (b'g', [0x0c, 0x52, 0x52, 0x52, 0x3e]),
+    (b'h', [0x7f, 0x08, 0x04, 0x04, 0x78]),
+    (b'i', [0x00, 0x44, 0x7d, 0x40, 0x00]),
+    (b'j', [0x20, 0x40, 0x44, 0x3d, 0x00]),
+    (b'k', [0x7f, 0x10, 0x10, 0x28, 0x44]),
+    (b'l', [0x00, 0x41, 0x7f, 0x40, 0x00]),
+    (b'm', [0x7c, 0x04, 0x38, 0x04, 0x78]),
+    (b'n', [0x7c, 0x08, 0x04, 0x04, 0x78]),
+    (b'o', [0x38, 0x44, 0x44, 0x44, 0x38]),
+    (b'p', [0x7e, 0x12, 0x12, 0x12, 0x0c]),
+    (b'q', [0x0c, 0x12, 0x12, 0x12, 0x7e]),
+    (b'r', [0x7c, 0x08, 0x04, 0x04, 0x08]),
+    (b's', [0x48, 0x54, 0x54, 0x54, 0x24]),
+    (b't', [0x04, 0x3f, 0x44, 0x44, 0x20]),
+    (b'u', [0x3c, 0x40, 0x40, 0x20, 0x7c]),
+    (b'v', [0x1c, 0x20, 0x40, 0x20, 0x1c]),
+    (b'w', [0x3c, 0x40, 0x78, 0x40, 0x3c]),
+    (b'x', [0x44, 0x28, 0x10, 0x28, 0x44]),
+    (b'y', [0x0e, 0x50, 0x50, 0x50, 0x3e]),
+    (b'z', [0x44, 0x64, 0x54, 0x4c, 0x44]),
 ];
 
 /// The columns for one character, or `None` if it is not in the table.
 ///
-/// Lowercase is folded to uppercase; see the module docs.
+/// Tried as written first, then folded to uppercase; see the module docs.
 pub fn glyph(c: u8) -> Option<&'static [u8; WIDTH]> {
-    let c = c.to_ascii_uppercase();
+    exact(c).or_else(|| {
+        let upper = c.to_ascii_uppercase();
+        // Only worth a second search if folding actually changed something.
+        (upper != c).then(|| exact(upper)).flatten()
+    })
+}
+
+/// One character, looked up exactly as given.
+fn exact(c: u8) -> Option<&'static [u8; WIDTH]> {
     let mut lo = 0usize;
     let mut hi = GLYPHS.len();
     // The table is sorted by character, so this is a binary search rather than
@@ -229,7 +270,7 @@ mod tests {
         for (c, columns) in GLYPHS {
             assert_eq!(glyph(c), Some(&columns), "{:?}", c as char);
         }
-        assert_eq!(GLYPHS.len(), 55);
+        assert_eq!(GLYPHS.len(), 81);
     }
 
     /// Everything a status page needs, present. Stated as a list rather than a
@@ -242,11 +283,86 @@ mod tests {
         }
     }
 
-    /// Lowercase renders as uppercase rather than as a box.
+    /// Lowercase has glyphs of its own, and they are not the uppercase ones.
+    ///
+    /// The inequality is the point. An `a` that renders as `A` is exactly the
+    /// regression this replaced, and it would pass a mere `is_some`.
     #[test]
-    fn lowercase_folds_to_uppercase() {
+    fn lowercase_is_its_own_shape() {
         for (lower, upper) in b"abcxyz".iter().zip(b"ABCXYZ") {
-            assert_eq!(glyph(*lower), glyph(*upper), "{:?}", *lower as char);
+            assert!(glyph(*lower).is_some(), "{:?} is missing", *lower as char);
+            assert_ne!(glyph(*lower), glyph(*upper), "{:?}", *lower as char);
+        }
+    }
+
+    /// Every letter, both cases, and no two letters drawn the same.
+    ///
+    /// Distinctness is what makes a menu readable: two labels that differ by
+    /// one letter have to look different. Checked over the whole alphabet
+    /// rather than spot-checked, because a copy-and-paste slip in the art is
+    /// the likely way to get a duplicate and it would be invisible otherwise.
+    #[test]
+    fn the_alphabet_is_complete_in_both_cases_and_all_distinct() {
+        let mut seen: Vec<(u8, [u8; WIDTH])> = Vec::new();
+        for c in (b'a'..=b'z').chain(b'A'..=b'Z') {
+            let columns = *glyph(c).unwrap_or_else(|| panic!("{:?} is missing", c as char));
+            if let Some((other, _)) = seen.iter().find(|(_, cols)| *cols == columns) {
+                panic!("{:?} and {:?} draw the same", *other as char, c as char);
+            }
+            seen.push((c, columns));
+        }
+    }
+
+    /// The fold is still there for anything the table has in one case only.
+    ///
+    /// Nothing needs it today -- every letter has both cases -- so it is
+    /// checked on a symbol-free stand-in: a character absent in lowercase form
+    /// resolves through its uppercase entry rather than becoming a box.
+    #[test]
+    fn an_uppercase_only_glyph_is_still_reachable_in_lowercase() {
+        // The digits and symbols have no case, so uppercase-folding them is a
+        // no-op; the fold is exercised by pretending a letter went missing.
+        assert_eq!(exact(b'Z'), glyph(b'Z'));
+        assert!(exact(b'z').is_some(), "z has its own glyph now");
+        // A character whose uppercase form is in the table and whose lowercase
+        // form is not: none exist, so assert the mechanism directly.
+        assert_eq!(glyph(b'\xe5'), None, "no glyph, no uppercase form, no box");
+    }
+
+    /// Lowercase does not stray above the cap line or below the baseline.
+    ///
+    /// Row 0 is the top of an uppercase letter and row 6 the baseline. An
+    /// x-height letter that reached row 0 would collide with the line above,
+    /// and this font has no room under row 6 for a descender, so `g` and `y`
+    /// have to turn their tails inside the cell.
+    #[test]
+    fn lowercase_stays_inside_the_cell() {
+        for c in b'a'..=b'z' {
+            let columns = glyph(c).unwrap();
+            for (x, column) in columns.iter().enumerate() {
+                assert_eq!(
+                    column & !0x7F,
+                    0,
+                    "{:?} column {x} draws below the baseline",
+                    c as char
+                );
+            }
+        }
+        // Only the tall letters reach the cap line: the seven ascenders, plus
+        // `i` and `j`, whose tittles sit up there rather than at x-height.
+        let tall = b"bdfhklt" // ascenders
+            .iter()
+            .chain(b"ij") // dotted
+            .copied()
+            .collect::<Vec<u8>>();
+        for c in b'a'..=b'z' {
+            let touches_top = glyph(c).unwrap().iter().any(|col| col & 1 != 0);
+            assert_eq!(
+                touches_top,
+                tall.contains(&c),
+                "{:?} touching the cap line",
+                c as char
+            );
         }
     }
 

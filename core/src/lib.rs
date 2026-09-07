@@ -27,4 +27,5 @@ pub mod rnode;
 pub mod serial;
 pub mod sh1107;
 pub mod status;
+pub mod ui;
 pub mod usb;
