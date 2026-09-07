@@ -274,6 +274,18 @@ worth keeping for the next one:
   stall.
 * **The stall capture** described above, armed around every bring-up.
 
+### Open: the touch with a phone connected wedges the bootloader
+
+Twice today the 1200-baud touch on the product image, taken while a phone
+was connected over Bluetooth, left the board in its bootloader with the
+serial DFU not answering — `muzi-Base` mounted, panel blank, LED blinking,
+"Target is not in DFU mode" from the flasher — and only a double-tap
+recovered it. The `ble` bring-up image took dozens of touches without one.
+The product image uses 51 KB of RAM to that image's 30 KB, which puts the
+bootloader's double-reset magic word at `0x20007F7C` inside this image's
+`.bss`; whether that is the mechanism is not established. Until it is:
+disconnect the phone before reflashing, or reset the board first.
+
 ### What is still owed
 
 * **`NVMC` stalls the CPU.** A flash page erase takes about 85 ms during which
