@@ -32,6 +32,7 @@ Being precise about that:
 | 14 | The GPS, and the Position screen | **done** — verified on hardware: the module powered through its load switch, NMEA at 9600 baud with the module's TX on P0.20, parsed in the core against captured sentences, a fix acquired and shown on the Position screen, and the receiver switchable from the mode switch and the menu; the current draw is still unmeasured, [notes](docs/phase-14-gps.md) |
 | 15 | Messaging from the node: a spike | **measured** — `rns-core` built for the board, its crypto timed, and an announce, an encrypted packet and an LXMF message exchanged each way with a stock Python Reticulum, over the USB serial interface and over the air through a second board running `rnode`; the numbers, the decisions on sharing the radio and on the licence, and the recommendation are in the [notes](docs/phase-15-spike.md) |
 | 16 | Listening before transmitting | **done** — verified on two boards: the modem senses the channel with the LR1121's activity detection before every transmission, backs off a bounded random number of slots when it is busy, and spends the wait in receive so a packet that arrives meanwhile is received rather than transmitted over; the phase 15 collision no longer loses the host's reply, and what is still lost is measured, [notes](docs/phase-16-csma.md) |
+| 17 | The air header and the split at 255 | **done** — verified on two boards: every LoRa frame carries the stock RNode's one-byte header, a sequence nibble and a split flag, and a packet longer than a frame goes as two the receiver joins by that nibble, so a full-MTU Reticulum packet crosses and the frame layout is a stock RNode's; 100 to 508 bytes each way, fourteen of fourteen; not yet run against a stock RNode, [notes](docs/phase-17-air-header.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -150,7 +151,19 @@ its second -- no longer loses the reply. Packets that begin during a sense
 are still avoided rather than received. See
 [docs/phase-16-csma.md](docs/phase-16-csma.md).
 
-Phases 1 to 8, 10, 11, 14 and 16 are confirmed on hardware; phase 12's image boots
+Phase 17 puts the stock RNode's air header on every frame and splits at
+255. Until it, oxinode put raw packets on the air: it could not carry a
+full-MTU Reticulum packet, and a stock RNode read the first byte of every
+oxinode packet as a header. Now one byte goes in front -- a sequence nibble
+and a split flag -- and a packet over 254 bytes goes as two frames under
+the same header, joined by the receiver by nibble, with the second frame
+sent straight after the first with no carrier-sense wait between them. The
+split and the reassembly are in `oxinode-core`, sixteen tests including a
+stock split written out by hand; two boards exchanged every size from 100
+to 508 bytes each way. Not yet run against a stock RNode. See
+[docs/phase-17-air-header.md](docs/phase-17-air-header.md).
+
+Phases 1 to 8, 10, 11, 14, 16 and 17 are confirmed on hardware; phase 12's image boots
 and serves a host, and its editors are held to golden images, but a pad walk
 through them on the board has not been done from this desk. Phase 13 changes
 no pixel on the board's panel -- every golden image from before it still
