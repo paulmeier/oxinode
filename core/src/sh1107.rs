@@ -291,6 +291,39 @@ impl Frame {
     }
 }
 
+/// The framebuffer is what the interface crate draws on.
+///
+/// This is the whole of what ties [`monopanel`] to this board: three
+/// methods, and the two drawing helpers overridden with the byte-wise
+/// versions above so a generic caller gets the same speed as a direct one.
+impl monopanel::Canvas for Frame {
+    fn width(&self) -> usize {
+        WIDTH
+    }
+
+    fn height(&self) -> usize {
+        HEIGHT
+    }
+
+    fn set_pixel(&mut self, x: usize, y: usize, on: bool) {
+        Frame::set_pixel(self, x, y, on);
+    }
+
+    fn fill(&mut self, on: bool) {
+        Frame::fill(self, on);
+    }
+
+    fn rect(&mut self, x: usize, y: usize, w: usize, h: usize, on: bool) {
+        Frame::rect(self, x, y, w, h, on);
+    }
+}
+
+impl monopanel::Readable for Frame {
+    fn pixel(&self, x: usize, y: usize) -> bool {
+        Frame::pixel(self, x, y)
+    }
+}
+
 /// The commands that take the controller from reset to showing RAM.
 ///
 /// Power-on values are used wherever the datasheet gives one and there is no
@@ -515,6 +548,42 @@ mod tests {
             assert_eq!(live.is_dirty(page), page == expected, "page {page}");
         }
         assert!(!live.pixel(40, 70));
+    }
+
+    /// Through the interface crate's trait, a frame is the same canvas as
+    /// a bitmap of its size: every pixel a page puts on one lands on the
+    /// other. This is what makes the simulator's pictures the board's.
+    #[test]
+    fn a_frame_is_the_same_canvas_as_a_bitmap() {
+        use monopanel::{page, Bitmap, Canvas, Readable};
+        let mut nav = crate::ui::nav();
+        nav.handle(crate::ui::Input::Right);
+        nav.handle(crate::ui::Input::Select);
+        let mut frame = Frame::new();
+        page(&mut frame, &mut nav, "9%", "BT", &["one", "two", "three"]);
+        let mut bitmap = Bitmap::<WIDTH, HEIGHT>::new();
+        page(&mut bitmap, &mut nav, "9%", "BT", &["one", "two", "three"]);
+        assert_eq!((Canvas::width(&frame), Canvas::height(&frame)), (128, 128));
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                assert_eq!(
+                    Readable::pixel(&frame, x, y),
+                    bitmap.pixel(x, y),
+                    "({x}, {y})"
+                );
+            }
+        }
+        assert!(bitmap.lit() > 500, "a page was drawn");
+        // And the trait's clipping is the frame's: nothing off the panel.
+        let mut edge = Frame::new();
+        Canvas::rect(&mut edge, 126, 126, 20, 20, true);
+        Canvas::set_pixel(&mut edge, WIDTH, 0, true);
+        Canvas::set_pixel(&mut edge, 0, HEIGHT, true);
+        assert!(edge.pixel(127, 127) && !edge.pixel(0, 0) && !edge.pixel(0, 127));
+        assert_eq!(
+            edge.as_bytes().iter().map(|b| b.count_ones()).sum::<u32>(),
+            4
+        );
     }
 
     #[test]

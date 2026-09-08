@@ -2,8 +2,8 @@
 # Everything that can be checked without a board attached.
 #
 # Split three ways, because the pieces cannot share a build target:
-#   * oxinode-core, the panel simulator and the Python tools run on the host,
-#     where a test harness exists;
+#   * the interface crate, oxinode-core, the panel simulator and the Python
+#     tools run on the host, where a test harness exists;
 #   * the firmware crate only compiles for thumbv7em-none-eabihf and cannot be
 #     unit tested at all (no std, no probe, no harness) -- so it is checked by
 #     building it and inspecting the result;
@@ -47,15 +47,27 @@ try cargo clippy --lib --bins -- -D warnings
 step "lint (firmware, ble)"
 try cargo clippy --no-default-features --features ble --lib --bins -- -D warnings
 
+# The interface crate has one optional feature, the embedded-graphics
+# adapter, and the two builds are different code: without it the crate has
+# no dependencies at all, which is a property worth checking on every run.
+step "lint (monopanel, $host)"
+try cargo clippy -p monopanel --target "$host" --all-targets -- -D warnings
+try cargo clippy -p monopanel --target "$host" --all-targets --all-features -- -D warnings
+
+step "unit tests (monopanel, $host)"
+try cargo test -p monopanel --target "$host"
+try cargo test -p monopanel --target "$host" --all-features
+
 step "lint (core, $host)"
 try cargo clippy -p oxinode-core --target "$host" --all-targets -- -D warnings
 
 step "unit tests (core, $host)"
 try cargo test -p oxinode-core --target "$host"
 
-# The simulator is a second host crate; it renders the interface and compares
-# every screen and menu against the golden images in sim/golden. A mismatch
-# leaves a diff image in target/golden-diff/ and fails here.
+# The simulator is a third host crate; it renders the interface and compares
+# every screen and menu against the golden images in sim/golden, at the
+# board's panel size and at 128 x 64. A mismatch leaves a diff image in
+# target/golden-diff/ and fails here.
 step "lint (sim, $host)"
 try cargo clippy -p oxinode-sim --target "$host" --all-targets -- -D warnings
 

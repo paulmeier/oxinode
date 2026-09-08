@@ -31,8 +31,11 @@
 //! pixels, so a glyph column is one byte of display RAM when the text lands on
 //! a page boundary — which is worth having even though the renderer below does
 //! not currently exploit it.
+//!
+//! The renderer draws on any [`Canvas`]: a glyph is a handful of `set_pixel`
+//! calls, and nothing about a font depends on the display it lands on.
 
-use crate::sh1107::Frame;
+use crate::Canvas;
 
 /// Glyph width in pixels.
 pub const WIDTH: usize = 5;
@@ -167,12 +170,12 @@ pub const MISSING: [u8; WIDTH] = [0x7F, 0x41, 0x41, 0x41, 0x7F];
 /// Draw one character with its top-left corner at `(x, y)`.
 ///
 /// Returns where the next character starts.
-pub fn draw_char(frame: &mut Frame, x: usize, y: usize, c: u8, on: bool) -> usize {
+pub fn draw_char(canvas: &mut impl Canvas, x: usize, y: usize, c: u8, on: bool) -> usize {
     let columns = glyph(c).unwrap_or(&MISSING);
     for (dx, column) in columns.iter().enumerate() {
         for dy in 0..HEIGHT {
             if column & (1 << dy) != 0 {
-                frame.set_pixel(x + dx, y + dy, on);
+                canvas.set_pixel(x + dx, y + dy, on);
             }
         }
     }
@@ -181,16 +184,17 @@ pub fn draw_char(frame: &mut Frame, x: usize, y: usize, c: u8, on: bool) -> usiz
 
 /// Draw a string. Returns where the next character would start.
 ///
-/// Characters that would fall off the right edge are not drawn — the frame
+/// Characters that would fall off the right edge are not drawn — the canvas
 /// clips them anyway, but stopping means the cursor returned is honest about
 /// how far it got.
-pub fn draw(frame: &mut Frame, x: usize, y: usize, text: &str, on: bool) -> usize {
+pub fn draw(canvas: &mut impl Canvas, x: usize, y: usize, text: &str, on: bool) -> usize {
     let mut cursor = x;
+    let right = canvas.width();
     for c in text.bytes() {
-        if cursor + WIDTH > crate::sh1107::WIDTH {
+        if cursor + WIDTH > right {
             break;
         }
-        cursor = draw_char(frame, cursor, y, c, on);
+        cursor = draw_char(canvas, cursor, y, c, on);
     }
     cursor
 }
@@ -206,10 +210,10 @@ pub const fn width_of(text: &str) -> usize {
 /// Numbers on a status page belong in a column, and a column of numbers that
 /// are not the same length has to be aligned from the right or it does not read
 /// as a column.
-pub fn draw_right(frame: &mut Frame, right: usize, y: usize, text: &str, on: bool) {
+pub fn draw_right(canvas: &mut impl Canvas, right: usize, y: usize, text: &str, on: bool) {
     let width = width_of(text).saturating_sub(SPACING);
     let x = right.saturating_sub(width);
-    draw(frame, x, y, text, on);
+    draw(canvas, x, y, text, on);
 }
 
 // A glyph column is seven rows in the low bits, so the top bit is always clear.
@@ -230,7 +234,10 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sh1107;
+    use crate::{Bitmap, Readable};
+
+    /// The panel the font was drawn for.
+    type Panel = Bitmap<128, 128>;
 
     /// Render a glyph back into art, so a test can state what it should look
     /// like in the same form the generator took it in.
@@ -410,7 +417,7 @@ mod tests {
     /// Drawing puts pixels where the glyph says, at the offset asked for.
     #[test]
     fn a_character_lands_where_it_is_put() {
-        let mut f = sh1107::Frame::new();
+        let mut f = Panel::new();
         let next = draw_char(&mut f, 10, 20, b'F', true);
         assert_eq!(next, 10 + ADVANCE);
         // Top bar of the F, all five columns.
@@ -429,7 +436,7 @@ mod tests {
 
     #[test]
     fn a_string_advances_one_cell_per_character() {
-        let mut f = sh1107::Frame::new();
+        let mut f = Panel::new();
         let end = draw(&mut f, 0, 0, "ABC", true);
         assert_eq!(end, 3 * ADVANCE);
     }
@@ -438,13 +445,13 @@ mod tests {
     /// and says how far it got.
     #[test]
     fn a_string_stops_at_the_right_edge() {
-        let mut f = sh1107::Frame::new();
+        let mut f = Panel::new();
         let long = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ";
         let end = draw(&mut f, 0, 0, long, true);
-        assert!(end <= sh1107::WIDTH + ADVANCE);
+        assert!(end <= 128 + ADVANCE);
         // Nothing wrapped onto the row below.
         for y in HEIGHT..LINE_HEIGHT {
-            for x in 0..sh1107::WIDTH {
+            for x in 0..128 {
                 assert!(!f.pixel(x, y), "({x},{y}) wrapped");
             }
         }
@@ -453,12 +460,12 @@ mod tests {
     /// Right alignment puts the last pixel column of the text at `right`.
     #[test]
     fn right_aligned_text_ends_where_it_is_told() {
-        let mut f = sh1107::Frame::new();
+        let mut f = Panel::new();
         draw_right(&mut f, 100, 0, "12", true);
         // "12" is two cells wide less the trailing gap: 11 pixels, so it starts
         // at 89 and its last column is 99 -- the pixel before `right`.
         assert_eq!(width_of("12") - SPACING, 11);
-        let lit: Vec<usize> = (0..sh1107::WIDTH).filter(|&x| f.pixel(x, 0)).collect();
+        let lit: Vec<usize> = (0..128).filter(|&x| f.pixel(x, 0)).collect();
         assert!(!lit.is_empty());
         assert!(*lit.iter().max().unwrap() < 100);
         assert!(*lit.iter().min().unwrap() >= 89);
@@ -468,10 +475,10 @@ mod tests {
     /// reason `draw_right` exists.
     #[test]
     fn numbers_of_different_lengths_share_a_right_edge() {
-        let mut f = sh1107::Frame::new();
+        let mut f = Panel::new();
         draw_right(&mut f, 60, 0, "7", true);
         draw_right(&mut f, 60, LINE_HEIGHT, "1234", true);
-        let right_of = |y: usize| (0..sh1107::WIDTH).filter(|&x| f.pixel(x, y)).max();
+        let right_of = |y: usize| (0..128).filter(|&x| f.pixel(x, y)).max();
         // The rightmost lit pixel of each row is within one glyph column of the
         // other: the digits themselves differ in which columns they use.
         let a = right_of(0).unwrap();

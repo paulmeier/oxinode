@@ -16,6 +16,7 @@
 //! edit shows the value that was set. Nothing else is acted on; the actions
 //! are collected for the caller to look at.
 
+use monopanel::Canvas;
 use oxinode_core::battery;
 use oxinode_core::edit::Editor;
 use oxinode_core::lr1121::config::{ConfigError, RadioConfig, DEFAULT};
@@ -24,7 +25,9 @@ use oxinode_core::screens::{
 };
 use oxinode_core::sh1107::Frame;
 use oxinode_core::status::Bluetooth;
-use oxinode_core::ui::{Action, Input, Nav};
+use oxinode_core::ui::{self, Action, Input, Nav, NavExt};
+
+use crate::panel::{Panel, Size};
 
 /// Which fixture a scene starts from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -167,19 +170,31 @@ impl Scene {
     /// Home, at the top, with the given state.
     pub fn with_state(state: State) -> Self {
         Scene {
-            nav: Nav::new(),
+            nav: ui::nav(),
             state,
         }
     }
 
-    /// Render the page as it stands.
+    /// Render the page as it stands, on the board's own frame.
     ///
     /// Takes `&mut self` because the page tells the navigator how tall the
-    /// content is; see [`oxinode_core::ui::page`].
+    /// content is; see [`monopanel::page`].
     pub fn frame(&mut self) -> Frame {
         let mut frame = Frame::new();
-        screens::render(&mut frame, &mut self.nav, &self.state);
+        self.draw(&mut frame);
         frame
+    }
+
+    /// Render the page as it stands, on a panel of any size.
+    pub fn panel(&mut self, size: Size) -> Panel {
+        let mut panel = Panel::new(size);
+        self.draw(&mut panel);
+        panel
+    }
+
+    /// Render the page as it stands, on whatever is handed in.
+    pub fn draw(&mut self, canvas: &mut impl Canvas) {
+        screens::render(canvas, &mut self.nav, &self.state);
     }
 
     /// Press one key. Returns what the board would now have to do, if
@@ -189,8 +204,23 @@ impl Scene {
     /// the key was pressed, so that a `Down` on a fresh screen knows how far
     /// it can go. Then the caller's part is played -- see the module docs --
     /// and the action is returned as the firmware would have received it.
+    ///
+    /// Rendered on the board's frame: a scene is the board's, and how far a
+    /// `Down` goes is a fact about the panel the board has. A caller looking
+    /// at another panel size renders with [`Scene::panel`] and presses with
+    /// [`Scene::press_on`].
     pub fn press(&mut self, input: Input) -> Option<Action> {
-        self.frame();
+        self.press_on(Size::SQUARE, input)
+    }
+
+    /// [`Scene::press`], with the page rendered on a panel of `size` first,
+    /// so the scroll is that panel's.
+    pub fn press_on(&mut self, size: Size, input: Input) -> Option<Action> {
+        if size == Size::SQUARE {
+            self.frame();
+        } else {
+            self.panel(size);
+        }
         let action = self.nav.handle(input)?;
         self.answer(action);
         Some(action)
@@ -213,9 +243,14 @@ impl Scene {
 
     /// Press every key in a script, in order, returning the actions chosen.
     pub fn run(&mut self, inputs: &[Input]) -> Vec<Action> {
+        self.run_on(Size::SQUARE, inputs)
+    }
+
+    /// [`Scene::run`], on a panel of `size`.
+    pub fn run_on(&mut self, size: Size, inputs: &[Input]) -> Vec<Action> {
         inputs
             .iter()
-            .filter_map(|&input| self.press(input))
+            .filter_map(|&input| self.press_on(size, input))
             .collect()
     }
 }
@@ -224,12 +259,13 @@ impl Scene {
 mod tests {
     use super::*;
     use crate::script;
-    use oxinode_core::ui::{self, Screen};
+    use monopanel::Readable;
+    use oxinode_core::ui::Screen;
 
     #[test]
     fn a_scene_starts_at_home_with_the_menu_shut() {
         let scene = Scene::new();
-        assert_eq!(scene.nav.screen(), Screen::Home);
+        assert_eq!(scene.nav.current(), Screen::Home);
         assert!(!scene.nav.menu_is_open());
         assert_eq!(scene.state, State::default());
     }
@@ -239,7 +275,7 @@ mod tests {
         let mut scene = Scene::new();
         let inputs = script::parse("right*4 select down select").unwrap();
         assert_eq!(scene.run(&inputs), [Action::Reboot]);
-        assert_eq!(scene.nav.screen(), Screen::System);
+        assert_eq!(scene.nav.current(), Screen::System);
         assert!(!scene.nav.menu_is_open());
     }
 
@@ -249,7 +285,7 @@ mod tests {
     fn scrolling_works_from_the_first_press() {
         let mut scene = Scene::with_state(populated());
         scene.press(Input::Right);
-        assert_eq!(scene.nav.screen(), Screen::Radio);
+        assert_eq!(scene.nav.current(), Screen::Radio);
         scene.press(Input::Down);
         assert_eq!(scene.nav.scroll(), 1);
     }
@@ -270,7 +306,7 @@ mod tests {
         assert_eq!(scene.run(&more), [Action::Set(Setting::TxPower(18))]);
         assert!(!scene.nav.is_editing());
         assert_eq!(scene.state.radio.config.tx_power_dbm, 18);
-        assert_eq!(scene.nav.screen(), Screen::Radio);
+        assert_eq!(scene.nav.current(), Screen::Radio);
     }
 
     /// Cancel leaves the state as it was.
@@ -320,11 +356,32 @@ mod tests {
         let mut scene = Scene::with_state(populated());
         scene.press(Input::Right);
         let got = scene.frame();
-        let mut nav = Nav::new();
+        let mut nav = ui::nav();
         nav.handle(Input::Right);
         let mut want = Frame::new();
         screens::render(&mut want, &mut nav, &populated());
         assert_eq!(got.as_bytes(), want.as_bytes());
+        // And a panel the board's size is the frame, pixel for pixel.
+        let panel = scene.panel(Size::SQUARE);
+        assert_eq!(panel, Panel::from_frame(&got));
+    }
+
+    /// On a shorter panel the same scene shows fewer lines, so a page that
+    /// fits the board scrolls there, and the scroll is the panel's.
+    #[test]
+    fn a_short_panel_scrolls_where_the_square_one_does_not() {
+        let mut scene = Scene::with_state(populated());
+        // Home has ten lines: fits eleven, not four.
+        let mut square = Scene::with_state(populated());
+        square.run(&script::parse("down*3").unwrap());
+        assert_eq!(square.nav.scroll(), 0);
+        scene.run_on(Size::WIDE, &script::parse("down*3").unwrap());
+        assert_eq!(scene.nav.scroll(), 3);
+        let wide = scene.panel(Size::WIDE);
+        assert_eq!((wide.width(), wide.height()), (128, 64));
+        let layout = monopanel::Layout::of(128, 64);
+        let bar = (layout.content_top..layout.content_bottom).any(|y| wide.pixel(127, y));
+        assert!(bar, "a scrollbar on the short panel");
     }
 
     /// The fixtures are what their names say.
@@ -349,6 +406,6 @@ mod tests {
         // And its radio screen scrolls, which the golden images rely on.
         let mut lines = screens::Lines::new();
         p.lines(Screen::Radio, &mut lines);
-        assert!(lines.len() > ui::visible_lines());
+        assert!(lines.len() > ui::LAYOUT.visible_lines());
     }
 }

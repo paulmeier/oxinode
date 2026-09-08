@@ -8,3 +8,7 @@ description = "Host-testable logic shared by the oxinode firmware"
 publish = false
 
 [dependencies]
+# The on-device interface, as a crate with nothing of oxinode in it. What
+# is here -- the screens, their content, the editor -- is what oxinode
+# supplies to it through its public interface, and nothing else.
+monopanel = { path = "../panel" }

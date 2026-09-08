@@ -9,7 +9,8 @@
 //! layout can be tested on the host, including the part that is easy to get
 //! wrong: whether every field actually reaches the screen.
 
-use crate::font::{self, LINE_HEIGHT};
+use monopanel::font::{self, LINE_HEIGHT};
+
 use crate::sh1107::{self, Frame};
 
 /// A small text buffer, so numbers can be formatted with `write!` rather than

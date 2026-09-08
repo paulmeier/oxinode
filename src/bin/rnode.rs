@@ -105,7 +105,7 @@ use oxinode_core::rnode::store::DeviceStore;
 use oxinode_core::screens::{self, Air, Host, Identity};
 use oxinode_core::sh1107;
 use oxinode_core::status::Bluetooth;
-use oxinode_core::ui::{self, Nav};
+use oxinode_core::ui::{self, Nav, NavExt};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -1389,7 +1389,7 @@ struct Ui {
 impl Ui {
     fn new() -> Self {
         Ui {
-            nav: Nav::new(),
+            nav: ui::nav(),
             live: sh1107::Frame::new(),
             scratch: sh1107::Frame::new(),
             asleep: false,
@@ -1488,8 +1488,6 @@ async fn perform(
         }
     }
     match action {
-        // The navigator's own; never handed out.
-        ui::Action::Close => PanelChange::NONE,
         // A full repaint, which is the one thing that is allowed to cost
         // one: the user asked.
         ui::Action::Redraw => {

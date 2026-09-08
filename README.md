@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode, over USB or paired Bluetooth, with settings on the panel
+## Status: a provisioned RNode, over USB or paired Bluetooth, with settings on the panel, and the panel's interface a crate of its own
 
 Being precise about that:
 
@@ -28,6 +28,7 @@ Being precise about that:
 | 10 | The navigation pad driver | **done** — verified on hardware: six switches, repeat, debounce, and the mode switch read in every position it has, [notes](docs/phase-10-pad.md) |
 | 11 | The screens, drawn from real modem state | **done** — every screen renders from what the modem knows and says so where it knows nothing; read back from the board, [notes](docs/phase-11-screens.md) |
 | 12 | Changing settings from the panel | **done** — every radio parameter editable with no host attached, validated as the host's are, refused not clamped, and stored in TNC mode; the two-controller question decided and written down, [notes](docs/phase-12-settings.md) |
+| 13 | The interface as a device-agnostic crate | **done** — `monopanel`, a workspace crate with nothing of oxinode in it: a `Canvas` trait, a layout derived from the canvas, screens supplied by the application, an optional `embedded-graphics` adapter, and golden images at 128 × 64 as well as 128 × 128, [notes](docs/phase-13-interface-crate.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -102,9 +103,27 @@ configuration, so it is what the board boots with, and survives a reflash
 with the rest of the device record. See
 [docs/phase-12-settings.md](docs/phase-12-settings.md).
 
+Phase 13 takes the interface out of oxinode. Everything the panel shows is
+drawn by `monopanel`, a workspace crate under `panel/` that depends on
+nothing: a `Canvas` trait of three methods, a `Layout` derived from the
+canvas size rather than hard-coded for 128 × 128, a navigator built over a
+slice of screen descriptors the application supplies, and a `Modal` trait for
+the third level. oxinode's own screens, menus, actions and editor stay in
+`oxinode-core`, which consumes the crate through its public interface and no
+other way; the SH1107 frame implements `Canvas` in twenty lines. The same
+pages render on a 128 × 64 panel with four lines between the bars instead of
+eleven and long menus windowed, and the simulator holds them to golden images
+at both sizes. An optional `embedded-graphics` feature adapts the crate both
+ways round, so it draws on any monochrome display driver in that ecosystem and
+that ecosystem draws on any canvas of this one. See
+[docs/phase-13-interface-crate.md](docs/phase-13-interface-crate.md).
+
 Phases 1 to 8, 10 and 11 are confirmed on hardware; phase 12's image boots
 and serves a host, and its editors are held to golden images, but a pad walk
-through them on the board has not been done from this desk.
+through them on the board has not been done from this desk. Phase 13 changes
+no pixel on the board's panel -- every golden image from before it still
+matches -- and the product image builds and links as it did; it has not been
+reflashed for it.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -631,24 +650,32 @@ core/src/rnode/       phase 5: KISS framing, the command set, the protocol state
 core/src/rnode/eeprom.rs      phase 6: the EEPROM image, as rnodeconf reads it
 core/src/rnode/store.rs       phase 6: the record that survives a power cycle, and its checksum
 core/src/hash/        phase 6: MD5 (because the EEPROM checksum is one) and SHA-256
-core/src/sh1107.rs    phase 7: the OLED controller's commands and framebuffer
-core/src/font.rs      phase 7: a 5x7 font, drawn as art and generated into a table
+core/src/sh1107.rs    phase 7: the OLED controller's commands and framebuffer -- and, since phase 13, its `Canvas`
 src/ble.rs            phase 8: MPSL, the SoftDevice Controller, and what they take away
 src/bin/ble.rs        phase 8: the bring-up image, built to be debugged without a probe
 core/src/status.rs    phase 7: the status page, rendered from a value
-core/src/ui.rs        phase 9: screens, the navigation model, the chrome and the menus
+panel/                phase 13: monopanel, the interface as a crate with nothing of oxinode in it -- no_std, no dependencies
+panel/src/canvas.rs   the `Canvas` trait: width, height, set a pixel; and a `Bitmap` for tests
+panel/src/layout.rs   where the chrome goes, derived from the canvas size
+panel/src/nav.rs      the navigation model over application-supplied screens, and the `Modal` trait
+panel/src/draw.rs     the title bar, the icon strip, the menu, the scrollbar, and the page
+panel/src/font.rs     phase 7's 5x7 font, drawn as art and generated into a table
+panel/src/eg.rs       the optional embedded-graphics adapter, both ways round
+core/src/ui.rs        phase 9: oxinode's screens, menus and actions, and its editor as the crate's modal
 core/src/screens.rs   phase 11: what each screen knows, and the lines it draws from that
 core/src/edit.rs      phase 12: editing one radio parameter -- the steppers, the digits, the refusal
 core/src/pad.rs       phase 10: the pad as a state machine -- debounce, auto-repeat, the numbers
 src/pad.rs            phase 10: the pad driver -- six pins, the PORT interrupt, the channel; the mode switch
 sim/                  phase 9: oxinode-sim, the panel simulator -- host only
-sim/src/image.rs      a frame as a PNG at 4x with a pixel grid, and the diff between two
+sim/src/panel.rs      a canvas of any size, for the panels the board does not have
+sim/src/image.rs      a canvas as a PNG at 4x with a pixel grid, and the diff between two
 sim/src/script.rs     `right right select down select`: an input script
 sim/src/scene.rs      a navigator plus what a page borrows, rendered as the board will
 sim/src/text.rs       a frame as braille or half blocks, for a terminal
 sim/src/tty.rs        the interactive mode: arrow keys against the real menu tree
 sim/src/golden.rs     the golden-image set and the comparison
 sim/golden/           the committed images: every screen empty and populated, every menu item
+sim/golden/128x64/    the same screens on the other common panel
 core/src/rnode/display.rs     phase 7: the host's framebuffer and display readback
 src/display.rs        phase 7: the I2C bus, the 12 V rail, and the panel transport
 src/bin/display.rs    phase 7: the display bring-up image
@@ -690,15 +717,21 @@ probe there is nowhere to run a test harness. Pretending otherwise would mean
 writing tests against mocks of a HAL, which proves the mock works. Instead the
 project is arranged so that the parts worth testing are testable:
 
+* **`monopanel`** is the interface itself, with nothing of oxinode in it. It
+  is tested on a bitmap at two panel sizes, with and without its one optional
+  feature, and the tests are where the layout rules live: the chrome never
+  overlaps the content, a menu that does not fit is windowed around its
+  highlight, a scrollbar appears exactly when a page does not fit.
 * **`oxinode-core`** holds everything decidable without a peripheral, builds for
   the host, and is unit tested there. It is thin today — phases 0–2 are mostly
   register pokes — but phase 5's KISS framing is nearly all pure byte
   manipulation and belongs here.
 * **`oxinode-sim`** renders the interface on the host and compares every
-  screen and menu against the golden images in `sim/golden/`. The pixel
-  assertions in `oxinode-core` say where nothing is drawn; a golden image says
-  what it looks like, and a mismatch fails the run and leaves a diff picture in
-  `target/golden-diff/`. If the change was meant, regenerate and commit:
+  screen and menu against the golden images in `sim/golden/`, at the board's
+  128 × 128 and again at 128 × 64. The pixel assertions in `oxinode-core` say
+  where nothing is drawn; a golden image says what it looks like, and a
+  mismatch fails the run and leaves a diff picture in `target/golden-diff/`.
+  If the change was meant, regenerate and commit:
 
   ```bash
   cargo run -p oxinode-sim --target "$(rustc -vV | sed -n 's/^host: //p')" -- golden --update
@@ -782,6 +815,16 @@ refused:
 ```bash
 sim render --state standalone --script "right select down*5 select up*4 select" -o refused.png
 sim render --script "right select down select" -o locked.png
+```
+
+**Another panel.** The interface draws on any size of canvas, and the
+simulator can show what the same screens look like on one the board does not
+have. `--panel WxH` renders on it; 128 × 64 is the size the golden set is
+also held at, with four lines between the bars and the nine-item Radio menu
+shown two rows at a time:
+
+```bash
+sim render --panel 128x64 --script "right select down*4" -o radio-menu-wide.png
 ```
 
 **A frame from the board.** A 2048-byte dump of the controller's RAM, as the

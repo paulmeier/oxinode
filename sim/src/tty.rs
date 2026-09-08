@@ -8,7 +8,8 @@
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
-use oxinode_core::ui::{Action, Input};
+use oxinode_core::sh1107;
+use oxinode_core::ui::{Action, Input, NavExt};
 
 use crate::scene::Scene;
 use crate::script;
@@ -64,9 +65,9 @@ pub fn screen(scene: &mut Scene, cells: Cells, last: Option<Action>) -> String {
     let nav = &scene.nav;
     out.push_str(&format!(
         "{:?}  menu: {}  scroll: {}",
-        nav.screen(),
+        nav.current(),
         match nav.menu_item() {
-            Some(n) => nav.screen().menu()[n].label,
+            Some(n) => nav.current().menu()[n].label,
             None => "closed",
         },
         nav.scroll()
@@ -144,7 +145,7 @@ impl Drop for RawMode {
 pub fn run(mut scene: Scene, cells: Option<Cells>) -> io::Result<()> {
     let cells = cells.unwrap_or_else(|| {
         let (columns, rows) = terminal_size().unwrap_or((80, 24));
-        Cells::fitting(columns, rows)
+        Cells::fitting(sh1107::WIDTH, sh1107::HEIGHT, columns, rows)
     });
     let _raw = RawMode::enter()?;
     let mut stdin = io::stdin().lock();
@@ -240,7 +241,7 @@ mod tests {
         scene.press(Input::Select);
         let text = screen(&mut scene, Cells::Braille, Some(Action::Redraw));
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 1 + Cells::Braille.size().1 + 1);
+        assert_eq!(lines.len(), 1 + Cells::Braille.size(128, 128).1 + 1);
         assert!(
             lines.last().unwrap().contains("Radio"),
             "{}",
@@ -248,6 +249,6 @@ mod tests {
         );
         assert!(lines.last().unwrap().contains("menu: Back"));
         assert!(lines.last().unwrap().contains("action: Redraw"));
-        assert_eq!(scene.nav.screen(), Screen::Radio);
+        assert_eq!(scene.nav.current(), Screen::Radio);
     }
 }

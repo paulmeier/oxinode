@@ -5,7 +5,7 @@
 //! whole panel, which most are not. Braille puts a 2 x 4 cell in one
 //! character and fits in 32 lines, at the cost of looking like braille.
 
-use oxinode_core::sh1107::{self, Frame};
+use monopanel::Readable;
 
 /// Which character set to draw with.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -17,17 +17,19 @@ pub enum Cells {
 }
 
 impl Cells {
-    /// The terminal size a whole frame needs, as (columns, rows).
-    pub const fn size(self) -> (usize, usize) {
+    /// The terminal size a whole panel of `width` by `height` needs, as
+    /// (columns, rows), rounding a partial cell up.
+    pub const fn size(self, width: usize, height: usize) -> (usize, usize) {
         match self {
-            Cells::Braille => (sh1107::WIDTH / 2, sh1107::HEIGHT / 4),
-            Cells::HalfBlocks => (sh1107::WIDTH, sh1107::HEIGHT / 2),
+            Cells::Braille => (width.div_ceil(2), height.div_ceil(4)),
+            Cells::HalfBlocks => (width, height.div_ceil(2)),
         }
     }
 
-    /// The largest rendering that fits a terminal of the given size.
-    pub fn fitting(columns: usize, rows: usize) -> Cells {
-        let (w, h) = Cells::HalfBlocks.size();
+    /// The largest rendering of a panel of `width` by `height` that fits a
+    /// terminal of the given size.
+    pub fn fitting(width: usize, height: usize, columns: usize, rows: usize) -> Cells {
+        let (w, h) = Cells::HalfBlocks.size(width, height);
         // A line or two for the caption.
         if columns >= w && rows >= h + 2 {
             Cells::HalfBlocks
@@ -37,11 +39,11 @@ impl Cells {
     }
 }
 
-/// Render a frame as lines of text, without trailing newlines.
-pub fn render(frame: &Frame, cells: Cells) -> Vec<String> {
+/// Render a canvas as lines of text, without trailing newlines.
+pub fn render(canvas: &impl Readable, cells: Cells) -> Vec<String> {
     match cells {
-        Cells::Braille => braille(frame),
-        Cells::HalfBlocks => half_blocks(frame),
+        Cells::Braille => braille(canvas),
+        Cells::HalfBlocks => half_blocks(canvas),
     }
 }
 
@@ -50,8 +52,8 @@ pub fn render(frame: &Frame, cells: Cells) -> Vec<String> {
 /// added afterwards -- so the order is not the obvious one.
 const BRAILLE_DOTS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 
-fn braille(frame: &Frame) -> Vec<String> {
-    let (columns, rows) = Cells::Braille.size();
+fn braille(frame: &impl Readable) -> Vec<String> {
+    let (columns, rows) = Cells::Braille.size(frame.width(), frame.height());
     (0..rows)
         .map(|row| {
             (0..columns)
@@ -71,8 +73,8 @@ fn braille(frame: &Frame) -> Vec<String> {
         .collect()
 }
 
-fn half_blocks(frame: &Frame) -> Vec<String> {
-    let (columns, rows) = Cells::HalfBlocks.size();
+fn half_blocks(frame: &impl Readable) -> Vec<String> {
+    let (columns, rows) = Cells::HalfBlocks.size(frame.width(), frame.height());
     (0..rows)
         .map(|row| {
             (0..columns)
@@ -92,6 +94,9 @@ fn half_blocks(frame: &Frame) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panel::{Panel, Size};
+    use monopanel::Canvas;
+    use oxinode_core::sh1107::Frame;
 
     fn one_pixel(x: usize, y: usize) -> Frame {
         let mut frame = Frame::new();
@@ -104,12 +109,38 @@ mod tests {
     fn a_rendering_has_the_size_it_claims() {
         for cells in [Cells::Braille, Cells::HalfBlocks] {
             let lines = render(&Frame::new(), cells);
-            let (w, h) = cells.size();
+            let (w, h) = cells.size(128, 128);
             assert_eq!(lines.len(), h, "{cells:?}");
             for line in &lines {
                 assert_eq!(line.chars().count(), w, "{cells:?}");
             }
+            // A shorter panel is fewer rows, and one that is not a whole
+            // number of cells is rounded up rather than cut.
+            let wide = render(&Panel::new(Size::WIDE), cells);
+            assert_eq!(wide.len(), cells.size(128, 64).1);
+            let odd = Panel::new(Size {
+                width: 7,
+                height: 5,
+            });
+            assert_eq!(
+                cells.size(7, 5),
+                match cells {
+                    Cells::Braille => (4, 2),
+                    Cells::HalfBlocks => (7, 3),
+                }
+            );
+            assert_eq!(render(&odd, cells).len(), cells.size(7, 5).1);
         }
+        // A pixel in the last, partial cell is still shown.
+        let mut odd = Panel::new(Size {
+            width: 7,
+            height: 5,
+        });
+        odd.set_pixel(6, 4, true);
+        assert_ne!(
+            render(&odd, Cells::Braille)[1].chars().nth(3).unwrap(),
+            '\u{2800}'
+        );
     }
 
     /// Each braille dot is the pixel Unicode says it is.
@@ -148,9 +179,11 @@ mod tests {
     /// The bigger rendering is chosen only when it fits, caption included.
     #[test]
     fn the_rendering_fits_the_terminal() {
-        assert_eq!(Cells::fitting(80, 24), Cells::Braille);
-        assert_eq!(Cells::fitting(200, 60), Cells::Braille);
-        assert_eq!(Cells::fitting(127, 80), Cells::Braille);
-        assert_eq!(Cells::fitting(128, 66), Cells::HalfBlocks);
+        assert_eq!(Cells::fitting(128, 128, 80, 24), Cells::Braille);
+        assert_eq!(Cells::fitting(128, 128, 200, 60), Cells::Braille);
+        assert_eq!(Cells::fitting(128, 128, 127, 80), Cells::Braille);
+        assert_eq!(Cells::fitting(128, 128, 128, 66), Cells::HalfBlocks);
+        assert_eq!(Cells::fitting(128, 64, 128, 34), Cells::HalfBlocks);
+        assert_eq!(Cells::fitting(128, 64, 128, 33), Cells::Braille);
     }
 }

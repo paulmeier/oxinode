@@ -14,6 +14,9 @@ publish = false
 
 [dependencies]
 oxinode-core = { path = "../core" }
+# The interface crate itself: for the canvas trait a panel of any size
+# implements, and the layout the pictures are checked against.
+monopanel = { path = "../panel" }
 # The one thing worth not writing by hand: deflate. A PNG of a 512-pixel
 # square is a quarter of a megabyte uncompressed and a few kilobytes
 # compressed, and twenty of them are committed as golden images.

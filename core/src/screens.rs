@@ -23,7 +23,7 @@
 //!
 //! # Lines, not layouts
 //!
-//! Each screen is a list of text lines, and [`crate::ui::page`] draws them
+//! Each screen is a list of text lines, and [`monopanel::page`] draws them
 //! from the scroll position with a scrollbar when there are more than fit.
 //! That keeps every screen scrollable for free and every screen the same
 //! shape; a `label value` row is right-aligned by padding, because the font is
@@ -32,22 +32,24 @@
 
 use core::fmt::Write;
 
+use monopanel::{font, page, Canvas, Layout};
+
 use crate::battery;
 use crate::ble::NAME_LEN;
 use crate::edit::{Editor, Field, Lock, FREQ_DIGITS};
-use crate::font;
 use crate::lr1121::config::{ConfigError, RadioConfig};
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
 use crate::rnode::store::MAX_BONDS;
-use crate::sh1107::{self, Frame};
 use crate::status::{Bluetooth as Link, Text};
-use crate::ui::{self, Nav, Screen};
+use crate::ui::{self, Nav, NavExt, Screen};
 
-/// Characters that fit on one content line.
+/// Characters that fit on one content line of this board's panel.
 ///
-/// The content starts at [`ui::CONTENT_LEFT`] and must stop short of the
-/// scrollbar, which is the last two columns; the font is six pixels per cell.
-pub const LINE_CHARS: usize = (sh1107::WIDTH - ui::CONTENT_LEFT - 2 - 1) / font::ADVANCE;
+/// The line buffers are sized for the panel the board has, from
+/// [`ui::LAYOUT`]; a canvas of another width shows what fits of the same
+/// lines. Height is the only thing a second panel size changes for these
+/// screens, and that is the interface crate's to handle.
+pub const LINE_CHARS: usize = ui::LAYOUT.line_chars();
 
 /// The most lines any screen produces. The radio screen is the longest, and
 /// a refusal reason wrapped under it is the longest it gets.
@@ -292,7 +294,7 @@ impl Lines {
         self.len == 0
     }
 
-    /// The lines, for [`ui::page`].
+    /// The lines, for [`monopanel::page`].
     pub fn as_strs(&self) -> [&str; MAX_LINES] {
         core::array::from_fn(|i| self.rows[i].as_str())
     }
@@ -733,19 +735,23 @@ pub const fn badge(link: Link) -> &'static str {
 /// Over every screen, not only the Bluetooth one. Pairing is started from the
 /// phone, and the person holding the phone has to read the digits off the
 /// board whatever it happened to be showing.
-pub fn passkey_box(frame: &mut Frame, key: u32) {
-    let (left, right) = (ui::CONTENT_LEFT, sh1107::WIDTH - ui::CONTENT_LEFT);
+pub fn passkey_box(canvas: &mut impl Canvas, key: u32) {
+    let layout = Layout::for_canvas(canvas);
+    let (left, right) = (
+        layout.content_left,
+        layout.width.saturating_sub(layout.content_left),
+    );
     let height = 40;
-    let top = ui::CONTENT_TOP + (ui::CONTENT_H - height) / 2;
-    frame.rect(left, top, right - left, height, true);
-    font::draw(frame, left + 4, top + 5, "PAIR WITH", false);
+    let top = layout.content_top + layout.content_h().saturating_sub(height) / 2;
+    canvas.rect(left, top, right.saturating_sub(left), height, true);
+    font::draw(canvas, left + 4, top + 5, "PAIR WITH", false);
     let mut digits = Text::<8>::new();
     let _ = write!(digits, "{:06}", key % 1_000_000);
     // Spaced out: each digit gets two cells, so it reads as a code and not
     // as a number.
     let mut x = left + 4;
     for c in digits.as_str().bytes() {
-        font::draw_char(frame, x, top + 22, c, false);
+        font::draw_char(canvas, x, top + 22, c, false);
         x += font::ADVANCE * 2 + 1;
     }
 }
@@ -754,9 +760,10 @@ pub fn passkey_box(frame: &mut Frame, key: u32) {
 /// is open, and the pairing box if a phone is waiting for its digits.
 ///
 /// This is the one composition the firmware and the simulator share, on top
-/// of [`ui::page`]. The title bar's corners are the battery and the
+/// of [`monopanel::page`]. The title bar's corners are the battery and the
 /// Bluetooth badge, which are the two things worth seeing on every screen.
-pub fn render(frame: &mut Frame, nav: &mut Nav, state: &State) {
+/// Any canvas will do: the board's frame, or a bitmap of another size.
+pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
     let mut lines = Lines::new();
     // An editor or a notice replaces the screen's lines; the chrome stays.
     if let Some(editor) = nav.editor() {
@@ -764,7 +771,7 @@ pub fn render(frame: &mut Frame, nav: &mut Nav, state: &State) {
     } else if let Some(lock) = nav.notice_shown() {
         lock.lines(&mut lines);
     } else {
-        state.lines(nav.screen(), &mut lines);
+        state.lines(nav.current(), &mut lines);
     }
     let strs = lines.as_strs();
 
@@ -772,22 +779,23 @@ pub fn render(frame: &mut Frame, nav: &mut Nav, state: &State) {
     if let Some(cell) = state.home.battery {
         let _ = write!(left, "{}%", cell.percent);
     }
-    ui::page(
-        frame,
+    page(
+        canvas,
         nav,
         left.as_str(),
         badge(state.bluetooth.link),
         &strs[..lines.len()],
     );
     if let Some(key) = state.bluetooth.passkey {
-        passkey_box(frame, key);
+        passkey_box(canvas, key);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{Input, Screen};
+    use crate::sh1107::{self, Frame};
+    use crate::ui::{Input, Screen, LAYOUT};
 
     /// A board mid-session: every field known, every option `Some`.
     fn populated() -> State {
@@ -844,7 +852,7 @@ mod tests {
     }
 
     fn frame_of(state: &State, screen: Screen) -> Frame {
-        let mut nav = Nav::new();
+        let mut nav = ui::nav();
         for _ in 0..screen.index() {
             nav.handle(Input::Right);
         }
@@ -859,7 +867,7 @@ mod tests {
     /// pushes its label off the left edge -- invisible in any test but this.
     #[test]
     fn every_line_fits_the_panel() {
-        let width = sh1107::WIDTH - ui::CONTENT_LEFT - 2;
+        let width = LAYOUT.line_width();
         for state in [State::default(), populated()] {
             for screen in Screen::ALL {
                 for line in lines_of(&state, screen) {
@@ -1034,7 +1042,10 @@ mod tests {
             text.contains("power is above the module's 20 dBm rating"),
             "{text}"
         );
-        assert!(lines.len() > ui::visible_lines(), "long enough to scroll");
+        assert!(
+            lines.len() > LAYOUT.visible_lines(),
+            "long enough to scroll"
+        );
     }
 
     /// The radio screen is longer than the panel, so it scrolls and the
@@ -1042,13 +1053,13 @@ mod tests {
     #[test]
     fn the_radio_screen_scrolls() {
         let state = populated();
-        let mut nav = Nav::new();
+        let mut nav = ui::nav();
         nav.handle(Input::Right);
         let mut top = Frame::new();
         render(&mut top, &mut nav, &state);
-        assert!(lines_of(&state, Screen::Radio).len() > ui::visible_lines());
+        assert!(lines_of(&state, Screen::Radio).len() > LAYOUT.visible_lines());
         let bar = |f: &Frame| {
-            (ui::CONTENT_TOP..ui::CONTENT_BOTTOM).any(|y| f.pixel(sh1107::WIDTH - 1, y))
+            (LAYOUT.content_top..LAYOUT.content_bottom).any(|y| f.pixel(sh1107::WIDTH - 1, y))
         };
         assert!(bar(&top), "a scrollbar");
         nav.handle(Input::Down);
@@ -1122,8 +1133,8 @@ mod tests {
             let without = frame_of(&populated(), screen);
             assert_ne!(with.as_bytes(), without.as_bytes(), "{screen:?}");
             // The box is a filled block inside the content area.
-            let mid = ui::CONTENT_TOP + ui::CONTENT_H / 2;
-            let lit = (ui::CONTENT_LEFT..sh1107::WIDTH - ui::CONTENT_LEFT)
+            let mid = LAYOUT.content_top + LAYOUT.content_h() / 2;
+            let lit = (LAYOUT.content_left..sh1107::WIDTH - LAYOUT.content_left)
                 .filter(|&x| with.pixel(x, mid))
                 .count();
             assert!(lit > 80, "{screen:?}: box row has {lit} lit");
@@ -1138,10 +1149,10 @@ mod tests {
         with.bluetooth.link = Link::Connected;
         let mut chrome_bare = Frame::new();
         chrome_bare.fill(false);
-        ui::title_bar(&mut chrome_bare, "", Screen::Home.title(), "");
+        monopanel::title_bar(&mut chrome_bare, "", Screen::Home.title(), "");
         let mut chrome_with = Frame::new();
         chrome_with.fill(false);
-        ui::title_bar(&mut chrome_with, "91%", Screen::Home.title(), "BT*");
+        monopanel::title_bar(&mut chrome_with, "91%", Screen::Home.title(), "BT*");
         let row = |f: &Frame| {
             (0..sh1107::WIDTH)
                 .map(|x| f.pixel(x, 4))
@@ -1159,7 +1170,7 @@ mod tests {
     #[test]
     fn a_redraw_costs_only_the_pages_that_changed() {
         let state = populated();
-        let mut nav = Nav::new();
+        let mut nav = ui::nav();
         let mut live = Frame::new();
         let mut scratch = Frame::new();
         render(&mut scratch, &mut nav, &state);
@@ -1197,7 +1208,7 @@ mod tests {
         for page in 0..sh1107::PAGES {
             live.mark_sent(page);
         }
-        assert_eq!(nav.screen(), Screen::Bluetooth);
+        assert_eq!(nav.current(), Screen::Bluetooth);
         nav.handle(Input::Right);
         render(&mut scratch, &mut nav, &ticked);
         live.copy_from(&scratch);
@@ -1222,7 +1233,7 @@ mod tests {
     /// It cannot scroll, so a line past the eleventh would be invisible.
     #[test]
     fn every_editor_fits_without_scrolling() {
-        let width = sh1107::WIDTH - ui::CONTENT_LEFT - 2;
+        let width = LAYOUT.line_width();
         for field in Field::ALL {
             let mut e = Editor::open(field, populated().radio.config);
             for pass in ["fresh", "refused"] {
@@ -1236,7 +1247,7 @@ mod tests {
                 }
                 let lines = editor_lines(&e);
                 assert!(
-                    lines.len() <= ui::visible_lines(),
+                    lines.len() <= LAYOUT.visible_lines(),
                     "{field:?} {pass}: {} lines",
                     lines.len()
                 );
@@ -1256,7 +1267,7 @@ mod tests {
             let mut out = Lines::new();
             lock.lines(&mut out);
             assert!(!out.overflowed(), "{lock:?}: a line was cut");
-            assert!(out.len() <= ui::visible_lines());
+            assert!(out.len() <= LAYOUT.visible_lines());
             for n in 0..out.len() {
                 assert!(out.get(n).unwrap().len() <= LINE_CHARS);
             }
@@ -1353,7 +1364,7 @@ mod tests {
     #[test]
     fn rendering_an_editor_replaces_the_content_and_nothing_else() {
         let state = populated();
-        let mut nav = Nav::new();
+        let mut nav = ui::nav();
         nav.handle(Input::Right);
         let mut before = Frame::new();
         render(&mut before, &mut nav, &state);
@@ -1362,7 +1373,7 @@ mod tests {
         render(&mut editing, &mut nav, &state);
         assert_ne!(before.as_bytes(), editing.as_bytes());
         // The icon strip is the same.
-        for y in ui::CONTENT_BOTTOM..sh1107::HEIGHT {
+        for y in LAYOUT.content_bottom..sh1107::HEIGHT {
             for x in 0..sh1107::WIDTH {
                 assert_eq!(
                     before.pixel(x, y),
@@ -1387,16 +1398,16 @@ mod tests {
     #[test]
     fn render_is_page_plus_the_pairing_box() {
         let state = populated();
-        let mut nav = Nav::new();
+        let mut nav = ui::nav();
         let mut got = Frame::new();
         render(&mut got, &mut nav, &state);
 
         let mut lines = Lines::new();
         state.lines(Screen::Home, &mut lines);
         let strs = lines.as_strs();
-        let mut want_nav = Nav::new();
+        let mut want_nav = ui::nav();
         let mut want = Frame::new();
-        ui::page(&mut want, &mut want_nav, "91%", "BT", &strs[..lines.len()]);
+        page(&mut want, &mut want_nav, "91%", "BT", &strs[..lines.len()]);
         assert_eq!(got.as_bytes(), want.as_bytes());
     }
 }

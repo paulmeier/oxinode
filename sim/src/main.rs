@@ -1,8 +1,8 @@
 //! `oxinode-sim`: look at the panel without a board.
 //!
 //! ```text
-//! oxinode-sim render [--script S] [--state F] [--text] -o out.png
-//! oxinode-sim steps  [--script S] [--state F] --out DIR
+//! oxinode-sim render [--script S] [--state F] [--panel WxH] [--text] -o out.png
+//! oxinode-sim steps  [--script S] [--state F] [--panel WxH] --out DIR
 //! oxinode-sim tty    [--script S] [--state F] [--braille | --half]
 //! oxinode-sim golden [--update] [--dir DIR] [--diff DIR]
 //! oxinode-sim raw    FILE -o out.png
@@ -19,6 +19,7 @@ use std::process::ExitCode;
 use oxinode_core::sh1107;
 use oxinode_sim::golden::{self, Verdict};
 use oxinode_sim::image::{frame_from_bytes, Image};
+use oxinode_sim::panel::Size;
 use oxinode_sim::scene::{Fixture, Scene};
 use oxinode_sim::script;
 use oxinode_sim::text::{self, Cells};
@@ -27,10 +28,10 @@ use oxinode_sim::tty;
 const USAGE: &str = "\
 usage: oxinode-sim <command> [options]
 
-  render [--script S] [--state F] [--text] -o FILE.png
+  render [--script S] [--state F] [--panel WxH] [--text] -o FILE.png
       Run a script from a fresh panel and write the final frame as a PNG at
       4x with a pixel grid; --text prints it as braille instead.
-  steps  [--script S] [--state F] --out DIR
+  steps  [--script S] [--state F] [--panel WxH] --out DIR
       The same, writing one PNG per step: 00-start.png, 01-right.png, ...
   tty    [--script S] [--state F] [--braille | --half]
       Drive the real menu tree with the arrow keys, in the terminal.
@@ -46,6 +47,8 @@ with word*N for repeats and # for comments. --state is the fixture the
 screens draw from: `populated` (the default) is a board mid-session with a
 host on the line, `empty` one that knows nothing yet, and `standalone` a TNC
 with no host attached -- the one whose settings the panel may change.
+--panel is the size to draw on: 128x128 (the default, the board's own) or
+any other, such as 128x64; the golden set is held at both of those.
 ";
 
 /// What the command line asked for.
@@ -54,12 +57,14 @@ enum Command {
     Render {
         script: String,
         state: Fixture,
+        panel: Size,
         text: bool,
         out: Option<PathBuf>,
     },
     Steps {
         script: String,
         state: Fixture,
+        panel: Size,
         out: PathBuf,
     },
     Tty {
@@ -98,6 +103,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     };
     let mut script = String::new();
     let mut state = Fixture::Populated;
+    let mut panel = Size::SQUARE;
     let mut text = false;
     let mut out = None;
     let mut update = false;
@@ -120,6 +126,11 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
                 state = Fixture::named(&v).ok_or_else(|| {
                     format!("--state: `{v}` is not `empty`, `populated` or `standalone`")
                 })?;
+            }
+            "--panel" => {
+                let v = value("--panel")?;
+                panel = Size::parse(&v)
+                    .ok_or_else(|| format!("--panel: `{v}` is not WxH, such as 128x64"))?;
             }
             "--text" => text = true,
             "-o" | "--out" => out = Some(PathBuf::from(value("-o")?)),
@@ -144,6 +155,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             Command::Render {
                 script,
                 state,
+                panel,
                 text,
                 out,
             }
@@ -151,6 +163,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
         "steps" => Command::Steps {
             script,
             state,
+            panel,
             out: out.ok_or("steps: --out DIR is required")?,
         },
         "tty" => Command::Tty {
@@ -184,37 +197,43 @@ fn run(command: Command) -> Result<(), String> {
         Command::Render {
             script,
             state,
+            panel,
             text,
             out,
         } => {
             let mut scene = Scene::with_state(state.state());
-            let actions = scene.run(&script::parse(&script).unwrap());
+            let actions = scene.run_on(panel, &script::parse(&script).unwrap());
             for action in actions {
                 eprintln!("action: {action:?}");
             }
-            let frame = scene.frame();
+            let picture = scene.panel(panel);
             if text {
-                for line in text::render(&frame, Cells::Braille) {
+                for line in text::render(&picture, Cells::Braille) {
                     println!("{line}");
                 }
             }
             if let Some(out) = out {
-                write_png(&out, &Image::render(&frame))?;
+                write_png(&out, &Image::render(&picture))?;
                 println!("{}", out.display());
             }
             Ok(())
         }
-        Command::Steps { script, state, out } => {
+        Command::Steps {
+            script,
+            state,
+            panel,
+            out,
+        } => {
             let mut scene = Scene::with_state(state.state());
             let inputs = script::parse(&script).unwrap();
             fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
             let path = out.join("00-start.png");
-            write_png(&path, &Image::render(&scene.frame()))?;
+            write_png(&path, &Image::render(&scene.panel(panel)))?;
             println!("{}", path.display());
             for (n, input) in inputs.iter().enumerate() {
-                let action = scene.press(*input);
+                let action = scene.press_on(panel, *input);
                 let path = out.join(format!("{:02}-{}.png", n + 1, script::name_of(*input)));
-                write_png(&path, &Image::render(&scene.frame()))?;
+                write_png(&path, &Image::render(&scene.panel(panel)))?;
                 match action {
                     Some(action) => println!("{}  action: {action:?}", path.display()),
                     None => println!("{}", path.display()),
@@ -344,6 +363,7 @@ mod tests {
             Command::Render {
                 script: "right".into(),
                 state: Fixture::Empty,
+                panel: Size::SQUARE,
                 text: false,
                 out: Some("x.png".into()),
             }
@@ -374,6 +394,16 @@ mod tests {
             }
         ));
         assert!(parse("render --script").unwrap_err().contains("value"));
+        assert!(parse("render --panel wide -o x.png")
+            .unwrap_err()
+            .contains("WxH"));
+        assert!(matches!(
+            parse("steps --panel 128x64 --out d").unwrap(),
+            Command::Steps {
+                panel: Size::WIDE,
+                ..
+            }
+        ));
         assert!(parse("render --bogus -o x")
             .unwrap_err()
             .contains("--bogus"));

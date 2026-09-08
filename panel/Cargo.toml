@@ -1,0 +1,25 @@
+[package]
+name = "monopanel"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "A small on-device interface for monochrome panels: screens, an icon strip, menus, a font -- with no display driver and no hardware in it"
+repository = "https://github.com/paulmeier/oxinode"
+publish = false
+
+# Nothing. That is the point of the crate: the interface depends on a
+# `Canvas` -- dimensions and one pixel -- and on nothing else, so any display
+# that can be drawn on a pixel at a time can carry it. The one optional
+# dependency below is an adapter to the ecosystem's graphics stack, for
+# anyone who wants to use it from there; it is off by default because this
+# crate's character is that it wrote its own font and its owner wrote their
+# own display driver, and a mandatory dependency on a large graphics stack
+# would sit badly against that.
+[dependencies]
+embedded-graphics = { version = "0.8.1", optional = true }
+
+[features]
+default = []
+# `DrawTarget` on any `Canvas`, and `Canvas` on any `DrawTarget`.
+embedded-graphics = ["dep:embedded-graphics"]
