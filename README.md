@@ -31,6 +31,7 @@ Being precise about that:
 | 13 | The interface as a device-agnostic crate | **done** — `monopanel`, a workspace crate with nothing of oxinode in it: a `Canvas` trait, a layout derived from the canvas, screens supplied by the application, an optional `embedded-graphics` adapter, and golden images at 128 × 64 as well as 128 × 128, [notes](docs/phase-13-interface-crate.md) |
 | 14 | The GPS, and the Position screen | **done** — verified on hardware: the module powered through its load switch, NMEA at 9600 baud with the module's TX on P0.20, parsed in the core against captured sentences, a fix acquired and shown on the Position screen, and the receiver switchable from the mode switch and the menu; the current draw is still unmeasured, [notes](docs/phase-14-gps.md) |
 | 15 | Messaging from the node: a spike | **measured** — `rns-core` built for the board, its crypto timed, and an announce, an encrypted packet and an LXMF message exchanged each way with a stock Python Reticulum, over the USB serial interface and over the air through a second board running `rnode`; the numbers, the decisions on sharing the radio and on the licence, and the recommendation are in the [notes](docs/phase-15-spike.md) |
+| 16 | Listening before transmitting | **done** — verified on two boards: the modem senses the channel with the LR1121's activity detection before every transmission, backs off a bounded random number of slots when it is busy, and spends the wait in receive so a packet that arrives meanwhile is received rather than transmitted over; the phase 15 collision no longer loses the host's reply, and what is still lost is measured, [notes](docs/phase-16-csma.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -135,7 +136,21 @@ is released when it is off. Taken outside, the board got a fix and the
 screen reported it; the current draw is not yet measured. See
 [docs/phase-14-gps.md](docs/phase-14-gps.md).
 
-Phases 1 to 8, 10, 11 and 14 are confirmed on hardware; phase 12's image boots
+Phase 16 makes the modem listen before it transmits. Phase 15 put two
+oxinodes on the bench and lost a packet every time one transmitted while the
+other was on the air. Now every transmission is preceded by a channel
+activity detection, a DIFS of two slots and a random contention window of up
+to fifteen, with slots of twelve symbols and a budget of ten airtimes after
+which the packet goes regardless; the decision is in `oxinode-core` and
+tested there. The slots between senses are spent in receive, with the chip's
+timer stopped on the preamble and a positive detection falling into receive,
+so a packet that arrives during the wait is received and handed up; the
+phase 15 collision -- the host answering an announce while the board sent
+its second -- no longer loses the reply. Packets that begin during a sense
+are still avoided rather than received. See
+[docs/phase-16-csma.md](docs/phase-16-csma.md).
+
+Phases 1 to 8, 10, 11, 14 and 16 are confirmed on hardware; phase 12's image boots
 and serves a host, and its editors are held to golden images, but a pad walk
 through them on the board has not been done from this desk. Phase 13 changes
 no pixel on the board's panel -- every golden image from before it still

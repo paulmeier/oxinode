@@ -21,8 +21,11 @@
 //!   encodings. Phase 4's seam: the only thing the modem will accept.
 //! * [`reference`] — the module's 73 ppm frequency error, and the arithmetic
 //!   that cancels it.
+//! * [`csma`] — listening before transmitting: when the channel counts as
+//!   clear, and how long to wait when it is not.
 
 pub mod config;
+pub mod csma;
 pub mod irq;
 pub mod lora;
 pub mod pa;

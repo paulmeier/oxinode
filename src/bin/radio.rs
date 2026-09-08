@@ -42,9 +42,10 @@ use lr11xx::ops::{
 };
 use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
-use oxinode::modem::Modem;
+use oxinode::modem::{Modem, TxOutcome};
 use oxinode::{boot, radio, usb_log};
 use oxinode_core::lr1121::config::{self, RadioConfig, ValidConfig};
+use oxinode_core::lr1121::csma::Backoff;
 use oxinode_core::lr1121::{irq as irq_bits, lora, pa, reference, rf_switch, tcxo, ResetVerdict};
 use oxinode_core::meshtastic;
 use static_cell::StaticCell;
@@ -1088,7 +1089,26 @@ async fn tx_packet<S, B>(
         defmt::error!("tx: apply failed, {}", e);
         return;
     }
-    match modem.transmit(&valid, payload).await {
+    // A bring-up image has nobody to hand a heard packet to; it is noted
+    // and the transmission tried again.
+    let mut backoff = Backoff::new(&valid, payload.len() as u8, Instant::now().as_ticks());
+    let mut rx_buf = [0u8; config::MAX_PAYLOAD as usize];
+    let sent = loop {
+        match modem
+            .transmit(&valid, payload, &mut backoff, &mut rx_buf)
+            .await
+        {
+            Ok(TxOutcome::Sent(report)) => break Ok(report),
+            Ok(TxOutcome::Heard(report)) => {
+                defmt::info!(
+                    "tx: heard {=usize} bytes while waiting; trying again",
+                    report.len
+                );
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    match sent {
         Err(e) => defmt::error!("tx: {}", e),
         Ok(report) => {
             defmt::info!(
