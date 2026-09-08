@@ -11,13 +11,16 @@
 //! rather than a screen nobody looks at. Since phase 11 every screen is drawn
 //! twice: once from a board that knows nothing, once from one mid-session, so
 //! that the empty-state rule -- a dash, never a plausible zero -- is in the
-//! pictures as well as in the tests.
+//! pictures as well as in the tests. Since phase 12 every editor is drawn
+//! too, open on a standalone board, refused where a refusal can be reached,
+//! and as the notice a host on the line turns it into.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use oxinode_core::edit::Field;
 use oxinode_core::screens::State;
-use oxinode_core::ui::Screen;
+use oxinode_core::ui::{Action, Screen};
 
 use crate::image::Image;
 use crate::scene::{self, Scene};
@@ -87,8 +90,76 @@ pub fn cases() -> Vec<Case> {
     });
     cases.push(Case {
         name: "radio-refused".to_string(),
-        script: radio,
+        script: radio.clone(),
         state: scene::refused(),
+    });
+
+    // Phase 12: the editors. Each one open on a standalone board; the ones
+    // that can be driven to a refusal, refused; one after a confirmed change,
+    // back on the screen showing it; and the notice a host on the line turns
+    // an edit -- or the toggle -- into.
+    let standalone = scene::standalone();
+    let item_of = |field: Field| {
+        Screen::Radio
+            .menu()
+            .iter()
+            .position(|i| i.action == Action::Edit(field))
+            .expect("every field has a menu item")
+    };
+    for field in Field::ALL {
+        let open = format!("{radio} select down*{} select", item_of(field));
+        cases.push(Case {
+            name: format!("radio-edit-{}", slug(field.label())),
+            script: open.clone(),
+            state: standalone,
+        });
+        // Every refusal a stepper or the digits can reach, from the fixture:
+        // the first digit down takes 915 MHz to 815; two down from 125 kHz
+        // is 41.7 kHz; four up from 17 dBm is 21 dBm.
+        let refuse = match field {
+            Field::Frequency => Some("down select"),
+            Field::Bandwidth => Some("down*2 select"),
+            Field::TxPower => Some("up*4 select"),
+            Field::SpreadingFactor | Field::CodingRate => None,
+        };
+        if let Some(refuse) = refuse {
+            cases.push(Case {
+                name: format!("radio-edit-{}-refused", slug(field.label())),
+                script: format!("{open} {refuse}"),
+                state: standalone,
+            });
+        }
+    }
+    cases.push(Case {
+        name: "radio-edit-frequency-cursor".to_string(),
+        script: format!(
+            "{radio} select down*{} select right*4 up",
+            item_of(Field::Frequency)
+        ),
+        state: standalone,
+    });
+    cases.push(Case {
+        name: "radio-after-edit".to_string(),
+        script: format!(
+            "{radio} select down*{} select up select",
+            item_of(Field::TxPower)
+        ),
+        state: standalone,
+    });
+    let toggle = Screen::Radio
+        .menu()
+        .iter()
+        .position(|i| i.action == Action::ToggleRadio)
+        .expect("the toggle is on the menu");
+    cases.push(Case {
+        name: "radio-locked-edit".to_string(),
+        script: format!("{radio} select down*{} select", item_of(Field::Frequency)),
+        state: populated,
+    });
+    cases.push(Case {
+        name: "radio-locked-toggle".to_string(),
+        script: format!("{radio} select down*{toggle} select"),
+        state: scene::phone(),
     });
     cases
 }
@@ -197,7 +268,18 @@ mod tests {
         let names: HashSet<&str> = cases.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names.len(), cases.len(), "a name repeats");
         let items: usize = Screen::ALL.iter().map(|s| s.menu().len()).sum();
-        assert_eq!(cases.len(), 2 * Screen::COUNT + items + 3 + 2);
+        // Screens twice, every menu item, three scroll positions, pairing
+        // and refused, then phase 12: five editors, three refusals, the
+        // cursor, the screen after an edit, and two notices.
+        assert_eq!(
+            cases.len(),
+            2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2
+        );
+        for field in Field::ALL {
+            assert!(names.contains(format!("radio-edit-{}", slug(field.label())).as_str()));
+        }
+        assert!(names.contains("radio-edit-tx-power-refused"));
+        assert!(names.contains("radio-locked-edit"));
         for screen in Screen::ALL {
             let title = slug(screen.title());
             assert!(names.contains(title.as_str()), "{screen:?}");
@@ -230,7 +312,42 @@ mod tests {
                 }
                 None => assert!(!scene.nav.menu_is_open(), "{}", case.name),
             }
+            // An editor case has its editor open on the field it names,
+            // refused exactly when the name says so; a locked case shows
+            // the notice; anything else is a plain screen.
+            if let Some(rest) = case.name.strip_prefix("radio-edit-") {
+                let editor = scene.nav.editor().expect(&case.name);
+                assert!(
+                    rest.starts_with(&slug(editor.field().label())),
+                    "{}",
+                    case.name
+                );
+                assert_eq!(
+                    editor.refused().is_some(),
+                    rest.ends_with("-refused"),
+                    "{}",
+                    case.name
+                );
+                if rest.ends_with("-cursor") {
+                    assert!(editor.cursor() > 0 && editor.changed(), "{}", case.name);
+                }
+            } else if case.name.starts_with("radio-locked-") {
+                assert!(scene.nav.notice_shown().is_some(), "{}", case.name);
+            } else {
+                assert!(!scene.nav.is_editing(), "{}", case.name);
+            }
         }
+        // The screen after an edit shows the edited value, not the old one.
+        let after = cases()
+            .into_iter()
+            .find(|c| c.name == "radio-after-edit")
+            .unwrap();
+        let mut scene = Scene::with_state(after.state);
+        scene.run(&script::parse(&after.script).unwrap());
+        assert_ne!(scene.state.radio.config, scene::standalone().radio.config);
+        let mut lines = oxinode_core::screens::Lines::new();
+        scene.state.lines(Screen::Radio, &mut lines);
+        assert!((0..lines.len()).any(|n| lines.get(n).unwrap().ends_with("18 dBm")));
         // The scrolled cases really scroll: the bottom is past the middle,
         // and the middle is past the top.
         let scroll_of = |name: &str| {

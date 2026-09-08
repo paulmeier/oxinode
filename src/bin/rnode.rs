@@ -41,10 +41,20 @@
 //! [`screens::State`] -- plain values -- and hands that to the renderer, which
 //! reaches into nothing. Gestures from the pad go to the navigator, and a
 //! menu item the user picks comes back as a [`ui::Action`] for
-//! [`perform`] to carry out. Only the actions that change nothing about the
-//! modem are carried out here; the ones that would -- radio on and off,
-//! resetting the configuration, forgetting phones -- are phase 12's, and
-//! say so in the log until then.
+//! [`perform`] to carry out.
+//!
+//! # The panel is a second controller
+//!
+//! Phase 12. An RNode is host-controlled, and Reticulum checks its
+//! configuration against the device exactly once, when it brings the
+//! interface up; a change underneath it afterwards is a debug line in its
+//! log and nothing else. So the rule is: **a live session on USB or
+//! Bluetooth owns the live radio configuration.** While one is there, every
+//! action that would change the radio -- an edit, the toggle, a reset --
+//! opens the notice that says so instead. With nobody on the line the panel
+//! edits the configuration through the same setters and the same validation
+//! the host gets, and in TNC mode the edit goes into the stored configuration
+//! too, so it is what the board boots with. See `docs/phase-12-settings.md`.
 //!
 //! # Idling in standby XOSC
 //!
@@ -65,8 +75,9 @@ use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_futures::yield_now;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, interrupt, peripherals, saadc, spim, twim};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::pipe::{Pipe, Reader, Writer};
+use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Sender, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
@@ -82,13 +93,14 @@ use oxinode::pad;
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::ble as interop;
+use oxinode_core::edit::Editor;
 use oxinode_core::lr1121::config::ValidConfig;
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::eeprom;
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::outbox::Outbox;
-use oxinode_core::rnode::protocol::{Action, Protocol, Sink};
+use oxinode_core::rnode::protocol::{Action, PanelChange, Protocol, Sink};
 use oxinode_core::rnode::store::DeviceStore;
 use oxinode_core::screens::{self, Air, Host, Identity};
 use oxinode_core::sh1107;
@@ -145,6 +157,11 @@ unsafe fn DefaultHandler(irqn: i16) {
 static BLE_CONNECTED: AtomicBool = AtomicBool::new(false);
 /// Whether the stack came up at all. Also for the title bar.
 static BLE_UP: AtomicBool = AtomicBool::new(false);
+/// `Forget Phones` was chosen on the panel. The stored bonds are already
+/// gone by the time this is raised; this is for the copy the host stack
+/// holds, which only the Bluetooth task can reach. Latched, so a choice made
+/// during a connection is honoured once the connection ends.
+static FORGET_BONDS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Bytes from the phone to the modem loop. The same size as the USB pipe and
 /// for the same reason: a full one is back-pressure, not loss.
@@ -632,9 +649,15 @@ async fn serve_bluetooth(
                     continue;
                 }
             };
-            let conn = match advertiser.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
+            let conn = match select(advertiser.accept(), FORGET_BONDS.wait()).await {
+                Either::First(Ok(conn)) => conn,
+                Either::First(Err(_)) => continue,
+                // Dropping the accept stops advertising; the loop starts it
+                // again, now with nobody remembered.
+                Either::Second(()) => {
+                    forget_bonds(&stack);
+                    continue;
+                }
             };
             let conn = match conn.with_attribute_server(&server) {
                 Ok(conn) => conn,
@@ -653,6 +676,30 @@ async fn serve_bluetooth(
     match select(runner.run(), advertise).await {
         Either::First(Err(_)) => defmt::error!("ble: the host stack stopped"),
         Either::First(Ok(())) | Either::Second(()) => {}
+    }
+}
+
+/// Drop every bond the host stack holds.
+///
+/// The identities are copied out first, because removing while iterating
+/// would be removing from under the borrow. Eight is more than the record
+/// holds; a stack that somehow held more would forget the first eight and
+/// the rest at the next boot, when only the record is reloaded.
+fn forget_bonds<C: Controller, P: PacketPool>(stack: &Stack<'_, C, P>) {
+    let mut identities = heapless::Vec::<trouble_host::Identity, 8>::new();
+    stack.with_bond_information(|bonds| {
+        for bond in bonds {
+            let _ = identities.push(bond.identity);
+        }
+    });
+    for identity in identities {
+        match stack.remove_bond_information(identity) {
+            Ok(()) => defmt::info!(
+                "ble: forgot {=[u8; 6]:02x}",
+                identity.addr.addr.into_inner()
+            ),
+            Err(e) => defmt::warn!("ble: could not forget a bond: {}", e),
+        }
     }
 }
 
@@ -942,7 +989,30 @@ where
             }
         }
         for action in chosen {
-            perform(action, &mut ui, panel.as_deref_mut(), storage, &protocol).await;
+            let change = perform(
+                action,
+                &mut ui,
+                panel.as_deref_mut(),
+                storage,
+                &mut protocol,
+                host_of(control),
+            )
+            .await;
+            if change.persist {
+                dirty_since = Some(Instant::now());
+            }
+            if change.radio != Action::None {
+                act(
+                    dev,
+                    irq,
+                    &mut protocol,
+                    change.radio,
+                    &mut applied,
+                    &mut receiving,
+                    &mut outbox,
+                )
+                .await;
+            }
         }
 
         // Draw, and send at most two pages of it. A full repaint is 218 ms on
@@ -1235,7 +1305,23 @@ where
             }
         }
         for action in chosen {
-            perform(action, &mut ui, panel.as_deref_mut(), storage, &protocol).await;
+            let change = perform(
+                action,
+                &mut ui,
+                panel.as_deref_mut(),
+                storage,
+                &mut protocol,
+                host_of(control),
+            )
+            .await;
+            if change.persist {
+                dirty_since = Some(Instant::now());
+            }
+            // The setting has landed and, in TNC mode, been stored; the
+            // screen shows it. What cannot happen is the radio being told.
+            if change.radio != Action::None {
+                defmt::info!("ui: no radio to apply that to");
+            }
         }
         if let Some(panel) = panel.as_deref_mut() {
             if ui.due() {
@@ -1377,26 +1463,39 @@ impl Ui {
 
 /// Do what a menu item asked for.
 ///
-/// Only the actions that leave the modem as it was. `ToggleRadio`,
-/// `ResetRadioConfig` and `ForgetBonds` change what a host believes about
-/// the board, and what should happen when the host disagrees is phase 12's
-/// question; until it is answered they are logged and not done, so the
-/// screen never shows a change the modem did not make.
+/// The phase 12 rule is applied here and nowhere else in the firmware: an
+/// action that would change the live radio while a host has the line gets
+/// the notice instead of being done. Everything else is done as asked. What
+/// the radio has to do about it, and whether the record changed, are handed
+/// back for the loop, which is where the modem and the persist timer are.
 async fn perform(
     action: ui::Action,
     ui: &mut Ui,
     panel: Option<&mut Panel<'_>>,
     storage: &mut Storage<'_>,
-    protocol: &Protocol,
-) {
+    protocol: &mut Protocol,
+    host: Host,
+) -> PanelChange {
+    if let Some(lock) = host.lock() {
+        if action.changes_the_radio() {
+            defmt::info!(
+                "ui: {=str} refused, a host has the radio ({=str})",
+                action.name(),
+                lock.headline()
+            );
+            ui.nav.notice(lock);
+            return PanelChange::NONE;
+        }
+    }
     match action {
         // The navigator's own; never handed out.
-        ui::Action::Close => {}
+        ui::Action::Close => PanelChange::NONE,
         // A full repaint, which is the one thing that is allowed to cost
         // one: the user asked.
         ui::Action::Redraw => {
             ui.live.mark_all_dirty();
             ui.redraw_now();
+            PanelChange::NONE
         }
         ui::Action::SleepScreen => {
             ui.asleep = true;
@@ -1405,6 +1504,7 @@ async fn perform(
                     defmt::error!("panel: could not sleep: {}", e);
                 }
             }
+            PanelChange::NONE
         }
         // Both restarts write the record first, for the reason the host's
         // reset does: a reboot is exactly when losing a provisioning would
@@ -1419,11 +1519,62 @@ async fn perform(
             commit(storage, protocol);
             boot::reboot_to_bootloader();
         }
-        ui::Action::ToggleRadio | ui::Action::ResetRadioConfig | ui::Action::ForgetBonds => {
+        // Nobody has the radio, or this would have been the notice above.
+        ui::Action::Edit(field) => {
+            defmt::info!("ui: editing {=str}", field.name());
+            ui.nav.edit(Editor::open(field, *protocol.config()));
+            PanelChange::NONE
+        }
+        ui::Action::Set(setting) => {
+            let change = protocol.set_from_panel(setting);
             defmt::info!(
-                "ui: {=str} changes the modem; that is phase 12, nothing done",
-                action.name()
+                "ui: set {=str}; stored={=bool}",
+                setting.name(),
+                change.persist
             );
+            change
+        }
+        ui::Action::ToggleRadio => {
+            let radio = protocol.toggle_from_panel();
+            defmt::info!(
+                "ui: radio {=str}",
+                if protocol.radio_is_on() { "on" } else { "off" }
+            );
+            PanelChange {
+                radio,
+                persist: false,
+            }
+        }
+        ui::Action::ResetRadioConfig => {
+            let radio = protocol.reset_from_panel();
+            defmt::info!(
+                "ui: reset config to {=str}",
+                if protocol.is_tnc() {
+                    "stored"
+                } else {
+                    "default"
+                }
+            );
+            PanelChange {
+                radio,
+                persist: false,
+            }
+        }
+        ui::Action::SaveRadioConfig => {
+            defmt::info!("ui: save config; the board is a TNC");
+            protocol.save_from_panel()
+        }
+        // The record first, so a reset before the stack has caught up
+        // still forgets them; then the stack, which only its own task can
+        // reach.
+        ui::Action::ForgetBonds => {
+            defmt::info!("ui: forget phones");
+            protocol.store_mut().clear_bonds();
+            FORGET_BONDS.signal(());
+            PanelChange {
+                radio: Action::None,
+                persist: true,
+            }
         }
     }
 }

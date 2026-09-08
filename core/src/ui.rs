@@ -23,8 +23,8 @@
 //!
 //! # The navigation model
 //!
-//! Two levels, and no more, because the panel is 128 pixels square and a deep
-//! tree on a small screen is a maze:
+//! Two levels and one exception, because the panel is 128 pixels square and a
+//! deep tree on a small screen is a maze:
 //!
 //! * **Browsing.** Left and right move between screens, which wrap. Up and down
 //!   scroll the current screen's content. This is where the device sits.
@@ -33,12 +33,23 @@
 //!   it. Left and right are ignored rather than being made to mean something
 //!   else, so a stray sideways press cannot change screen out from under a
 //!   menu that is open.
+//! * **An editor**, phase 12's exception: one value, opened from a menu item.
+//!   Up and down change it, left and right move the cursor where there is one,
+//!   select confirms and back cancels. The value model is
+//!   [`crate::edit::Editor`]; what is here is which key does what. An editor
+//!   is opened by the caller with [`Nav::edit`] rather than by the menu
+//!   itself, because opening one needs the configuration to edit and the
+//!   navigator is not handed that -- and because the caller is the one that
+//!   knows whether a host has the radio, in which case it opens a
+//!   [`Nav::notice`] instead.
 //!
 //! Back at the browsing level does nothing at all. There is nowhere above the
 //! top, and a back button that silently jumps to the first screen is a way to
 //! lose your place by leaning on the board.
 
+use crate::edit::{Confirm, Editor, Field, Lock};
 use crate::font;
+use crate::lr1121::config::Setting;
 use crate::sh1107::{self, Frame};
 
 /// Height of the title bar, including its bottom edge.
@@ -103,10 +114,20 @@ const HOME_MENU: [Item; 3] = [
     Item::new("Redraw", Action::Redraw),
 ];
 
-/// What [`Screen::Radio`] offers.
-const RADIO_MENU: [Item; 3] = [
+/// What [`Screen::Radio`] offers: an editor for each of the five parameters
+/// a host sets, then the three things that act on the configuration whole.
+const RADIO_MENU: [Item; 9] = [
     Item::BACK,
+    Item::new(Field::Frequency.label(), Action::Edit(Field::Frequency)),
+    Item::new(Field::Bandwidth.label(), Action::Edit(Field::Bandwidth)),
+    Item::new(
+        Field::SpreadingFactor.label(),
+        Action::Edit(Field::SpreadingFactor),
+    ),
+    Item::new(Field::CodingRate.label(), Action::Edit(Field::CodingRate)),
+    Item::new(Field::TxPower.label(), Action::Edit(Field::TxPower)),
     Item::new("Radio On/Off", Action::ToggleRadio),
+    Item::new("Save Config", Action::SaveRadioConfig),
     Item::new("Reset Config", Action::ResetRadioConfig),
 ];
 
@@ -230,8 +251,16 @@ pub enum Action {
     Redraw,
     /// Put the radio into or out of receive.
     ToggleRadio,
-    /// Forget the host's configuration and go back to the stored one.
+    /// Forget the host's configuration and go back to the stored one, or to
+    /// the default if nothing is stored.
     ResetRadioConfig,
+    /// Store the live configuration as the one the board boots with.
+    SaveRadioConfig,
+    /// Open an editor for one radio parameter. The caller answers with
+    /// [`Nav::edit`] or [`Nav::notice`]; see the module docs.
+    Edit(Field),
+    /// An editor confirmed a value that passed validation. Apply it.
+    Set(Setting),
     /// Drop every stored pairing.
     ForgetBonds,
     /// Restart into the application.
@@ -249,10 +278,25 @@ impl Action {
             Action::Redraw => "redraw",
             Action::ToggleRadio => "radio on/off",
             Action::ResetRadioConfig => "reset config",
+            Action::SaveRadioConfig => "save config",
+            Action::Edit(field) => field.name(),
+            Action::Set(setting) => setting.name(),
             Action::ForgetBonds => "forget phones",
             Action::Reboot => "reboot",
             Action::Bootloader => "bootloader",
         }
+    }
+
+    /// Whether carrying this out changes the live radio configuration or the
+    /// radio's state -- the things a host that has the line believes it owns.
+    ///
+    /// This is the phase 12 rule in one place. A caller with a host on the
+    /// line refuses these and does the rest; see `docs/phase-12-settings.md`.
+    pub const fn changes_the_radio(self) -> bool {
+        matches!(
+            self,
+            Action::ToggleRadio | Action::ResetRadioConfig | Action::Edit(_) | Action::Set(_)
+        )
     }
 }
 
@@ -286,12 +330,23 @@ impl Input {
     }
 }
 
+/// What is over the content, if anything.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Overlay {
+    None,
+    /// An action menu, with the highlighted item.
+    Menu(usize),
+    /// An editor for one value.
+    Editor(Editor),
+    /// A notice saying why the value cannot be edited. Any key closes it.
+    Notice(Lock),
+}
+
 /// Where the user is.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Nav {
     screen: usize,
-    /// `Some(highlighted item)` while an action menu is open.
-    menu: Option<usize>,
+    overlay: Overlay,
     /// First visible content row, in lines, while browsing.
     scroll: usize,
     /// Lines of content the current screen has, set by the renderer.
@@ -308,7 +363,7 @@ impl Nav {
     pub const fn new() -> Self {
         Nav {
             screen: 0,
-            menu: None,
+            overlay: Overlay::None,
             scroll: 0,
             lines: 0,
         }
@@ -321,12 +376,62 @@ impl Nav {
 
     /// The highlighted item, while a menu is open.
     pub fn menu_item(&self) -> Option<usize> {
-        self.menu
+        match self.overlay {
+            Overlay::Menu(selected) => Some(selected),
+            _ => None,
+        }
     }
 
     /// Whether an action menu is covering the content.
     pub fn menu_is_open(&self) -> bool {
-        self.menu.is_some()
+        matches!(self.overlay, Overlay::Menu(_))
+    }
+
+    /// The editor, while one is open.
+    pub fn editor(&self) -> Option<&Editor> {
+        match &self.overlay {
+            Overlay::Editor(editor) => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// The notice, while one is showing.
+    pub fn notice_shown(&self) -> Option<Lock> {
+        match self.overlay {
+            Overlay::Notice(lock) => Some(lock),
+            _ => None,
+        }
+    }
+
+    /// Whether an editor or a notice has replaced the screen's content.
+    pub fn is_editing(&self) -> bool {
+        matches!(self.overlay, Overlay::Editor(_) | Overlay::Notice(_))
+    }
+
+    /// The word in the title bar: the field while editing, `Locked` for a
+    /// notice, else the screen.
+    pub fn title(&self) -> &'static str {
+        match &self.overlay {
+            Overlay::Editor(editor) => editor.field().title(),
+            Overlay::Notice(_) => "Locked",
+            Overlay::None | Overlay::Menu(_) => self.screen().title(),
+        }
+    }
+
+    /// Open an editor on `field`, starting from `config`.
+    ///
+    /// The caller's answer to [`Action::Edit`] when nobody else has the
+    /// radio. Replaces whatever overlay there was.
+    pub fn edit(&mut self, editor: Editor) {
+        self.overlay = Overlay::Editor(editor);
+    }
+
+    /// Show why the radio cannot be edited from here right now.
+    ///
+    /// The caller's answer to [`Action::Edit`] -- or to any action for which
+    /// [`Action::changes_the_radio`] holds -- while a host has the line.
+    pub fn notice(&mut self, lock: Lock) {
+        self.overlay = Overlay::Notice(lock);
     }
 
     /// The first content line visible.
@@ -354,9 +459,26 @@ impl Nav {
     /// `None`, and so does [`Action::Close`], which is this module's own
     /// business rather than the caller's.
     pub fn handle(&mut self, input: Input) -> Option<Action> {
-        match self.menu {
-            Some(selected) => self.in_menu(selected, input),
-            None => {
+        match self.overlay {
+            Overlay::Menu(selected) => self.in_menu(selected, input),
+            Overlay::Editor(mut editor) => {
+                let action = Self::in_editor(&mut editor, input);
+                // A confirmed or cancelled editor closes; anything else keeps
+                // the (possibly changed) editor.
+                self.overlay = match (input, action) {
+                    (Input::Back, _) | (_, Some(_)) => Overlay::None,
+                    _ => Overlay::Editor(editor),
+                };
+                action
+            }
+            // Any key acknowledges a notice. Left and right included: the
+            // notice is over one screen and a sideways press should not
+            // change it underneath.
+            Overlay::Notice(_) => {
+                self.overlay = Overlay::None;
+                None
+            }
+            Overlay::None => {
                 self.browsing(input);
                 None
             }
@@ -375,7 +497,7 @@ impl Nav {
                 let max = self.lines.saturating_sub(visible_lines());
                 self.scroll = (self.scroll + 1).min(max);
             }
-            Input::Select => self.menu = Some(0),
+            Input::Select => self.overlay = Overlay::Menu(0),
             // Nothing above the top level; see the module docs.
             Input::Back => {}
         }
@@ -392,32 +514,52 @@ impl Nav {
         let items = self.screen().menu();
         match input {
             Input::Up => {
-                self.menu = Some((selected + items.len() - 1) % items.len());
+                self.overlay = Overlay::Menu((selected + items.len() - 1) % items.len());
                 None
             }
             Input::Down => {
-                self.menu = Some((selected + 1) % items.len());
+                self.overlay = Overlay::Menu((selected + 1) % items.len());
                 None
             }
             Input::Back => {
-                self.menu = None;
+                self.overlay = Overlay::None;
                 None
             }
             Input::Select => match items[selected].action {
                 Action::Close => {
-                    self.menu = None;
+                    self.overlay = Overlay::None;
                     None
                 }
                 // The menu shuts on the way out, so the board is never left
                 // showing a menu over the result of what it just did.
                 action => {
-                    self.menu = None;
+                    self.overlay = Overlay::None;
                     Some(action)
                 }
             },
             // Sideways is ignored while a menu is open; see the module docs.
             Input::Left | Input::Right => None,
         }
+    }
+
+    /// Keys inside an editor. Returns [`Action::Set`] on a confirmed,
+    /// validated value; nothing otherwise, including on cancel, which is the
+    /// whole of what cancel does.
+    fn in_editor(editor: &mut Editor, input: Input) -> Option<Action> {
+        match input {
+            Input::Up => editor.up(),
+            Input::Down => editor.down(),
+            Input::Left => editor.left(),
+            Input::Right => editor.right(),
+            Input::Select => {
+                return match editor.confirm() {
+                    Confirm::Apply(setting) => Some(Action::Set(setting)),
+                    Confirm::Refused(_) => None,
+                }
+            }
+            Input::Back => {}
+        }
+        None
     }
 }
 
@@ -569,11 +711,17 @@ pub const CONTENT_LEFT: usize = 4;
 /// shorter than the last one cannot be shown scrolled past its end.
 pub fn page(frame: &mut Frame, nav: &mut Nav, left: &str, right: &str, lines: &[&str]) {
     frame.fill(false);
-    nav.set_content_lines(lines.len());
+    // An editor's lines replace the screen's and are never scrolled, so the
+    // screen's own scroll is left where it was for when the editor closes.
+    let first = if nav.is_editing() {
+        0
+    } else {
+        nav.set_content_lines(lines.len());
+        nav.scroll()
+    };
     let screen = nav.screen();
-    title_bar(frame, left, screen.title(), right);
+    title_bar(frame, left, nav.title(), right);
 
-    let first = nav.scroll();
     for (n, line) in lines.iter().skip(first).take(visible_lines()).enumerate() {
         font::draw(
             frame,
@@ -583,7 +731,9 @@ pub fn page(frame: &mut Frame, nav: &mut Nav, left: &str, right: &str, lines: &[
             true,
         );
     }
-    scrollbar(frame, first, lines.len());
+    if !nav.is_editing() {
+        scrollbar(frame, first, lines.len());
+    }
 
     icon_bar(frame, screen);
     if let Some(selected) = nav.menu_item() {
@@ -1080,6 +1230,215 @@ mod tests {
         assert_eq!(nav.scroll(), 5);
         page(&mut frame, &mut nav, "", "", &["only one"]);
         assert_eq!(nav.scroll(), 0);
+    }
+
+    // ---- phase 12: the editor level --------------------------------------
+
+    use crate::edit::{Editor, Field, Lock};
+    use crate::lr1121::config::{Setting, DEFAULT};
+
+    fn on_radio_menu(item: usize) -> Nav {
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        nav.handle(Input::Select);
+        for _ in 0..item {
+            nav.handle(Input::Down);
+        }
+        nav
+    }
+
+    /// The menu hands back `Edit(field)` and opens nothing itself: opening
+    /// needs the configuration, which the caller has and the navigator does
+    /// not.
+    #[test]
+    fn an_editor_is_asked_for_not_opened_by_the_menu() {
+        for (n, field) in Field::ALL.iter().enumerate() {
+            let mut nav = on_radio_menu(n + 1);
+            assert_eq!(nav.handle(Input::Select), Some(Action::Edit(*field)));
+            assert!(!nav.menu_is_open());
+            assert!(!nav.is_editing(), "{field:?}");
+            assert_eq!(nav.title(), "Radio");
+        }
+    }
+
+    /// Confirming a legal value returns it once and closes the editor.
+    #[test]
+    fn confirming_returns_the_setting_and_closes() {
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        nav.edit(Editor::open(Field::TxPower, DEFAULT));
+        assert!(nav.is_editing());
+        assert_eq!(nav.title(), "TX Power");
+        assert_eq!(nav.handle(Input::Up), None);
+        assert_eq!(
+            nav.handle(Input::Select),
+            Some(Action::Set(Setting::TxPower(DEFAULT.tx_power_dbm + 1)))
+        );
+        assert!(!nav.is_editing());
+        assert_eq!(
+            nav.screen(),
+            Screen::Radio,
+            "back where the editor was opened"
+        );
+        assert_eq!(nav.handle(Input::Up), None, "not delivered twice");
+    }
+
+    /// **Cancel leaves the previous value in place.** Back closes the editor
+    /// and hands back nothing, so there is no value for the caller to apply.
+    #[test]
+    fn cancel_returns_nothing_and_closes() {
+        for field in Field::ALL {
+            let mut nav = Nav::new();
+            nav.handle(Input::Right);
+            nav.edit(Editor::open(field, DEFAULT));
+            nav.handle(Input::Up);
+            nav.handle(Input::Right);
+            nav.handle(Input::Up);
+            assert!(nav.editor().unwrap().changed(), "{field:?}");
+            assert_eq!(nav.handle(Input::Back), None, "{field:?}");
+            assert!(!nav.is_editing(), "{field:?}");
+            assert_eq!(nav.editor(), None);
+        }
+    }
+
+    /// A refused value keeps the editor open, with the refusal in it, and
+    /// hands nothing back.
+    #[test]
+    fn a_refused_value_keeps_the_editor_open() {
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        nav.edit(Editor::open(Field::TxPower, DEFAULT));
+        for _ in 0..8 {
+            nav.handle(Input::Up); // 14 -> 22
+        }
+        assert_eq!(nav.handle(Input::Select), None);
+        assert!(nav.is_editing());
+        let editor = nav.editor().unwrap();
+        assert_eq!(editor.candidate(), 22);
+        assert!(editor.refused().is_some());
+        // Down clears it, and then the value goes through.
+        nav.handle(Input::Down);
+        nav.handle(Input::Down);
+        assert_eq!(
+            nav.handle(Input::Select),
+            Some(Action::Set(Setting::TxPower(20)))
+        );
+    }
+
+    /// Sideways inside an editor moves the cursor, not the screen.
+    #[test]
+    fn sideways_in_an_editor_does_not_change_screen() {
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        nav.edit(Editor::open(Field::Frequency, DEFAULT));
+        nav.handle(Input::Right);
+        nav.handle(Input::Right);
+        assert_eq!(nav.screen(), Screen::Radio);
+        assert_eq!(nav.editor().unwrap().cursor(), 2);
+        nav.handle(Input::Left);
+        assert_eq!(nav.editor().unwrap().cursor(), 1);
+    }
+
+    /// A notice is closed by any key, with nothing chosen, and the screen
+    /// under it does not move.
+    #[test]
+    fn a_notice_closes_on_any_key() {
+        for input in [
+            Input::Left,
+            Input::Right,
+            Input::Up,
+            Input::Down,
+            Input::Select,
+            Input::Back,
+        ] {
+            let mut nav = Nav::new();
+            nav.handle(Input::Right);
+            nav.notice(Lock::Usb);
+            assert!(nav.is_editing());
+            assert_eq!(nav.notice_shown(), Some(Lock::Usb));
+            assert_eq!(nav.title(), "Locked");
+            assert_eq!(nav.handle(input), None, "{input:?}");
+            assert!(!nav.is_editing());
+            assert_eq!(nav.screen(), Screen::Radio, "{input:?}");
+        }
+    }
+
+    /// The screen's scroll survives an editor being opened over it.
+    #[test]
+    fn editing_keeps_the_screens_scroll() {
+        let long: Vec<String> = (0..visible_lines() + 5).map(|n| n.to_string()).collect();
+        let long_refs: Vec<&str> = long.iter().map(String::as_str).collect();
+        let mut nav = Nav::new();
+        let mut frame = Frame::new();
+        page(&mut frame, &mut nav, "", "", &long_refs);
+        nav.handle(Input::Down);
+        nav.handle(Input::Down);
+        assert_eq!(nav.scroll(), 2);
+        nav.edit(Editor::open(Field::TxPower, DEFAULT));
+        page(&mut frame, &mut nav, "", "", &["one", "two"]);
+        assert_eq!(nav.scroll(), 2, "the editor's short page did not clamp it");
+        nav.handle(Input::Back);
+        page(&mut frame, &mut nav, "", "", &long_refs);
+        assert_eq!(nav.scroll(), 2);
+    }
+
+    /// An editor page has no scrollbar and carries the field's title.
+    #[test]
+    fn an_editor_page_is_titled_and_unscrolled() {
+        let many: Vec<String> = (0..visible_lines() + 5).map(|n| n.to_string()).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        nav.edit(Editor::open(Field::Bandwidth, DEFAULT));
+        let mut frame = Frame::new();
+        page(&mut frame, &mut nav, "", "", &refs);
+        let bar = (CONTENT_TOP..CONTENT_BOTTOM).any(|y| frame.pixel(sh1107::WIDTH - 1, y));
+        assert!(!bar, "an editor does not scroll");
+        let mut chrome = Frame::new();
+        chrome.fill(false);
+        title_bar(&mut chrome, "", "Bandwidth", "");
+        let row = |f: &Frame| {
+            (0..sh1107::WIDTH)
+                .map(|x| f.pixel(x, 4))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(row(&frame), row(&chrome));
+    }
+
+    /// The actions that a host on the line owns are exactly the ones that
+    /// change the live radio; the rest are the panel's whatever is attached.
+    #[test]
+    fn the_host_owns_exactly_the_radio_actions() {
+        let mut owned = Vec::new();
+        let mut free = Vec::new();
+        for screen in Screen::ALL {
+            for item in screen.menu() {
+                if item.action.changes_the_radio() {
+                    owned.push(item.label);
+                } else {
+                    free.push(item.label);
+                }
+            }
+        }
+        assert_eq!(
+            owned,
+            [
+                "Frequency",
+                "Bandwidth",
+                "Spread Factor",
+                "Coding Rate",
+                "TX Power",
+                "Radio On/Off",
+                "Reset Config",
+            ]
+        );
+        assert!(
+            free.contains(&"Save Config"),
+            "storing is not the live radio"
+        );
+        assert!(free.contains(&"Forget Phones"));
+        assert!(free.contains(&"Reboot"));
+        assert!(Action::Set(Setting::TxPower(1)).changes_the_radio());
     }
 
     /// The highlight's brackets sit the same distance from the label on

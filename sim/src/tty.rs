@@ -71,6 +71,19 @@ pub fn screen(scene: &mut Scene, cells: Cells, last: Option<Action>) -> String {
         },
         nav.scroll()
     ));
+    if let Some(editor) = nav.editor() {
+        out.push_str(&format!(
+            "  editing: {} = {}{}",
+            editor.field().name(),
+            editor.candidate(),
+            match editor.refused() {
+                Some(e) => format!(" (refused: {})", e.message()),
+                None => String::new(),
+            }
+        ));
+    } else if let Some(lock) = nav.notice_shown() {
+        out.push_str(&format!("  notice: {lock:?}"));
+    }
     if let Some(action) = last {
         out.push_str(&format!("  action: {action:?}"));
     }
@@ -191,6 +204,32 @@ mod tests {
         assert_eq!(decode(b"z"), Key::Unknown);
         assert_eq!(decode(b"\x1b[Z"), Key::Unknown);
         assert_eq!(decode(b""), Key::Unknown);
+    }
+
+    /// The status line says what is being edited, and whether it was refused.
+    #[test]
+    fn the_status_line_shows_the_editor() {
+        let mut scene = Scene::with_state(crate::scene::standalone());
+        for input in [
+            Input::Right,
+            Input::Select,
+            Input::Down,
+            Input::Down,
+            Input::Down,
+            Input::Down,
+            Input::Down,
+            Input::Select,
+        ] {
+            scene.press(input);
+        }
+        let text = screen(&mut scene, Cells::Braille, None);
+        assert!(text.contains("editing: tx power = 17"), "{text}");
+        for _ in 0..4 {
+            scene.press(Input::Up);
+        }
+        scene.press(Input::Select);
+        let text = screen(&mut scene, Cells::Braille, None);
+        assert!(text.contains("= 21 (refused:"), "{text}");
     }
 
     /// The screen text is the caption, the panel, and where you are.

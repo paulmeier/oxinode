@@ -43,7 +43,7 @@ use super::command::{DETECT_RESP, FW_VERSION_MAJOR, FW_VERSION_MINOR, MCU_NRF52,
 use super::display::External;
 use super::eeprom::{self, Eeprom, BOARD_HMBRW};
 use super::store::DeviceStore;
-use crate::lr1121::config::{ConfigError, RadioConfig, ValidConfig, DEFAULT};
+use crate::lr1121::config::{ConfigError, RadioConfig, Setting, ValidConfig, DEFAULT};
 
 /// Somewhere for response frames to go.
 ///
@@ -85,6 +85,28 @@ pub enum Action<'a> {
     /// Answer `CMD_DISP_READ`, which needs the pixels the panel is actually
     /// showing — and those live with the display driver, not here.
     ReportDisplay,
+}
+
+/// What a change made from the panel amounts to.
+///
+/// Two things rather than one [`Action`], because a panel edit can need both:
+/// the radio reprogrammed *and* the record written. A host command never
+/// does -- its setters do not touch the radio and its saves do not touch the
+/// setters -- which is why `Action` is one thing per command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelChange {
+    /// What to do to the radio.
+    pub radio: Action<'static>,
+    /// The persistent record changed: write it out, on the usual timer.
+    pub persist: bool,
+}
+
+impl PanelChange {
+    /// Nothing happened.
+    pub const NONE: PanelChange = PanelChange {
+        radio: Action::None,
+        persist: false,
+    };
 }
 
 /// The protocol state.
@@ -470,6 +492,97 @@ impl Protocol {
     fn set(&mut self, f: impl FnOnce(&mut RadioConfig)) {
         if !self.locked {
             f(&mut self.config);
+        }
+    }
+
+    // ---- phase 12: changes from the panel ----------------------------------
+    //
+    // The panel is a second controller, and the rule for when it may act is
+    // the caller's -- see `docs/phase-12-settings.md`. What is here is what
+    // acting *means*, and it means the same as it does for a host: a setting
+    // lands unvalidated, the radio is reprogrammed only through `ValidConfig`,
+    // and a configuration the radio cannot do leaves it off with the reason
+    // in `last_error`. None of it answers on the wire, because by the rule
+    // nobody is on the wire when it happens.
+
+    /// Bring the radio up on the current configuration, or refuse: the
+    /// same steps as `CMD_RADIO_STATE` on, without the reply.
+    fn switch_on(&mut self) -> Action<'static> {
+        match ValidConfig::new(self.config) {
+            Ok(_) => {
+                self.last_error = None;
+                self.state = RadioState::On;
+                Action::Reconfigure
+            }
+            Err(e) => {
+                self.last_error = Some(e);
+                self.state = RadioState::Off;
+                Action::Standby
+            }
+        }
+    }
+
+    /// One parameter, changed from the panel.
+    ///
+    /// The setting lands as a host's would, and if the radio is on it is
+    /// reprogrammed -- or refused, identically. In TNC mode the stored
+    /// configuration is updated too, because it is the one the board boots
+    /// with and a panel edit that vanished at the next power cycle would be
+    /// a setting that only looked changed. Under host control nothing is
+    /// stored: the host owns that configuration and will set it again.
+    ///
+    /// A host's radio lock is respected, as it is for the host's own setters.
+    pub fn set_from_panel(&mut self, setting: Setting) -> PanelChange {
+        if self.locked {
+            return PanelChange::NONE;
+        }
+        self.config.apply(setting);
+        let persist = self.is_tnc();
+        if persist {
+            self.store.rom.save_config(&self.config);
+        }
+        let radio = if self.radio_is_on() {
+            self.switch_on()
+        } else {
+            Action::None
+        };
+        PanelChange { radio, persist }
+    }
+
+    /// `Radio On/Off` from the panel.
+    pub fn toggle_from_panel(&mut self) -> Action<'static> {
+        if self.radio_is_on() {
+            self.state = RadioState::Off;
+            Action::Standby
+        } else {
+            self.switch_on()
+        }
+    }
+
+    /// `Save Config` from the panel: the live configuration becomes the one
+    /// the board boots with, exactly as `CMD_CONF_SAVE` does it.
+    pub fn save_from_panel(&mut self) -> PanelChange {
+        self.store.rom.save_config(&self.config);
+        PanelChange {
+            radio: Action::None,
+            persist: true,
+        }
+    }
+
+    /// `Reset Config` from the panel: back to what the board boots with.
+    ///
+    /// With a stored configuration that is TNC mode, resumed exactly as at
+    /// boot -- radio on. Without one it is phase 4's default, with the radio
+    /// left in whatever state it was: on stays on, reprogrammed.
+    pub fn reset_from_panel(&mut self) -> Action<'static> {
+        if self.is_tnc() {
+            return self.resume_stored_config();
+        }
+        self.config = DEFAULT;
+        if self.radio_is_on() {
+            self.switch_on()
+        } else {
+            Action::None
         }
     }
 
@@ -1568,6 +1681,168 @@ mod tests {
         }
         assert!(p.radio_is_on());
         assert_eq!(p.config(), &before);
+    }
+
+    // ---- phase 12: changes from the panel ----------------------------------
+
+    /// A panel edit with the radio on reprograms it, and what a host would
+    /// read back afterwards is the new value.
+    #[test]
+    fn a_panel_edit_reaches_the_radio_and_the_readback() {
+        let mut p = Protocol::new();
+        let mut out = Frames::default();
+        p.handle(Command::SetRadioState(RadioState::On), &mut out);
+        let change = p.set_from_panel(Setting::SpreadingFactor(10));
+        assert_eq!(change.radio, Action::Reconfigure);
+        assert!(!change.persist, "host mode: nothing stored");
+        assert!(p.radio_is_on());
+        assert_eq!(p.config().spreading_factor, 10);
+        let mut after = Frames::default();
+        p.report_all(&mut after);
+        assert_eq!(after.payload(cmd::SF), Some(&[10u8][..]));
+    }
+
+    /// With the radio off a panel edit lands and does nothing else, exactly
+    /// as a host's setter does before `initRadio` finishes.
+    #[test]
+    fn a_panel_edit_with_the_radio_off_only_lands() {
+        let mut p = Protocol::new();
+        let change = p.set_from_panel(Setting::Frequency(916_000_000));
+        assert_eq!(change, PanelChange::NONE);
+        assert_eq!(p.config().frequency_hz, 916_000_000);
+        assert!(!p.radio_is_on());
+    }
+
+    /// **Validated identically to the host path, refused not clamped.** A
+    /// panel edit the radio cannot do leaves it off with the same reason a
+    /// host would have left in `last_error`, and the value is kept as asked.
+    #[test]
+    fn a_panel_edit_is_refused_the_way_a_hosts_is() {
+        let mut host = Protocol::new();
+        let mut out = Frames::default();
+        host.handle(Command::SetRadioState(RadioState::On), &mut out);
+        host.handle(Command::SetTxPower(22), &mut out);
+        let host_action = host.handle(Command::SetRadioState(RadioState::On), &mut out);
+
+        let mut panel = Protocol::new();
+        panel.handle(Command::SetRadioState(RadioState::On), &mut out);
+        let change = panel.set_from_panel(Setting::TxPower(22));
+
+        assert_eq!(change.radio, host_action);
+        assert_eq!(change.radio, Action::Standby);
+        assert_eq!(panel.last_error(), host.last_error());
+        assert_eq!(
+            panel.last_error(),
+            Some(ConfigError::PowerAboveModuleRating)
+        );
+        assert_eq!(panel.radio_is_on(), host.radio_is_on());
+        assert!(!panel.radio_is_on());
+        assert_eq!(panel.config().tx_power_dbm, 22, "kept, not clamped");
+    }
+
+    /// A host's radio lock holds against the panel too.
+    #[test]
+    fn a_panel_edit_respects_the_hosts_lock() {
+        let mut p = Protocol::new();
+        let mut out = Frames::default();
+        p.handle(Command::SetRadioLock(true), &mut out);
+        let before = *p.config();
+        assert_eq!(p.set_from_panel(Setting::CodingRate(8)), PanelChange::NONE);
+        assert_eq!(p.config(), &before);
+    }
+
+    /// **Settings that should persist do.** In TNC mode a panel edit goes
+    /// into the stored configuration, and the next boot comes up on it.
+    #[test]
+    fn in_tnc_mode_a_panel_edit_survives_a_reboot() {
+        let mut p = Protocol::new();
+        let mut out = Frames::default();
+        p.handle(Command::SetFrequency(915_000_000), &mut out);
+        p.handle(Command::SaveConfig, &mut out);
+        assert!(p.is_tnc());
+        p.resume_stored_config();
+        assert!(p.radio_is_on());
+
+        let change = p.set_from_panel(Setting::Frequency(916_250_000));
+        assert!(change.persist, "TNC mode: the boot configuration changed");
+        assert_eq!(change.radio, Action::Reconfigure);
+
+        // The record is what survives.
+        let restored = DeviceStore::decode(&p.store().encode()).unwrap();
+        let mut next = Protocol::with_storage(restored, 0);
+        assert_eq!(next.resume_stored_config(), Action::Reconfigure);
+        assert_eq!(next.config().frequency_hz, 916_250_000);
+    }
+
+    /// ...and under host control it does not, because the host owns that
+    /// configuration and sets it again on every connect.
+    #[test]
+    fn under_host_control_a_panel_edit_is_not_stored() {
+        let mut p = Protocol::new();
+        let change = p.set_from_panel(Setting::Frequency(916_250_000));
+        assert!(!change.persist);
+        assert!(!p.is_tnc());
+        assert_eq!(p.rom().stored_config(), None);
+        let restored = DeviceStore::decode(&p.store().encode()).unwrap();
+        let next = Protocol::with_storage(restored, 0);
+        assert_eq!(next.config().frequency_hz, DEFAULT.frequency_hz);
+    }
+
+    /// `Save Config` from the panel is `CMD_CONF_SAVE`: the board is a TNC
+    /// from then on, on the live configuration.
+    #[test]
+    fn saving_from_the_panel_enters_tnc_mode() {
+        let mut p = Protocol::new();
+        p.set_from_panel(Setting::SpreadingFactor(11));
+        let change = p.save_from_panel();
+        assert!(change.persist);
+        assert_eq!(change.radio, Action::None);
+        assert!(p.is_tnc());
+        assert_eq!(p.rom().stored_config().unwrap().spreading_factor, 11);
+    }
+
+    /// The toggle goes both ways, and refuses the way a host's `on` does.
+    #[test]
+    fn the_panel_toggle_switches_the_radio_and_refuses_what_it_cannot_do() {
+        let mut p = Protocol::new();
+        assert_eq!(p.toggle_from_panel(), Action::Reconfigure);
+        assert!(p.radio_is_on());
+        assert_eq!(p.toggle_from_panel(), Action::Standby);
+        assert!(!p.radio_is_on());
+
+        p.set_from_panel(Setting::Bandwidth(100_000));
+        assert_eq!(p.toggle_from_panel(), Action::Standby);
+        assert!(!p.radio_is_on());
+        assert_eq!(p.last_error(), Some(ConfigError::UnsupportedBandwidth));
+    }
+
+    /// `Reset Config` is what the board boots with: the stored configuration
+    /// in TNC mode, on; the default otherwise, in whatever state it was.
+    #[test]
+    fn resetting_from_the_panel_returns_to_the_boot_configuration() {
+        // TNC mode.
+        let mut tnc = Protocol::new();
+        let mut out = Frames::default();
+        tnc.handle(Command::SetSpreadingFactor(9), &mut out);
+        tnc.handle(Command::SaveConfig, &mut out);
+        tnc.handle(Command::SetSpreadingFactor(12), &mut out);
+        assert_eq!(tnc.reset_from_panel(), Action::Reconfigure);
+        assert_eq!(tnc.config().spreading_factor, 9);
+        assert!(tnc.radio_is_on());
+
+        // Host mode, radio off: the default, still off.
+        let mut off = Protocol::new();
+        off.set_from_panel(Setting::TxPower(2));
+        assert_eq!(off.reset_from_panel(), Action::None);
+        assert_eq!(off.config(), &DEFAULT);
+        assert!(!off.radio_is_on());
+
+        // Host mode, radio on: the default, reprogrammed.
+        let mut on = Protocol::new();
+        on.toggle_from_panel();
+        on.set_from_panel(Setting::TxPower(2));
+        assert_eq!(on.reset_from_panel(), Action::Reconfigure);
+        assert_eq!(on.config(), &DEFAULT);
     }
 
     // ---- phase 7: the display --------------------------------------------

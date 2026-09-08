@@ -17,6 +17,7 @@
 
 pub mod battery;
 pub mod ble;
+pub mod edit;
 pub mod font;
 pub mod gpio;
 pub mod hash;

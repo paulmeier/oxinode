@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode, over USB or paired Bluetooth
+## Status: a provisioned RNode, over USB or paired Bluetooth, with settings on the panel
 
 Being precise about that:
 
@@ -27,6 +27,7 @@ Being precise about that:
 | 9 | An on-device interface, and a simulator to build it with | **done** — the shell is pure code and every screen has a golden image, [notes](docs/phase-9-simulator.md) |
 | 10 | The navigation pad driver | **done** — verified on hardware: six switches, repeat, debounce, and the mode switch read in every position it has, [notes](docs/phase-10-pad.md) |
 | 11 | The screens, drawn from real modem state | **done** — every screen renders from what the modem knows and says so where it knows nothing; read back from the board, [notes](docs/phase-11-screens.md) |
+| 12 | Changing settings from the panel | **done** — every radio parameter editable with no host attached, validated as the host's are, refused not clamped, and stored in TNC mode; the two-controller question decided and written down, [notes](docs/phase-12-settings.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -86,7 +87,24 @@ sense on P0.31 is read for the first time. Every screen has a golden image
 empty and populated, and the render path is the same code on the board and in
 the simulator. See [docs/phase-11-screens.md](docs/phase-11-screens.md).
 
-Phases 1 to 8, 10 and 11 are confirmed on hardware.
+Phase 12 lets the board be set up with no app attached. The Radio screen's
+menu opens an editor for each of the five parameters a host sets — a stepper
+for the ones with a fixed set, a digit editor for the frequency — and a
+confirmed value goes through the same `ValidConfig` check a host's
+configuration does, and is refused with the same reason rather than clamped.
+Nothing is applied until it is confirmed and cancel leaves the old value in
+place. The phase's real question was what to do when a host is connected,
+since an RNode is host-controlled and Reticulum checks the radio exactly once;
+the answer, from reading its interface code, is that **a live session on USB
+or Bluetooth owns the live radio configuration**, and the panel says so
+rather than changing it underneath. In TNC mode an edit goes into the stored
+configuration, so it is what the board boots with, and survives a reflash
+with the rest of the device record. See
+[docs/phase-12-settings.md](docs/phase-12-settings.md).
+
+Phases 1 to 8, 10 and 11 are confirmed on hardware; phase 12's image boots
+and serves a host, and its editors are held to golden images, but a pad walk
+through them on the board has not been done from this desk.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -619,6 +637,8 @@ src/ble.rs            phase 8: MPSL, the SoftDevice Controller, and what they ta
 src/bin/ble.rs        phase 8: the bring-up image, built to be debugged without a probe
 core/src/status.rs    phase 7: the status page, rendered from a value
 core/src/ui.rs        phase 9: screens, the navigation model, the chrome and the menus
+core/src/screens.rs   phase 11: what each screen knows, and the lines it draws from that
+core/src/edit.rs      phase 12: editing one radio parameter -- the steppers, the digits, the refusal
 core/src/pad.rs       phase 10: the pad as a state machine -- debounce, auto-repeat, the numbers
 src/pad.rs            phase 10: the pad driver -- six pins, the PORT interrupt, the channel; the mode switch
 sim/                  phase 9: oxinode-sim, the panel simulator -- host only
@@ -740,14 +760,28 @@ sim tty
 
 **What the screens draw from.** Since phase 11 the screens draw from a
 `State` — the same plain values the board copies out of its modem loop — and
-the simulator has two fixtures for it. `--state populated`, the default, is a
-board mid-session with every field known; `--state empty` is one that knows
-nothing yet, so every screen shows how it says so. The populated radio screen
-is longer than the panel, which is what exercises scrolling and the scrollbar:
+the simulator has three fixtures for it. `--state populated`, the default, is a
+board mid-session with every field known and a host on the line; `--state
+empty` is one that knows nothing yet, so every screen shows how it says so;
+`--state standalone` is a TNC with no host attached, which is the one whose
+settings the panel may change. The populated radio screen is longer than the
+panel, which is what exercises scrolling and the scrollbar:
 
 ```bash
 sim render --script "right down*3" -o radio-scrolled.png
 sim render --state empty --script "right*4" -o system-empty.png
+```
+
+**Editing a setting.** The Radio menu's first five items open an editor.
+The scene plays the board's part: with nobody on the line it opens the
+editor and a confirmed value lands in the state, so the next picture shows
+it; with a host on the line it opens the notice instead. The fourth press
+here is `TX Power`, `up*4` takes 17 dBm to 21, and the last `select` is
+refused:
+
+```bash
+sim render --state standalone --script "right select down*5 select up*4 select" -o refused.png
+sim render --script "right select down select" -o locked.png
 ```
 
 **A frame from the board.** A 2048-byte dump of the controller's RAM, as the

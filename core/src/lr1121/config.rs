@@ -291,6 +291,63 @@ impl RadioConfig {
     }
 }
 
+/// One radio parameter with a value, as the panel sets it.
+///
+/// The five things an RNode host sets, one at a time -- see the module docs.
+/// Phase 12's editor changes one of them per confirmation, and this is what
+/// it hands back; [`RadioConfig::apply`] is the one place a setting lands in
+/// a configuration, so the panel and the host cannot disagree about which
+/// field a setting means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// Hertz.
+    Frequency(u32),
+    /// Hertz.
+    Bandwidth(u32),
+    /// 7 to 12, as a host would ask.
+    SpreadingFactor(u8),
+    /// The denominator of 4/n, 5 to 8.
+    CodingRate(u8),
+    /// dBm at the connector.
+    TxPower(i8),
+}
+
+impl Setting {
+    /// The parameter's name, for a log.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Setting::Frequency(_) => "frequency",
+            Setting::Bandwidth(_) => "bandwidth",
+            Setting::SpreadingFactor(_) => "spreading factor",
+            Setting::CodingRate(_) => "coding rate",
+            Setting::TxPower(_) => "tx power",
+        }
+    }
+}
+
+impl RadioConfig {
+    /// Land one setting in this configuration, unvalidated.
+    ///
+    /// Unvalidated on purpose, for the reason the host's setters are: an
+    /// intermediate state is a normal thing to hold. Whether the result may
+    /// reach the radio is [`RadioConfig::check`]'s question, asked afterwards.
+    pub const fn apply(&mut self, setting: Setting) {
+        match setting {
+            Setting::Frequency(hz) => self.frequency_hz = hz,
+            Setting::Bandwidth(hz) => self.bandwidth_hz = hz,
+            Setting::SpreadingFactor(sf) => self.spreading_factor = sf,
+            Setting::CodingRate(cr) => self.coding_rate = cr,
+            Setting::TxPower(dbm) => self.tx_power_dbm = dbm,
+        }
+    }
+
+    /// The same configuration with one setting changed.
+    pub const fn with(mut self, setting: Setting) -> Self {
+        self.apply(setting);
+        self
+    }
+}
+
 /// A configuration that has passed [`RadioConfig::check`].
 ///
 /// The only way to make one, and the only thing the modem will accept. That is
@@ -791,6 +848,51 @@ mod tests {
         assert_eq!(valid.sync_word, 0x2b);
         assert_eq!(valid.coding_rate_code(), 3);
         assert_eq!(valid.bandwidth_code(), 0x06);
+    }
+
+    /// A setting lands in exactly the field it names, and nowhere else. A
+    /// setting that landed in the wrong field would be a panel that changes
+    /// the bandwidth when asked for the spreading factor.
+    #[test]
+    fn a_setting_changes_exactly_the_field_it_names() {
+        type Read = fn(&RadioConfig) -> i64;
+        let cases: [(Setting, Read); 5] = [
+            (Setting::Frequency(903_000_000), |c| c.frequency_hz as i64),
+            (Setting::Bandwidth(500_000), |c| c.bandwidth_hz as i64),
+            (Setting::SpreadingFactor(12), |c| c.spreading_factor as i64),
+            (Setting::CodingRate(8), |c| c.coding_rate as i64),
+            (Setting::TxPower(-3), |c| c.tx_power_dbm as i64),
+        ];
+        for (setting, read) in cases {
+            let changed = DEFAULT.with(setting);
+            assert_ne!(
+                read(&changed),
+                read(&DEFAULT),
+                "{setting:?} changed nothing"
+            );
+            // Every other field is untouched.
+            let mut back = changed;
+            match setting {
+                Setting::Frequency(_) => back.frequency_hz = DEFAULT.frequency_hz,
+                Setting::Bandwidth(_) => back.bandwidth_hz = DEFAULT.bandwidth_hz,
+                Setting::SpreadingFactor(_) => back.spreading_factor = DEFAULT.spreading_factor,
+                Setting::CodingRate(_) => back.coding_rate = DEFAULT.coding_rate,
+                Setting::TxPower(_) => back.tx_power_dbm = DEFAULT.tx_power_dbm,
+            }
+            assert_eq!(back, DEFAULT, "{setting:?} touched another field");
+            assert!(!setting.name().is_empty());
+        }
+    }
+
+    /// Applying does not validate, so an editor can hold a refused value
+    /// and say so; refusing happens in `check`, once, for everybody.
+    #[test]
+    fn applying_a_setting_never_validates() {
+        let out_of_band = DEFAULT.with(Setting::Frequency(868_000_000));
+        assert_eq!(out_of_band.frequency_hz, 868_000_000);
+        assert_eq!(out_of_band.check(), Err(ConfigError::FrequencyOutOfBand));
+        let too_hot = DEFAULT.with(Setting::TxPower(22));
+        assert_eq!(too_hot.check(), Err(ConfigError::PowerAboveModuleRating));
     }
 
     /// Every error has a message, and none of them is empty. This is the only

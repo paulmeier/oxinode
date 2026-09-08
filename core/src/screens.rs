@@ -34,6 +34,7 @@ use core::fmt::Write;
 
 use crate::battery;
 use crate::ble::NAME_LEN;
+use crate::edit::{Editor, Field, Lock, FREQ_DIGITS};
 use crate::font;
 use crate::lr1121::config::{ConfigError, RadioConfig};
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
@@ -89,6 +90,18 @@ impl Air {
             Air::Refused(_) => "refused",
             Air::Failed => "failed",
             Air::NoRadio => "no radio",
+        }
+    }
+}
+
+impl Host {
+    /// Who has the radio, if it is not the panel: phase 12's rule, in one
+    /// place. A live session on either transport owns the live configuration.
+    pub const fn lock(self) -> Option<Lock> {
+        match self {
+            Host::None => None,
+            Host::Usb => Some(Lock::Usb),
+            Host::Bluetooth => Some(Lock::Bluetooth),
         }
     }
 }
@@ -243,6 +256,11 @@ pub const fn free_ram(heap_start: u32, stack_pointer: u32) -> Option<u32> {
 pub struct Lines {
     rows: [Text<LINE_CHARS>; MAX_LINES],
     len: usize,
+    /// A line was handed in wider than the row and lost its tail. `Text`
+    /// truncates silently, which is right on the board -- a line one
+    /// character too long should lose that character, not vanish -- and
+    /// wrong in a test, where the loss is the bug. So it is recorded.
+    overflowed: bool,
 }
 
 impl Default for Lines {
@@ -256,7 +274,13 @@ impl Lines {
         Lines {
             rows: core::array::from_fn(|_| Text::new()),
             len: 0,
+            overflowed: false,
         }
+    }
+
+    /// Whether any line handed in was too wide for the row and was cut.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
     /// How many lines there are.
@@ -284,6 +308,9 @@ impl Lines {
         if self.len == MAX_LINES {
             return;
         }
+        if text.len() > LINE_CHARS {
+            self.overflowed = true;
+        }
         self.rows[self.len].clear();
         let _ = self.rows[self.len].write_str(text);
         self.len += 1;
@@ -298,7 +325,11 @@ impl Lines {
         row.clear();
         let width = LINE_CHARS.saturating_sub(label.len());
         // A value wider than the room it has pushes the label off rather than
-        // being cut: `{value:>width$}` never truncates.
+        // being cut: `{value:>width$}` never truncates, and the row then
+        // loses its tail to `Text`.
+        if value.len() > width {
+            self.overflowed = true;
+        }
         let _ = write!(row, "{label}{value:>width$}");
         self.len += 1;
     }
@@ -590,6 +621,101 @@ impl System {
     }
 }
 
+/// One field's value in the words the Radio screen uses for it, so the
+/// editor and the screen never disagree about how a number reads.
+fn field_value(out: &mut Text<LINE_CHARS>, field: Field, value: i32) {
+    match field {
+        Field::Frequency => megahertz(out, value as u32),
+        Field::Bandwidth => {
+            let _ = write!(out, "{}.{} kHz", value / 1_000, (value % 1_000) / 100);
+        }
+        Field::SpreadingFactor => {
+            let _ = write!(out, "{value}");
+        }
+        Field::CodingRate => {
+            let _ = write!(out, "4/{value}");
+        }
+        Field::TxPower => {
+            let _ = write!(out, "{value} dBm");
+        }
+    }
+}
+
+/// Where the editor's value starts on its line, in characters: after the
+/// label and its gap. The cursor line is built to the same column.
+const EDIT_VALUE_COL: usize = 6;
+
+impl Editor {
+    /// The editor as lines: what it was, what it is now, how to work it,
+    /// and why the last confirmation was refused, if it was.
+    ///
+    /// Left-aligned rather than in `label value` rows, because the frequency
+    /// editor puts a cursor under one digit and the cursor line has to land
+    /// on the same column as the digit whatever the value's width.
+    pub fn lines(&self, out: &mut Lines) {
+        let mut v = Text::<LINE_CHARS>::new();
+        let mut line = Text::<LINE_CHARS>::new();
+
+        field_value(&mut v, self.field(), self.original());
+        let _ = write!(
+            line,
+            "{:<width$}{}",
+            "Was",
+            v.as_str(),
+            width = EDIT_VALUE_COL
+        );
+        out.line(line.as_str());
+
+        v.clear();
+        line.clear();
+        field_value(&mut v, self.field(), self.candidate());
+        let _ = write!(
+            line,
+            "{:<width$}{}",
+            "Now",
+            v.as_str(),
+            width = EDIT_VALUE_COL
+        );
+        out.line(line.as_str());
+
+        if self.is_stepper() {
+            out.line("");
+            out.line("Up/Down: change");
+        } else {
+            // `MMM.kkk`: the cursor's column skips the point. An underscore
+            // rather than a caret, because the font has one and not the
+            // other, and an underline under a digit reads as a cursor.
+            let at = self.cursor();
+            let col = EDIT_VALUE_COL + at + usize::from(at >= FREQ_DIGITS / 2);
+            line.clear();
+            let _ = write!(line, "{:>width$}", "_", width = col + 1);
+            out.line(line.as_str());
+            out.line("Up/Down: digit");
+            out.line("Left/Right: move");
+        }
+        out.line("OK: set Back: cancel");
+        if let Some(reason) = self.refused() {
+            out.line("");
+            out.line("Refused:");
+            out.wrapped(reason.message());
+        }
+    }
+}
+
+impl Lock {
+    /// The notice as lines: who has the radio, and what to do about it.
+    pub fn lines(self, out: &mut Lines) {
+        out.line(self.headline());
+        out.line("");
+        out.wrapped("It set the radio up and believes what it set, so the panel will not change it underneath.");
+        out.line("");
+        out.wrapped(match self {
+            Lock::Usb => "Close the port to change settings here.",
+            Lock::Bluetooth => "Disconnect the phone to change settings here.",
+        });
+    }
+}
+
 /// What goes in the title bar's right corner: nothing without a stack, `BT`
 /// while advertising, `BT*` with a phone on the line -- as the phase 7 page
 /// had it.
@@ -632,7 +758,14 @@ pub fn passkey_box(frame: &mut Frame, key: u32) {
 /// Bluetooth badge, which are the two things worth seeing on every screen.
 pub fn render(frame: &mut Frame, nav: &mut Nav, state: &State) {
     let mut lines = Lines::new();
-    state.lines(nav.screen(), &mut lines);
+    // An editor or a notice replaces the screen's lines; the chrome stays.
+    if let Some(editor) = nav.editor() {
+        editor.lines(&mut lines);
+    } else if let Some(lock) = nav.notice_shown() {
+        lock.lines(&mut lines);
+    } else {
+        state.lines(nav.screen(), &mut lines);
+    }
     let strs = lines.as_strs();
 
     let mut left = Text::<8>::new();
@@ -736,8 +869,27 @@ mod tests {
                         line.len()
                     );
                 }
+                // The rows are the right width by construction; what the
+                // check above cannot see is a line that was *cut* to fit.
+                let mut out = Lines::new();
+                state.lines(screen, &mut out);
+                assert!(!out.overflowed(), "{screen:?} lost the tail of a line");
             }
         }
+    }
+
+    /// A line too wide for the row is recorded as such, which is the only
+    /// way a test can tell a cut line from one that fitted.
+    #[test]
+    fn a_line_that_is_cut_is_reported() {
+        let mut out = Lines::new();
+        out.line("exactly twenty chars");
+        assert!(!out.overflowed());
+        out.line("twenty-one characters");
+        assert!(out.overflowed());
+        let mut out = Lines::new();
+        out.row("Label", "a value that is far too wide");
+        assert!(out.overflowed());
     }
 
     /// No screen produces more lines than the buffer holds.
@@ -1052,6 +1204,183 @@ mod tests {
         let dirty = (0..sh1107::PAGES).filter(|&p| live.is_dirty(p)).count();
         assert!(dirty < sh1107::PAGES, "a screen change flushed every page");
         assert!(dirty > 2, "a screen change touched only {dirty} pages");
+    }
+
+    // ---- phase 12: the editor ---------------------------------------------
+
+    use crate::edit::{Editor, Field, Lock};
+
+    fn editor_lines(editor: &Editor) -> Vec<String> {
+        let mut out = Lines::new();
+        editor.lines(&mut out);
+        (0..out.len())
+            .map(|n| out.get(n).unwrap().to_string())
+            .collect()
+    }
+
+    /// Every editor, fresh and refused, fits the panel in width and height.
+    /// It cannot scroll, so a line past the eleventh would be invisible.
+    #[test]
+    fn every_editor_fits_without_scrolling() {
+        let width = sh1107::WIDTH - ui::CONTENT_LEFT - 2;
+        for field in Field::ALL {
+            let mut e = Editor::open(field, populated().radio.config);
+            for pass in ["fresh", "refused"] {
+                if pass == "refused" {
+                    // Drive every field to a refusal it can reach; two of
+                    // them cannot, and stay legal.
+                    for _ in 0..12 {
+                        e.up();
+                    }
+                    e.confirm();
+                }
+                let lines = editor_lines(&e);
+                assert!(
+                    lines.len() <= ui::visible_lines(),
+                    "{field:?} {pass}: {} lines",
+                    lines.len()
+                );
+                let mut out = Lines::new();
+                e.lines(&mut out);
+                assert!(!out.overflowed(), "{field:?} {pass}: a line was cut");
+                for line in &lines {
+                    assert!(
+                        line.len() <= LINE_CHARS && font::width_of(line) <= width,
+                        "{field:?} {pass}: `{line}`"
+                    );
+                }
+            }
+        }
+        // And the notices.
+        for lock in [Lock::Usb, Lock::Bluetooth] {
+            let mut out = Lines::new();
+            lock.lines(&mut out);
+            assert!(!out.overflowed(), "{lock:?}: a line was cut");
+            assert!(out.len() <= ui::visible_lines());
+            for n in 0..out.len() {
+                assert!(out.get(n).unwrap().len() <= LINE_CHARS);
+            }
+        }
+    }
+
+    /// The editor says what the value was and what it is now, in the same
+    /// words the Radio screen uses for it.
+    #[test]
+    fn the_editor_shows_was_and_now_in_the_screens_words() {
+        let mut e = Editor::open(Field::TxPower, populated().radio.config);
+        e.up();
+        let lines = editor_lines(&e);
+        assert_eq!(lines[0], "Was   17 dBm");
+        assert_eq!(lines[1], "Now   18 dBm");
+        let radio = lines_of(&populated(), Screen::Radio);
+        assert!(radio.iter().any(|l| l.ends_with("17 dBm")));
+
+        let mut e = Editor::open(Field::Bandwidth, populated().radio.config);
+        e.up();
+        let lines = editor_lines(&e);
+        assert_eq!(lines[0], "Was   125.0 kHz");
+        assert_eq!(lines[1], "Now   250.0 kHz");
+        let e = Editor::open(Field::CodingRate, populated().radio.config);
+        assert_eq!(editor_lines(&e)[1], "Now   4/5");
+        let e = Editor::open(Field::SpreadingFactor, populated().radio.config);
+        assert_eq!(editor_lines(&e)[1], "Now   8");
+    }
+
+    /// The frequency editor's cursor sits under the digit it edits, on both
+    /// sides of the decimal point.
+    #[test]
+    fn the_cursor_is_under_the_digit_it_edits() {
+        let mut e = Editor::open(Field::Frequency, populated().radio.config);
+        for expect in 0..crate::edit::FREQ_DIGITS {
+            let lines = editor_lines(&e);
+            assert_eq!(lines[1], "Now   915.000 MHz");
+            let caret = lines[2].find('_').expect("a cursor line");
+            let digit = lines[1].as_bytes()[caret];
+            assert!(
+                digit.is_ascii_digit(),
+                "cursor {expect} is under `{}`",
+                digit as char
+            );
+            // The k-th digit of the value, skipping the point.
+            let digits: Vec<usize> = lines[1]
+                .char_indices()
+                .filter(|(_, c)| c.is_ascii_digit())
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(caret, digits[expect], "cursor {expect}");
+            e.right();
+        }
+    }
+
+    /// A refused value says so, with the same reason the host path gives.
+    #[test]
+    fn a_refused_editor_says_why() {
+        let mut e = Editor::open(Field::TxPower, populated().radio.config);
+        for _ in 0..5 {
+            e.up(); // 17 -> 22
+        }
+        assert_eq!(
+            e.confirm(),
+            crate::edit::Confirm::Refused(ConfigError::PowerAboveModuleRating)
+        );
+        let text = editor_lines(&e).join(" ");
+        assert!(text.contains("Now   22 dBm"), "{text}");
+        assert!(text.contains("Refused:"), "{text}");
+        assert!(
+            text.contains(ConfigError::PowerAboveModuleRating.message()),
+            "{text}"
+        );
+        e.down();
+        assert!(!editor_lines(&e).join(" ").contains("Refused"));
+    }
+
+    /// The notice names the host that has the radio.
+    #[test]
+    fn the_notice_names_the_host() {
+        let mut out = Lines::new();
+        Lock::Usb.lines(&mut out);
+        assert!(out.get(0).unwrap().starts_with("USB"));
+        let mut out = Lines::new();
+        Lock::Bluetooth.lines(&mut out);
+        assert!(out.get(0).unwrap().starts_with("Phone"));
+        assert_eq!(Host::None.lock(), None);
+        assert_eq!(Host::Usb.lock(), Some(Lock::Usb));
+        assert_eq!(Host::Bluetooth.lock(), Some(Lock::Bluetooth));
+    }
+
+    /// Rendering with an editor open draws the editor, the field's title,
+    /// and the same chrome; closing it puts the screen back exactly.
+    #[test]
+    fn rendering_an_editor_replaces_the_content_and_nothing_else() {
+        let state = populated();
+        let mut nav = Nav::new();
+        nav.handle(Input::Right);
+        let mut before = Frame::new();
+        render(&mut before, &mut nav, &state);
+        nav.edit(Editor::open(Field::Frequency, state.radio.config));
+        let mut editing = Frame::new();
+        render(&mut editing, &mut nav, &state);
+        assert_ne!(before.as_bytes(), editing.as_bytes());
+        // The icon strip is the same.
+        for y in ui::CONTENT_BOTTOM..sh1107::HEIGHT {
+            for x in 0..sh1107::WIDTH {
+                assert_eq!(
+                    before.pixel(x, y),
+                    editing.pixel(x, y),
+                    "strip at ({x}, {y})"
+                );
+            }
+        }
+        nav.handle(Input::Back);
+        let mut after = Frame::new();
+        render(&mut after, &mut nav, &state);
+        assert_eq!(before.as_bytes(), after.as_bytes());
+
+        nav.notice(Lock::Usb);
+        let mut notice = Frame::new();
+        render(&mut notice, &mut nav, &state);
+        assert_ne!(notice.as_bytes(), before.as_bytes());
+        assert_ne!(notice.as_bytes(), editing.as_bytes());
     }
 
     /// What the simulator and the board draw is the same composition.

@@ -43,8 +43,9 @@ usage: oxinode-sim <command> [options]
 
 A script is key names separated by spaces: left right up down select back,
 with word*N for repeats and # for comments. --state is the fixture the
-screens draw from: `populated` (the default) is a board mid-session, `empty`
-one that knows nothing yet.
+screens draw from: `populated` (the default) is a board mid-session with a
+host on the line, `empty` one that knows nothing yet, and `standalone` a TNC
+with no host attached -- the one whose settings the panel may change.
 ";
 
 /// What the command line asked for.
@@ -116,8 +117,9 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--script" => script = value("--script")?,
             "--state" => {
                 let v = value("--state")?;
-                state = Fixture::named(&v)
-                    .ok_or_else(|| format!("--state: `{v}` is not `empty` or `populated`"))?;
+                state = Fixture::named(&v).ok_or_else(|| {
+                    format!("--state: `{v}` is not `empty`, `populated` or `standalone`")
+                })?;
             }
             "--text" => text = true,
             "-o" | "--out" => out = Some(PathBuf::from(value("-o")?)),
@@ -363,7 +365,14 @@ mod tests {
         assert!(parse("steps --script right").unwrap_err().contains("--out"));
         assert!(parse("render --state full -o x.png")
             .unwrap_err()
-            .contains("populated"));
+            .contains("standalone"));
+        assert!(matches!(
+            parse("render --state standalone -o x.png").unwrap(),
+            Command::Render {
+                state: Fixture::Standalone,
+                ..
+            }
+        ));
         assert!(parse("render --script").unwrap_err().contains("value"));
         assert!(parse("render --bogus -o x")
             .unwrap_err()
