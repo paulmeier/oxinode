@@ -5,7 +5,7 @@
 //! not borrowed code.
 //!
 //! Only what the current phase actually drives is declared here. Radio, flash,
-//! display, GPS and IMU pins are documented in the README until the phase that
+//! display and IMU pins are documented in the README until the phase that
 //! needs them arrives -- an unused `const` is just a comment that can go stale
 //! without anyone noticing.
 

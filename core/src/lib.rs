@@ -24,6 +24,7 @@ pub mod battery;
 pub mod ble;
 pub mod edit;
 pub mod gpio;
+pub mod gps;
 pub mod hash;
 pub mod linker_script;
 pub mod logbuf;

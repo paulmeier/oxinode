@@ -56,6 +56,15 @@
 //! the host gets, and in TNC mode the edit goes into the stored configuration
 //! too, so it is what the board boots with. See `docs/phase-12-settings.md`.
 //!
+//! # The GPS is a third task
+//!
+//! Phase 14. The receiver has a task of its own, `oxinode::gps::serve`,
+//! beside the Bluetooth one: it follows the mode switch and the menu, drives
+//! the load switch, probes for the module and parses what it sends. The modem
+//! loop meets it at two points only -- a copy of the `Position` for the
+//! screen, and the `GPS On/Off` menu item, which raises a signal. Nothing on
+//! the radio's path waits for the receiver.
+//!
 //! # Idling in standby XOSC
 //!
 //! Phase 3 measured the oscillator startup as a fixed 5 ms charged to the first
@@ -70,11 +79,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_futures::join::{join, join5};
+use embassy_futures::join::{join, join3, join5};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_futures::yield_now;
 use embassy_nrf::usb::{self, Driver};
-use embassy_nrf::{bind_interrupts, interrupt, peripherals, saadc, spim, twim};
+use embassy_nrf::{bind_interrupts, buffered_uarte, interrupt, peripherals, saadc, spim, twim};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::pipe::{Pipe, Reader, Writer};
 use embassy_sync::signal::Signal;
@@ -87,6 +96,7 @@ use oxinode::battery::Sense;
 use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
+use oxinode::gps;
 use oxinode::modem::Modem;
 use oxinode::nus;
 use oxinode::pad;
@@ -114,6 +124,8 @@ bind_interrupts!(struct Irqs {
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
     SAADC => saadc::InterruptHandler;
+    // Phase 14: the GPS UART.
+    UARTE0 => buffered_uarte::InterruptHandler<peripherals::UARTE0>;
     // The link layer's own. MPSL sets their priorities itself.
     RADIO => mpsl::HighPrioInterruptHandler;
     TIMER0 => mpsl::HighPrioInterruptHandler;
@@ -226,6 +238,7 @@ async fn main(_spawner: Spawner) {
         interrupt::SPI2,
         interrupt::TWISPI0,
         interrupt::SAADC,
+        interrupt::UARTE0,
     ]);
 
     let spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
@@ -293,6 +306,26 @@ async fn main(_spawner: Spawner) {
     let mode_switch = pad::ModeSwitch::new(p.P1_09, p.P0_12);
     let pad_events = pad::Events::new();
     let nav_pad = pad::run(&mut pad_pins, &pad_events);
+
+    // Phase 14: the GPS. A task of its own that follows the mode switch and
+    // the menu, probes for the module when powered, and publishes what it
+    // knows for the Position screen; see `oxinode::gps`.
+    static GPS_RX: StaticCell<[u8; gps::RX_BUFFER]> = StaticCell::new();
+    static GPS_TX: StaticCell<[u8; gps::TX_BUFFER]> = StaticCell::new();
+    let receiver = gps::Gps::new(
+        p.P1_01,
+        p.UARTE0,
+        p.TIMER2,
+        p.PPI_CH10,
+        p.PPI_CH11,
+        p.PPI_GROUP0,
+        p.P0_20,
+        p.P0_19,
+        Irqs,
+        GPS_RX.init([0; gps::RX_BUFFER]),
+        GPS_TX.init([0; gps::TX_BUFFER]),
+    );
+    let gps_task = gps::serve(receiver, &mode_switch);
 
     // Phase 11: the cell through its divider on P0.31, and the charger's
     // status line. Read once per redraw, for the Home screen's battery row
@@ -557,7 +590,14 @@ async fn main(_spawner: Spawner) {
         .await
     };
 
-    join5(run_usb, pump, feed_host_rx, modem, join(bluetooth, nav_pad)).await;
+    join5(
+        run_usb,
+        pump,
+        feed_host_rx,
+        modem,
+        join3(bluetooth, nav_pad, gps_task),
+    )
+    .await;
 }
 
 /// Advertise, and pump bytes for every connection that comes.
@@ -1574,6 +1614,12 @@ async fn perform(
                 persist: true,
             }
         }
+        // The receiver is the GPS task's; this only asks.
+        ui::Action::ToggleGps => {
+            defmt::info!("ui: gps on/off");
+            gps::toggle();
+            PanelChange::NONE
+        }
     }
 }
 
@@ -1632,7 +1678,7 @@ impl Facts {
                 passkey: passkey_state(),
                 bonded: protocol.store().bonds().count() as u8,
             },
-            position: screens::Position,
+            position: gps::position(),
             system: screens::System {
                 version: env!("CARGO_PKG_VERSION"),
                 serial: Some(self.serial),

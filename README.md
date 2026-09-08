@@ -9,7 +9,7 @@ sees the board as an ordinary RNode over USB serial — no custom interface
 driver, no patched Reticulum — and that the Super IO's OLED eventually shows
 local status. It replaces the Meshtastic firmware the board ships with.
 
-## Status: a provisioned RNode, over USB or paired Bluetooth, with settings on the panel, and the panel's interface a crate of its own
+## Status: a provisioned RNode, over USB or paired Bluetooth, with settings on the panel, the panel's interface a crate of its own, and the GPS heard
 
 Being precise about that:
 
@@ -29,6 +29,7 @@ Being precise about that:
 | 11 | The screens, drawn from real modem state | **done** — every screen renders from what the modem knows and says so where it knows nothing; read back from the board, [notes](docs/phase-11-screens.md) |
 | 12 | Changing settings from the panel | **done** — every radio parameter editable with no host attached, validated as the host's are, refused not clamped, and stored in TNC mode; the two-controller question decided and written down, [notes](docs/phase-12-settings.md) |
 | 13 | The interface as a device-agnostic crate | **done** — `monopanel`, a workspace crate with nothing of oxinode in it: a `Canvas` trait, a layout derived from the canvas, screens supplied by the application, an optional `embedded-graphics` adapter, and golden images at 128 × 64 as well as 128 × 128, [notes](docs/phase-13-interface-crate.md) |
+| 14 | The GPS, and the Position screen | **heard on hardware** — the module powered through its load switch, NMEA at 9600 baud with the module's TX on P0.20, parsed in the core against captured sentences, and switchable from the mode switch and the menu; no fix yet, the board having sat indoors, and the current draw unmeasured, [notes](docs/phase-14-gps.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -82,8 +83,9 @@ Phase 11 fills the screens. Each one is handed plain values copied out of the
 modem loop — which host has the line, the radio's configuration and whether it
 took, the Bluetooth link and how many phones are bonded, the identity and the
 free RAM — and draws them, reaching into nothing. A field that is not known is
-a dash, never a plausible zero, and the `Position` screen says the GPS is not
-driven yet rather than placing the board in the Gulf of Guinea. The battery
+a dash, never a plausible zero, and the `Position` screen — empty until phase
+14 — said the GPS was not driven rather than placing the board in the Gulf of
+Guinea. The battery
 sense on P0.31 is read for the first time. Every screen has a golden image
 empty and populated, and the render path is the same code on the board and in
 the simulator. See [docs/phase-11-screens.md](docs/phase-11-screens.md).
@@ -118,7 +120,21 @@ ways round, so it draws on any monochrome display driver in that ecosystem and
 that ecosystem draws on any canvas of this one. See
 [docs/phase-13-interface-crate.md](docs/phase-13-interface-crate.md).
 
-Phases 1 to 8, 10 and 11 are confirmed on hardware; phase 12's image boots
+Phase 14 drives the GPS. The Super IO's module sits behind a load switch on
+P1.01 and on a UART the two sources named from opposite ends; the firmware
+drives the switch, probes each pin order at each likely rate, and settled it
+on the board: the module transmits on P0.20, at 9600 baud, within a second of
+power. Framing, checksums, `GGA`, `RMC` and `GSV` are parsed in
+`oxinode-core` against captured sentences, malformed ones included, and the
+`Position` screen draws the receiver's state, satellites, time, date and
+last fix with its age — dashes where it knows nothing, and `off`, `no data`,
+`searching` or `fix` on its first row. The receiver follows the mode
+switch's GPS ON position and the Position menu's `GPS On/Off`, and the UART
+is released when it is off. A fix has not yet been seen from this desk, and
+the current draw is not yet measured. See
+[docs/phase-14-gps.md](docs/phase-14-gps.md).
+
+Phases 1 to 8, 10, 11 and 14 are confirmed on hardware; phase 12's image boots
 and serves a host, and its editors are held to golden images, but a pad walk
 through them on the board has not been done from this desk. Phase 13 changes
 no pixel on the board's panel -- every golden image from before it still
@@ -290,14 +306,15 @@ to work from.
 | Navigation pad up / down / left / right | P0.21 / P0.17 / P1.05 / P0.16 | active low, internal pull-ups; auto-repeat |
 | Navigation pad OK / back | P0.10 / P0.15 | active low; **P0.10 is an NFC pin**, see below |
 | Power OFF / Power ON / GPS ON switch | P1.09 / P0.12 | P1.09 high in Power ON, P0.12 high in GPS ON, no pull; Power OFF cuts the board's power |
+| GPS load switch (`GPS_EN`) | P1.01 | **active high**; gates the switched 3V3 rail the module lives on, 500 mA |
+| GPS UART | P0.20 / P0.19 | the module transmits on **P0.20** (nRF52840 `RXD`) and receives on P0.19; 9600 baud, 8N1; settled on the board, see below |
 | Battery sense | P0.31 (`AIN7`) | the cell through 806 kΩ / 1.5 MΩ, ratio 0.65048; read by the SAADC at gain 1/6, 12-bit |
 | Charger status | P1.02 | BQ25185 `STAT`, open drain, **low while charging**; internal pull-up |
 | SWDIO / SWDCLK | — | test pads TP1 / TP2, no header |
 
 Out of scope for now, recorded so nobody has to re-derive it: second I²C bus
 P0.04/P0.06 (IMU, RX8130CE RTC at `0x32`, *and* the Qwiic/STEMMA QT connector,
-5.1 kΩ pull-ups on board), GPS UART P0.20/P0.19, and the BQ25185 charger's
-fault output on P0.27.
+5.1 kΩ pull-ups on board) and the BQ25185 charger's fault output on P0.27.
 
 Two of those pins are not what their Meshtastic names suggest:
 
@@ -308,8 +325,10 @@ Two of those pins are not what their Meshtastic names suggest:
   total on the 3.3 V rail.
 * **The GPS UART is named from opposite ends** in the two sources: the schematic
   labels P0.20 `UART_GPS_TX` and P0.19 `UART_GPS_RX`; the variant declares
-  `GPS_RX_PIN` P0.20 and `GPS_TX_PIN` P0.19. Neither name is safe to copy —
-  decide direction from the nRF52840's point of view and confirm on hardware.
+  `GPS_RX_PIN` P0.20 and `GPS_TX_PIN` P0.19. Read each from its own end they
+  agree, and phase 14 confirmed it on the board: the module's TX arrives on
+  P0.20, so that is the nRF52840's `RXD`. The firmware still probes both
+  orders rather than trusting either name.
 
 Everything above the Base Duo itself — navigation pad, buzzer, GPS, OLED, mode switch
 — lives on the Super IO board and reaches it through 25 castellations (`JC1`–

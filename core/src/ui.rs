@@ -90,9 +90,9 @@ const RADIO_MENU: [Item<Action>; 9] = [
 const BLUETOOTH_MENU: [Item<Action>; 2] =
     [Item::BACK, Item::new("Forget Phones", Action::ForgetBonds)];
 
-/// What [`Screen::Position`] offers. Nothing yet: the GPS is not driven, and a
-/// menu of things that do not work is worse than a menu with one way out.
-const POSITION_MENU: [Item<Action>; 1] = [Item::BACK];
+/// What [`Screen::Position`] offers: the receiver's power, which is the one
+/// thing about it a person would want to change from here.
+const POSITION_MENU: [Item<Action>; 2] = [Item::BACK, Item::new("GPS On/Off", Action::ToggleGps)];
 
 /// What [`Screen::System`] offers.
 const SYSTEM_MENU: [Item<Action>; 3] = [
@@ -234,6 +234,9 @@ pub enum Action {
     Set(Setting),
     /// Drop every stored pairing.
     ForgetBonds,
+    /// Power the GPS receiver up or down. Phase 14's rule: the switch
+    /// decides when it moves, and this decides in between.
+    ToggleGps,
     /// Restart into the application.
     Reboot,
     /// Restart into the UF2 bootloader.
@@ -252,6 +255,7 @@ impl Action {
             Action::Edit(field) => field.name(),
             Action::Set(setting) => setting.name(),
             Action::ForgetBonds => "forget phones",
+            Action::ToggleGps => "gps on/off",
             Action::Reboot => "reboot",
             Action::Bootloader => "bootloader",
         }
@@ -708,6 +712,10 @@ mod tests {
         );
         assert!(free.contains(&"Forget Phones"));
         assert!(free.contains(&"Reboot"));
+        assert!(
+            free.contains(&"GPS On/Off"),
+            "the receiver is not the radio, whoever has the line"
+        );
         assert!(Action::Set(Setting::TxPower(1)).changes_the_radio());
     }
 }

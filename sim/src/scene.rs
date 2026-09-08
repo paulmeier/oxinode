@@ -19,6 +19,7 @@
 use monopanel::Canvas;
 use oxinode_core::battery;
 use oxinode_core::edit::Editor;
+use oxinode_core::gps;
 use oxinode_core::lr1121::config::{ConfigError, RadioConfig, DEFAULT};
 use oxinode_core::screens::{
     self, Air, BluetoothScreen, Home, Host, Identity, Position, Radio, State, System,
@@ -102,7 +103,27 @@ pub fn populated() -> State {
             passkey: None,
             bonded: 2,
         },
-        position: Position,
+        position: Position {
+            status: gps::Status::Fix,
+            sats_used: Some(7),
+            sats_in_view: Some(11),
+            fix: Some(gps::Fix {
+                lat_udeg: 47_376_887,
+                lon_udeg: 8_541_694,
+                alt_dm: Some(4_080),
+            }),
+            fix_age_s: Some(3),
+            time: Some(gps::Time {
+                hour: 13,
+                minute: 47,
+                second: 9,
+            }),
+            date: Some(gps::Date {
+                year: 2026,
+                month: 9,
+                day: 8,
+            }),
+        },
         system: System {
             version: "0.0.0",
             serial: Some(*b"0123456789ABCDEF"),
@@ -110,6 +131,27 @@ pub fn populated() -> State {
             free_ram: Some(126_976),
         },
     }
+}
+
+/// The populated board with its receiver on and still looking: satellites
+/// in view, a time, and no fix yet -- the state the screen spends its first
+/// minute in after the switch is thrown.
+pub fn searching() -> State {
+    let mut state = populated();
+    state.position = Position {
+        status: gps::Status::Searching,
+        sats_used: Some(0),
+        sats_in_view: Some(5),
+        fix: None,
+        fix_age_s: None,
+        time: Some(gps::Time {
+            hour: 13,
+            minute: 46,
+            second: 2,
+        }),
+        date: state.position.date,
+    };
+    state
 }
 
 /// The populated board with nobody on the line: a TNC running on its own,

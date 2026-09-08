@@ -37,6 +37,7 @@ use monopanel::{font, page, Canvas, Layout};
 use crate::battery;
 use crate::ble::NAME_LEN;
 use crate::edit::{Editor, Field, Lock, FREQ_DIGITS};
+use crate::gps;
 use crate::lr1121::config::{ConfigError, RadioConfig};
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
 use crate::rnode::store::MAX_BONDS;
@@ -166,13 +167,11 @@ pub struct BluetoothScreen {
     pub bonded: u8,
 }
 
-/// What [`Screen::Position`] knows, which is that it knows nothing.
-///
-/// The GPS is not driven until phase 14. There is no field here on purpose:
-/// a `fix: Option<Fix>` that is always `None` is a promise the screen cannot
-/// keep yet, and the sentence it draws is the whole truth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Position;
+/// What [`Screen::Position`] knows: whether the receiver is on, what it can
+/// see, and where it last said it was. Assembled by [`crate::gps::Receiver`]
+/// from the sentences the module sends; every value is an `Option`, and the
+/// status says why when they are `None`.
+pub use crate::gps::Position;
 
 /// What the device's identity amounts to, as far as the device can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -388,6 +387,27 @@ pub fn uptime(out: &mut Text<LINE_CHARS>, secs: u32) {
     }
 }
 
+/// Micro-degrees to six places, signed: `47.376887`, `-6.505620`.
+fn degrees(out: &mut Text<LINE_CHARS>, udeg: i32) {
+    let sign = if udeg < 0 { "-" } else { "" };
+    let abs = udeg.unsigned_abs();
+    let _ = write!(out, "{sign}{}.{:06}", abs / 1_000_000, abs % 1_000_000);
+}
+
+/// Seconds since the fix as something readable: seconds under a minute,
+/// minutes under an hour, hours after that. Past a day the number is still
+/// hours, because a fix that old is a fix that is gone and the width of the
+/// row matters more than the unit.
+pub fn age(out: &mut Text<LINE_CHARS>, secs: u32) {
+    if secs < 60 {
+        let _ = write!(out, "{secs} s");
+    } else if secs < 3_600 {
+        let _ = write!(out, "{} min", secs / 60);
+    } else {
+        let _ = write!(out, "{} h", secs / 3_600);
+    }
+}
+
 /// Quarter-decibels to one decimal without floating point, keeping the sign
 /// on a value between zero and minus one -- see the status page's test for
 /// the case that loses it.
@@ -586,12 +606,91 @@ impl BluetoothScreen {
 }
 
 impl Position {
+    /// The receiver's state first, because whether it is on is the thing
+    /// the power question needs to be obvious; then what it can see; then
+    /// the fix, with its age, kept after it is lost.
     pub fn lines(&self, out: &mut Lines) {
-        out.line("GPS not driven yet.");
-        out.line("");
-        out.wrapped("No fix, no time, and no position to show.");
-        out.line("");
-        out.line("Phase 14.");
+        let mut v = Text::<LINE_CHARS>::new();
+        out.row("GPS", self.status.word());
+        match (self.sats_used, self.sats_in_view) {
+            (None, None) => {
+                let _ = v.write_str("-");
+            }
+            (Some(used), None) => {
+                let _ = write!(v, "{used}");
+            }
+            (None, Some(seen)) => {
+                let _ = write!(v, "-/{seen}");
+            }
+            (Some(used), Some(seen)) => {
+                let _ = write!(v, "{used}/{seen}");
+            }
+        }
+        out.row("Sats", v.as_str());
+        v.clear();
+        match self.fix_age_s {
+            Some(secs) => age(&mut v, secs),
+            None => {
+                let _ = v.write_str("-");
+            }
+        }
+        out.row("Fix age", v.as_str());
+        v.clear();
+        match self.time {
+            Some(t) => {
+                let _ = write!(v, "{:02}:{:02}:{:02}", t.hour, t.minute, t.second);
+            }
+            None => {
+                let _ = v.write_str("-");
+            }
+        }
+        out.row("UTC", v.as_str());
+        v.clear();
+        match self.date {
+            Some(d) => {
+                let _ = write!(v, "{:04}-{:02}-{:02}", d.year, d.month, d.day);
+            }
+            None => {
+                let _ = v.write_str("-");
+            }
+        }
+        out.row("Date", v.as_str());
+        v.clear();
+        match self.fix {
+            Some(fix) => degrees(&mut v, fix.lat_udeg),
+            None => {
+                let _ = v.write_str("-");
+            }
+        }
+        out.row("Lat", v.as_str());
+        v.clear();
+        match self.fix {
+            Some(fix) => degrees(&mut v, fix.lon_udeg),
+            None => {
+                let _ = v.write_str("-");
+            }
+        }
+        out.row("Lon", v.as_str());
+        v.clear();
+        match self.fix.and_then(|f| f.alt_dm) {
+            Some(dm) => {
+                let _ = write!(
+                    v,
+                    "{}{}.{} m",
+                    if dm < 0 { "-" } else { "" },
+                    dm.abs() / 10,
+                    dm.abs() % 10
+                );
+            }
+            None => {
+                let _ = v.write_str("-");
+            }
+        }
+        out.row("Alt", v.as_str());
+        if self.status == gps::Status::Off {
+            out.line("");
+            out.wrapped("The switch, or the menu, turns it on.");
+        }
     }
 }
 
@@ -833,13 +932,38 @@ mod tests {
                 passkey: None,
                 bonded: 2,
             },
-            position: Position,
+            position: fixed(),
             system: System {
                 version: "0.0.0",
                 serial: Some(*b"0123456789ABCDEF"),
                 identity: Identity::Signed,
                 free_ram: Some(123_456),
             },
+        }
+    }
+
+    /// A receiver with a fix, at a place nobody would mistake for a default.
+    fn fixed() -> Position {
+        Position {
+            status: gps::Status::Fix,
+            sats_used: Some(7),
+            sats_in_view: Some(11),
+            fix: Some(gps::Fix {
+                lat_udeg: 47_376_887,
+                lon_udeg: 8_541_694,
+                alt_dm: Some(4_080),
+            }),
+            fix_age_s: Some(3),
+            time: Some(gps::Time {
+                hour: 13,
+                minute: 47,
+                second: 9,
+            }),
+            date: Some(gps::Date {
+                year: 2026,
+                month: 9,
+                day: 8,
+            }),
         }
     }
 
@@ -944,16 +1068,131 @@ mod tests {
         assert!(bt.iter().any(|l| l.ends_with("absent")));
     }
 
-    /// The position screen says why it is empty, and shows no coordinate.
+    /// **The position screen with no fix says so, and shows no coordinate.**
+    /// Off, silent and searching each name themselves on the first row,
+    /// and no number stands where a coordinate would.
     #[test]
-    fn the_position_screen_says_it_has_nothing() {
-        for state in [State::default(), populated()] {
-            let lines = lines_of(&state, Screen::Position);
-            let text = lines.join(" ");
-            assert!(text.contains("not driven"), "{text}");
-            assert!(text.contains("Phase 14"), "{text}");
-            assert!(!text.contains('0'), "a coordinate crept in: {text}");
+    fn the_position_screen_without_a_fix_says_so() {
+        let lines = lines_of(&State::default(), Screen::Position);
+        let text = lines.join(" ");
+        assert!(
+            lines[0].starts_with("GPS") && lines[0].ends_with("off"),
+            "{text}"
+        );
+        assert!(text.contains("turns it on"), "{text}");
+        assert!(!text.contains('0'), "a coordinate crept in: {text}");
+        for row in ["Sats", "Fix age", "UTC", "Date", "Lat", "Lon", "Alt"] {
+            assert!(
+                lines.iter().any(|l| l.starts_with(row) && l.ends_with('-')),
+                "{row}: {text}"
+            );
         }
+
+        let mut state = State::default();
+        state.position.status = gps::Status::Silent;
+        let lines = lines_of(&state, Screen::Position);
+        assert!(lines[0].ends_with("no data"), "{lines:?}");
+        assert!(
+            !lines.join(" ").contains("turns it on"),
+            "the hint is for off"
+        );
+
+        // Searching: satellites in view but none used, a time, no fix.
+        state.position.status = gps::Status::Searching;
+        state.position.sats_used = Some(0);
+        state.position.sats_in_view = Some(5);
+        state.position.time = Some(gps::Time {
+            hour: 1,
+            minute: 33,
+            second: 0,
+        });
+        let lines = lines_of(&state, Screen::Position);
+        assert!(lines[0].ends_with("searching"), "{lines:?}");
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("Sats") && l.ends_with("0/5")));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("UTC") && l.ends_with("01:33:00")));
+        for row in ["Fix age", "Lat", "Lon", "Alt"] {
+            assert!(
+                lines.iter().any(|l| l.starts_with(row) && l.ends_with('-')),
+                "{row}: {lines:?}"
+            );
+        }
+    }
+
+    /// A fix is drawn to six places with its sign, the altitude to a tenth,
+    /// and the age in the unit that fits.
+    #[test]
+    fn the_position_screen_with_a_fix_shows_it() {
+        let lines = lines_of(&populated(), Screen::Position);
+        let text = lines.join(" ");
+        assert!(lines[0].ends_with("fix"), "{text}");
+        let ends = |label: &str, value: &str| {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with(label) && l.ends_with(value)),
+                "{label} {value}: {text}"
+            );
+        };
+        ends("Sats", "7/11");
+        ends("Fix age", "3 s");
+        ends("UTC", "13:47:09");
+        ends("Date", "2026-09-08");
+        ends("Lat", "47.376887");
+        ends("Lon", "8.541694");
+        ends("Alt", "408.0 m");
+        assert!(!text.contains("turns it on"));
+
+        // The other hemispheres, below sea level, a lost fix an hour old,
+        // and a count in view with nothing used yet.
+        let mut state = populated();
+        state.position.fix = Some(gps::Fix {
+            lat_udeg: -33_867_972,
+            lon_udeg: -151_210_062,
+            alt_dm: Some(-24),
+        });
+        state.position.fix_age_s = Some(3_600 * 26);
+        state.position.sats_used = None;
+        let lines = lines_of(&state, Screen::Position);
+        let text = lines.join(" ");
+        let ends = |label: &str, value: &str| {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with(label) && l.ends_with(value)),
+                "{label} {value}: {text}"
+            );
+        };
+        ends("Lat", "-33.867972");
+        ends("Lon", "-151.210062");
+        ends("Alt", "-2.4 m");
+        ends("Fix age", "26 h");
+        ends("Sats", "-/11");
+        state.position.fix_age_s = Some(59);
+        assert!(lines_of(&state, Screen::Position)
+            .iter()
+            .any(|l| l.ends_with("59 s")));
+        state.position.fix_age_s = Some(60);
+        assert!(lines_of(&state, Screen::Position)
+            .iter()
+            .any(|l| l.ends_with("1 min")));
+        state.position.fix_age_s = Some(3_599);
+        assert!(lines_of(&state, Screen::Position)
+            .iter()
+            .any(|l| l.ends_with("59 min")));
+        // The widest a coordinate gets fits its row.
+        state.position.fix = Some(gps::Fix {
+            lat_udeg: -90_000_000,
+            lon_udeg: -180_000_000,
+            alt_dm: Some(-99_999),
+        });
+        state.position.fix_age_s = Some(u32::MAX);
+        let mut out = Lines::new();
+        state.position.lines(&mut out);
+        assert!(!out.overflowed(), "a coordinate at its widest was cut");
     }
 
     /// The whole populated state reaches the screen: every field, changed on
@@ -961,7 +1200,7 @@ mod tests {
     #[test]
     fn changing_any_field_changes_a_line() {
         type Mutation = (&'static str, fn(&mut State));
-        let mutations: [Mutation; 25] = [
+        let mutations: [Mutation; 33] = [
             ("host", |s| s.home.host = Host::Bluetooth),
             ("talking", |s| s.home.talking = false),
             ("home air", |s| s.home.air = Air::Off),
@@ -989,6 +1228,18 @@ mod tests {
             ("tnc", |s| s.radio.tnc = false),
             ("link", |s| s.bluetooth.link = Link::Connected),
             ("bonded", |s| s.bluetooth.bonded = 3),
+            ("gps status", |s| s.position.status = gps::Status::Searching),
+            ("sats used", |s| s.position.sats_used = Some(8)),
+            ("sats in view", |s| s.position.sats_in_view = None),
+            ("fix", |s| s.position.fix = None),
+            ("latitude", |s| {
+                s.position.fix.as_mut().unwrap().lat_udeg += 1;
+            }),
+            ("altitude", |s| {
+                s.position.fix.as_mut().unwrap().alt_dm = None;
+            }),
+            ("fix age", |s| s.position.fix_age_s = Some(4)),
+            ("time", |s| s.position.time = None),
         ];
         let base = populated();
         let all = |s: &State| -> Vec<Vec<String>> {

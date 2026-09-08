@@ -122,6 +122,15 @@ pub fn cases() -> Vec<Case> {
         state: scene::refused(),
         size: square,
     });
+    // Phase 14: the receiver on and looking, which is neither of the two
+    // states every screen is drawn in and the one the power question is
+    // about.
+    cases.push(Case {
+        name: "position-searching".to_string(),
+        script: format!("right*{}", Screen::Position.index()),
+        state: scene::searching(),
+        size: square,
+    });
 
     // Phase 12: the editors. Each one open on a standalone board; the ones
     // that can be driven to a refusal, refused; one after a confirmed change,
@@ -371,8 +380,9 @@ mod tests {
         // and refused, then phase 12: five editors, three refusals, the
         // cursor, the screen after an edit, and two notices. Then phase 13:
         // every screen, three menu windows, a scroll, an editor, a notice
-        // and a pairing on the second panel.
-        let square = 2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2;
+        // and a pairing on the second panel. Then phase 14: the receiver
+        // searching.
+        let square = 2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1;
         let wide = Screen::COUNT + 3 + 1 + 1 + 1 + 1;
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
