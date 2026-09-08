@@ -56,10 +56,11 @@ use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use embedded_alloc::LlffHeap as Heap;
 use oxinode::board::{self, Led};
-use oxinode::modem::Modem;
+use oxinode::modem::{Modem, TxOutcome};
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::lr1121::config::{self as radio_config, RadioConfig, ValidConfig, MAX_PAYLOAD};
+use oxinode_core::lr1121::csma::Backoff;
 use rns_core::announce::AnnounceData;
 use rns_core::constants;
 use rns_core::destination;
@@ -891,9 +892,11 @@ async fn write_host<'d, D: UsbDriverTrait<'d>>(tx: &mut Sender<'d, D>, data: &[u
 
 // ---------------------------------------------------------------- the loop
 
-/// Between announces; the two destinations alternate, so each is announced
-/// every twenty seconds and they are never on the air together.
-const ANNOUNCE_EVERY: Duration = Duration::from_secs(10);
+/// Between announces. Both destinations go out together, back to back, as
+/// the first phase 15 run sent them -- which is exactly what collided with
+/// the host's reply before the modem listened first. Phase 16 put them back
+/// together on purpose, to reproduce that.
+const ANNOUNCE_EVERY: Duration = Duration::from_secs(20);
 const TICK: Duration = Duration::from_secs(1);
 
 #[allow(clippy::too_many_arguments)]
@@ -957,7 +960,8 @@ where
                 let due = last_announce.is_none_or(|t| t.elapsed() >= ANNOUNCE_EVERY);
                 if due {
                     node.announce(announced);
-                    announced += 1;
+                    node.announce(announced + 1);
+                    announced += 2;
                     last_announce = Some(Instant::now());
                 }
                 peak_heap = peak_heap.max(HEAP.used());
@@ -1014,16 +1018,51 @@ where
         }
         while let Some(frame) = node.air_out.first().cloned() {
             node.air_out.remove(0);
-            let mut modem = Modem::new(dev, irq);
-            match modem.transmit(&config, &frame).await {
+            let mut backoff = Backoff::new(
+                &config,
+                frame.len().min(MAX_PAYLOAD as usize) as u8,
+                Instant::now().as_ticks(),
+            );
+            let sent = loop {
+                let mut modem = Modem::new(dev, irq);
+                match modem
+                    .transmit(&config, &frame, &mut backoff, &mut rx_buf)
+                    .await
+                {
+                    Ok(TxOutcome::Sent(report)) => break Ok(report),
+                    // Heard while waiting: the node gets it now, and what it
+                    // queues in answer goes out after this frame.
+                    Ok(TxOutcome::Heard(report)) => {
+                        led.toggle();
+                        defmt::debug!(
+                            "air: {=usize} bytes while waiting to send, rssi {=i16} dBm, snr {=i16} dB",
+                            report.len,
+                            report.rssi_dbm,
+                            report.snr_db
+                        );
+                        let rx = RxMetadata {
+                            rssi: Some(report.rssi_dbm),
+                            snr: Some(report.snr_quarter_db as f32 / 4.0),
+                        };
+                        node.inbound(LORA, &rx_buf[..report.len], rx);
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match sent {
                 Ok(report) => defmt::info!(
-                    "air: sent {=usize} bytes in {=u32} us (airtime {=u32} us)",
+                    "air: sent {=usize} bytes in {=u32} us (airtime {=u32} us) after {=u32} senses ({=u32} busy, {=u32} us waiting{=str})",
                     frame.len(),
                     report.elapsed_us,
-                    report.airtime_us
+                    report.airtime_us,
+                    report.csma.senses,
+                    report.csma.busy,
+                    report.csma.waited_us,
+                    if report.csma.forced { ", forced" } else { "" }
                 ),
                 Err(e) => defmt::error!("air: transmit failed: {}", e),
             }
+            let mut modem = Modem::new(dev, irq);
             receiving = match modem.start_rx(&config).await {
                 Ok(()) => true,
                 Err(e) => {

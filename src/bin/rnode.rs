@@ -97,14 +97,15 @@ use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
 use oxinode::gps;
-use oxinode::modem::Modem;
+use oxinode::modem::{Modem, TxOutcome};
 use oxinode::nus;
 use oxinode::pad;
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::ble as interop;
 use oxinode_core::edit::Editor;
-use oxinode_core::lr1121::config::ValidConfig;
+use oxinode_core::lr1121::config::{ValidConfig, MAX_PAYLOAD};
+use oxinode_core::lr1121::csma::Backoff;
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::eeprom;
@@ -851,6 +852,8 @@ where
             &mut applied,
             &mut receiving,
             &mut outbox,
+            &mut rx_buf,
+            &mut last_signal,
         )
         .await;
     } else if let Some(reason) = protocol.last_error() {
@@ -942,6 +945,8 @@ where
                                 &mut applied,
                                 &mut receiving,
                                 out,
+                                &mut rx_buf,
+                                &mut last_signal,
                             )
                             .await;
                         }
@@ -1050,6 +1055,8 @@ where
                     &mut applied,
                     &mut receiving,
                     &mut outbox,
+                    &mut rx_buf,
+                    &mut last_signal,
                 )
                 .await;
             }
@@ -1117,6 +1124,10 @@ where
 }
 
 /// Carry out whatever the protocol decided.
+///
+/// The last two arguments are for a transmission: the wait for a clear
+/// channel is spent listening, and what it hears has to go somewhere.
+#[allow(clippy::too_many_arguments)]
 async fn act<S, B>(
     dev: &mut lr11xx::Lr11xx<S, B>,
     irq: &mut radio::RadioIrq<'_>,
@@ -1125,6 +1136,8 @@ async fn act<S, B>(
     applied: &mut Option<ValidConfig>,
     receiving: &mut bool,
     outbox: &mut Outbox<OUTBOX>,
+    rx_buf: &mut [u8],
+    last_signal: &mut Option<(i16, i8)>,
 ) where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
@@ -1202,14 +1215,52 @@ async fn act<S, B>(
                 defmt::error!("asked to transmit before the radio was configured");
                 return;
             };
-            let mut modem = Modem::new(dev, irq);
-            match modem.transmit(&valid, payload).await {
+            // The wait for a clear channel is spent listening, and a packet
+            // heard during it goes to the host that asked for this
+            // transmission -- the same way its answers do. Then the
+            // transmission is tried again, with the wait so far remembered.
+            let mut backoff = Backoff::new(
+                &valid,
+                payload.len().min(MAX_PAYLOAD as usize) as u8,
+                Instant::now().as_ticks(),
+            );
+            let sent = loop {
+                let mut modem = Modem::new(dev, irq);
+                match modem.transmit(&valid, payload, &mut backoff, rx_buf).await {
+                    Ok(TxOutcome::Sent(report)) => break Ok(report),
+                    Ok(TxOutcome::Heard(report)) => {
+                        defmt::debug!(
+                            "rx while waiting to transmit: {=usize} bytes, rssi {=i16} dBm",
+                            report.len,
+                            report.rssi_dbm
+                        );
+                        *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
+                        protocol.received(
+                            report.rssi_dbm,
+                            report.snr_quarter_db,
+                            &rx_buf[..report.len],
+                            outbox,
+                        );
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match sent {
                 Ok(report) => {
                     defmt::debug!(
-                        "tx: {=usize} bytes in {=u32} us",
+                        "tx: {=usize} bytes in {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
                         payload.len(),
-                        report.elapsed_us
+                        report.elapsed_us,
+                        report.csma.senses,
+                        report.csma.busy,
+                        report.csma.waited_us
                     );
+                    if report.csma.forced {
+                        defmt::warn!(
+                            "tx: the channel never read clear; sent after {=u32} us regardless",
+                            report.csma.waited_us
+                        );
+                    }
                     // Counted and acknowledged before going back to receive, so
                     // a host using flow control is released as early as it can
                     // be rather than after the restart. A modem that never

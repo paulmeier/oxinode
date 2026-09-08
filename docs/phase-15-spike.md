@@ -395,7 +395,8 @@ Two things that are not about phase 15 and should not be lost in it:
 * **No carrier sense.** `rnode` transmits the moment a host hands it a
   packet. The stock RNode firmware checks the channel first. Two oxinodes
   that both have traffic will collide, and the host will see packets go
-  missing with no error.
+  missing with no error. *Done as phase 16; see
+  [phase-16-csma.md](phase-16-csma.md).*
 * **No air header, no split.** oxinode puts raw Reticulum packets on the
   air; a stock RNode puts one header byte in front and splits at 255. The
   two do not interoperate over the air today, and oxinode cannot carry a
