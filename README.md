@@ -29,7 +29,7 @@ Being precise about that:
 | 11 | The screens, drawn from real modem state | **done** — every screen renders from what the modem knows and says so where it knows nothing; read back from the board, [notes](docs/phase-11-screens.md) |
 | 12 | Changing settings from the panel | **done** — every radio parameter editable with no host attached, validated as the host's are, refused not clamped, and stored in TNC mode; the two-controller question decided and written down, [notes](docs/phase-12-settings.md) |
 | 13 | The interface as a device-agnostic crate | **done** — `monopanel`, a workspace crate with nothing of oxinode in it: a `Canvas` trait, a layout derived from the canvas, screens supplied by the application, an optional `embedded-graphics` adapter, and golden images at 128 × 64 as well as 128 × 128, [notes](docs/phase-13-interface-crate.md) |
-| 14 | The GPS, and the Position screen | **heard on hardware** — the module powered through its load switch, NMEA at 9600 baud with the module's TX on P0.20, parsed in the core against captured sentences, and switchable from the mode switch and the menu; no fix yet, the board having sat indoors, and the current draw unmeasured, [notes](docs/phase-14-gps.md) |
+| 14 | The GPS, and the Position screen | **done** — verified on hardware: the module powered through its load switch, NMEA at 9600 baud with the module's TX on P0.20, parsed in the core against captured sentences, a fix acquired and shown on the Position screen, and the receiver switchable from the mode switch and the menu; the current draw is still unmeasured, [notes](docs/phase-14-gps.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -130,8 +130,8 @@ power. Framing, checksums, `GGA`, `RMC` and `GSV` are parsed in
 last fix with its age — dashes where it knows nothing, and `off`, `no data`,
 `searching` or `fix` on its first row. The receiver follows the mode
 switch's GPS ON position and the Position menu's `GPS On/Off`, and the UART
-is released when it is off. A fix has not yet been seen from this desk, and
-the current draw is not yet measured. See
+is released when it is off. Taken outside, the board got a fix and the
+screen reported it; the current draw is not yet measured. See
 [docs/phase-14-gps.md](docs/phase-14-gps.md).
 
 Phases 1 to 8, 10, 11 and 14 are confirmed on hardware; phase 12's image boots

@@ -1,11 +1,12 @@
 # Phase 14 — the GPS, and the Position screen
 
 Where phase 14 stands: **the module powered, heard, and parsed; the pin
-direction settled on the board; the screen drawn from what the receiver
-knows; and the receiver switchable from the mode switch and the menu.** Not
-yet had: a fix, because the board sat indoors for every run, and the current
-measurement, because there was no meter in the loop. Both are open at the
-bottom.
+direction settled on the board; a fix acquired and shown on the screen; and
+the receiver switchable from the mode switch and the menu.** The first runs
+were indoors and saw no satellites; taken outside on 2026-09-08 the board
+got a fix and the Position screen reported it correctly. Not yet done: the
+current measurement, because there was no meter in the loop. It is open at
+the bottom.
 
 The Super IO carries a GNSS module with a ceramic antenna on a UART behind a
 load switch, and until now oxinode had never driven it. The `Position` screen
@@ -170,11 +171,6 @@ version of the fix.
 
 ## What it does not do
 
-* **No fix has been acquired yet.** Every run was on a desk indoors, and the
-  receiver reported zero satellites in view throughout: two sentences a
-  second, zero bad lines, 248 sentences in two minutes, nothing to fix on.
-  The parsing of a fix is tested against captured sentences; seeing one on
-  the board's own screen needs the board under sky.
 * **The current draw is not measured.** Nothing in the loop could measure
   it. The receiver can be turned off from the menu and the switch, and the
   UART is released when it is, so both halves of the measurement are one
@@ -195,9 +191,9 @@ version of the fix.
       question settled and documented.** P1.01 high, then 9600 baud with
       the module's TX on P0.20 -- the first probe attempt, on the board, on
       2026-09-08. `src/gps.rs` and the log above.
-- [ ] **A fix is acquired and the `Position` screen shows it.** The screen
-      is drawn from a fix in `position-populated.png` and tested to the
-      digit; the board has not yet been where a fix can be had.
+- [x] **A fix is acquired and the `Position` screen shows it.** Indoors the
+      receiver saw nothing for two minutes of clean sentences; under sky on
+      2026-09-08 it fixed, and the screen reported it correctly.
 - [x] **With no fix, the screen says so rather than showing zeroes.**
       `the_position_screen_without_a_fix_says_so`: off, silent and searching
       each name themselves, and no number stands where a coordinate would.
