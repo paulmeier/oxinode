@@ -2,6 +2,7 @@
 //! what it expects back.
 //!
 //! * [`kiss`] — the framing.
+//! * [`air`] — what goes on the air: the header byte, and the split at 255.
 //! * [`command`] — the command set, and which frames the host un-escapes.
 //! * [`protocol`] — the conversation: commands in, responses and actions out.
 //! * [`outbox`] — responses waiting for a transport, whole frames or nothing.
@@ -21,6 +22,7 @@
 //! disagreement later can be checked against the thing that decided it rather
 //! than re-derived.
 
+pub mod air;
 pub mod command;
 pub mod display;
 pub mod eeprom;

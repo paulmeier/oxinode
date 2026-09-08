@@ -254,8 +254,9 @@ Two ways to close it, either of which is its own small phase:
   measured channel utilisation rises. One band here.
 * **The noise floor and interference threshold.** See above.
 * **The stock RNode's air header and the 255-byte split**, which phase 15
-  put in the same phase as this. Not touched: the boards still send raw
-  Reticulum packets and refuse anything over 255 bytes.
+  put in the same phase as this. Not touched here: the boards still send
+  raw Reticulum packets and refuse anything over 255 bytes. *Done as
+  phase 17; see [phase-17-air-header.md](phase-17-air-header.md).*
 * **CAD thresholds tuned on this board.** Semtech's reference values,
   which hear a −46 dBm neighbour without a miss; at range they are untested.
 * **A heard packet's routing in `rnode`.** It goes to the host that asked

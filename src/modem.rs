@@ -88,8 +88,9 @@ pub struct TxReport {
     pub csma: CsmaReport,
 }
 
-/// [`csma::Report`], in a form defmt can print.
-#[derive(Debug, Clone, Copy, defmt::Format)]
+/// [`csma::Report`], in a form defmt can print. The default is no wait at
+/// all, which is what [`Modem::send`] reports.
+#[derive(Debug, Clone, Copy, Default, defmt::Format)]
 pub struct CsmaReport {
     /// Senses taken, including the one that cleared the way.
     pub senses: u32,
@@ -394,8 +395,6 @@ where
         if payload.len() > MAX_PAYLOAD as usize {
             return Err(ModemError::PayloadTooLong(payload.len()));
         }
-        let len = payload.len() as u8;
-        let airtime_us = config.airtime_us(len);
 
         // Receiving during the wait needs the receive ceiling on the packet
         // length, which the last transmission may have narrowed.
@@ -433,6 +432,32 @@ where
             }
         }
         let csma = CsmaReport::from(backoff.report());
+        self.send(config, payload, csma).await.map(TxOutcome::Sent)
+    }
+
+    /// Send a frame now, with no wait for a clear channel, and wait for the
+    /// chip to say it went.
+    ///
+    /// For the second frame of a split packet, which follows the first with
+    /// nothing between them: the receiver holds the first half until the
+    /// second arrives, and a stock RNode holds it until something else
+    /// does, so a carrier-sense wait here would be a window for another
+    /// packet to throw the first half away. The channel was clear a moment
+    /// ago and a neighbour that sensed it saw this board's first frame.
+    ///
+    /// [`Modem::transmit`] ends here too; `csma` is its report of the wait,
+    /// and empty for a bare send.
+    pub async fn send(
+        &mut self,
+        config: &ValidConfig,
+        payload: &[u8],
+        csma: CsmaReport,
+    ) -> Result<TxReport, ModemError> {
+        if payload.len() > MAX_PAYLOAD as usize {
+            return Err(ModemError::PayloadTooLong(payload.len()));
+        }
+        let len = payload.len() as u8;
+        let airtime_us = config.airtime_us(len);
 
         // The chip's own timeout, in 32.768 kHz ticks, at three times the
         // airtime: long enough that a healthy packet never trips it, short
@@ -495,12 +520,12 @@ where
         if pending & irq_bits::bit::TX_DONE == 0 {
             return Err(ModemError::WrongInterrupt(pending));
         }
-        Ok(TxOutcome::Sent(TxReport {
+        Ok(TxReport {
             elapsed_us,
             airtime_us,
             pending,
             csma,
-        }))
+        })
     }
 
     /// Receive for one slot of the wait before a transmission.

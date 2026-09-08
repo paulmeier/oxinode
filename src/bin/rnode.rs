@@ -97,15 +97,16 @@ use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
 use oxinode::gps;
-use oxinode::modem::{Modem, TxOutcome};
+use oxinode::modem::{CsmaReport, Modem, RxReport, TxOutcome, TxReport};
 use oxinode::nus;
 use oxinode::pad;
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::ble as interop;
 use oxinode_core::edit::Editor;
-use oxinode_core::lr1121::config::{ValidConfig, MAX_PAYLOAD};
+use oxinode_core::lr1121::config::{ValidConfig, DEFAULT};
 use oxinode_core::lr1121::csma::Backoff;
+use oxinode_core::rnode::air::{self, Reassembler, Sequence, Split};
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::eeprom;
@@ -209,6 +210,13 @@ const USB_PID: u16 = 0x0003;
 /// truncating them, and a display read that could never fit would never be
 /// answered at all.
 const OUTBOX: usize = 4096;
+
+/// The boot configuration, validated: what the reassembler's age is set from
+/// until a host or the stored record applies one.
+const DEFAULT_VALID: ValidConfig = match ValidConfig::new(DEFAULT) {
+    Ok(v) => v,
+    Err(_) => panic!("the default configuration is valid"),
+};
 
 /// How long the EEPROM has to stay still before it is written to flash.
 ///
@@ -818,6 +826,14 @@ where
     let mut ble_buf = [0u8; 256];
     let mut usb_buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut rx_buf = [0u8; kiss::HW_MTU];
+    // What comes off the air is frames, and what the host gets is packets:
+    // the header byte stripped, and a packet that came as two frames joined.
+    // The age it holds a first half for is set from the configuration when
+    // one is applied.
+    let mut air_in = Reassembler::new(air::max_age_us(&DEFAULT_VALID));
+    // The sequence nibble the next packet goes out under. Seeded from the
+    // chip's ID rather than the clock, which reads the same at every boot.
+    let mut sequence = Sequence::new(mcu_id as u8 ^ (mcu_id >> 8) as u8);
     // When the EEPROM was last changed, and therefore when it should be
     // written out. See `PERSIST_IDLE`.
     let mut dirty_since: Option<Instant> = None;
@@ -854,6 +870,8 @@ where
             &mut outbox,
             &mut rx_buf,
             &mut last_signal,
+            &mut air_in,
+            &mut sequence,
         )
         .await;
     } else if let Some(reason) = protocol.last_error() {
@@ -947,6 +965,8 @@ where
                                 out,
                                 &mut rx_buf,
                                 &mut last_signal,
+                                &mut air_in,
+                                &mut sequence,
                             )
                             .await;
                         }
@@ -990,16 +1010,9 @@ where
                         Ok(Some(report)) => {
                             led.off();
                             last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                            last_host_frame = Some(Instant::now());
-                            protocol.received(
-                                report.rssi_dbm,
-                                // Quarter-dB throughout: the chip reports it
-                                // that way and the protocol carries it that
-                                // way, so nothing is rounded in between.
-                                report.snr_quarter_db,
-                                &rx_buf[..report.len],
-                                listener,
-                            );
+                            if heard(&mut air_in, &mut protocol, &report, &rx_buf, listener) {
+                                last_host_frame = Some(Instant::now());
+                            }
                             led.on();
                         }
                         Ok(None) => {}
@@ -1057,6 +1070,8 @@ where
                     &mut outbox,
                     &mut rx_buf,
                     &mut last_signal,
+                    &mut air_in,
+                    &mut sequence,
                 )
                 .await;
             }
@@ -1127,6 +1142,44 @@ where
 ///
 /// The last two arguments are for a transmission: the wait for a clear
 /// channel is spent listening, and what it hears has to go somewhere.
+/// A frame off the air: through the reassembler, and if it completes a
+/// packet, to the host with its signal. Says whether it did.
+///
+/// The signal is per packet rather than per frame -- the mean of two for a
+/// packet that came as two -- and quarter-dB throughout: the chip reports
+/// it that way and the protocol carries it that way, so nothing is rounded
+/// in between.
+fn heard<S: Sink>(
+    air_in: &mut Reassembler,
+    protocol: &mut Protocol,
+    report: &RxReport,
+    rx_buf: &[u8],
+    out: &mut S,
+) -> bool {
+    let signal = air::Signal {
+        rssi_dbm: report.rssi_dbm,
+        snr_quarter_db: report.snr_quarter_db,
+    };
+    match air_in.feed(&rx_buf[..report.len], signal, Instant::now().as_micros()) {
+        Some(packet) => {
+            protocol.received(
+                packet.signal.rssi_dbm,
+                packet.signal.snr_quarter_db,
+                packet.payload,
+                out,
+            );
+            true
+        }
+        None => {
+            defmt::debug!(
+                "rx: {=usize} bytes, half of a split packet; holding it",
+                report.len
+            );
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn act<S, B>(
     dev: &mut lr11xx::Lr11xx<S, B>,
@@ -1138,6 +1191,8 @@ async fn act<S, B>(
     outbox: &mut Outbox<OUTBOX>,
     rx_buf: &mut [u8],
     last_signal: &mut Option<(i16, i8)>,
+    air_in: &mut Reassembler,
+    sequence: &mut Sequence,
 ) where
     S: embedded_hal_async::spi::SpiDevice<u8>,
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
@@ -1185,6 +1240,10 @@ async fn act<S, B>(
             }
             *applied = Some(valid);
             *receiving = true;
+            // The other half of a packet from the old channel is not coming
+            // on the new one.
+            air_in.set_max_age_us(air::max_age_us(&valid));
+            air_in.clear();
         }
 
         Action::Standby => {
@@ -1215,18 +1274,32 @@ async fn act<S, B>(
                 defmt::error!("asked to transmit before the radio was configured");
                 return;
             };
+            // One header byte in front, and two frames if it does not fit
+            // in one; see `oxinode_core::rnode::air`. The decoder's capacity
+            // is the longest packet a frame pair carries, so a packet that
+            // does not split cannot reach here.
+            let Some(split) = Split::new(payload, sequence.take()) else {
+                defmt::error!(
+                    "tx: {=usize} bytes is more than two frames; dropped",
+                    payload.len()
+                );
+                return;
+            };
+            let mut frame = [0u8; air::FRAME_MAX];
+            let Some(n) = split.frame(0, &mut frame) else {
+                return;
+            };
             // The wait for a clear channel is spent listening, and a packet
             // heard during it goes to the host that asked for this
             // transmission -- the same way its answers do. Then the
             // transmission is tried again, with the wait so far remembered.
-            let mut backoff = Backoff::new(
-                &valid,
-                payload.len().min(MAX_PAYLOAD as usize) as u8,
-                Instant::now().as_ticks(),
-            );
+            let mut backoff = Backoff::new(&valid, n as u8, Instant::now().as_ticks());
             let sent = loop {
                 let mut modem = Modem::new(dev, irq);
-                match modem.transmit(&valid, payload, &mut backoff, rx_buf).await {
+                match modem
+                    .transmit(&valid, &frame[..n], &mut backoff, rx_buf)
+                    .await
+                {
                     Ok(TxOutcome::Sent(report)) => break Ok(report),
                     Ok(TxOutcome::Heard(report)) => {
                         defmt::debug!(
@@ -1235,21 +1308,37 @@ async fn act<S, B>(
                             report.rssi_dbm
                         );
                         *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                        protocol.received(
-                            report.rssi_dbm,
-                            report.snr_quarter_db,
-                            &rx_buf[..report.len],
-                            outbox,
-                        );
+                        heard(air_in, protocol, &report, rx_buf, outbox);
                     }
                     Err(e) => break Err(e),
                 }
             };
+            // The second frame follows the first with no wait: the receiver
+            // is holding the first half, and a stock RNode holds it until
+            // any other packet arrives and throws it away.
+            let sent = match sent {
+                Ok(report) if split.frames() == 2 => {
+                    let Some(n) = split.frame(1, &mut frame) else {
+                        return;
+                    };
+                    let mut modem = Modem::new(dev, irq);
+                    match modem.send(&valid, &frame[..n], CsmaReport::default()).await {
+                        Ok(second) => Ok(TxReport {
+                            elapsed_us: report.elapsed_us + second.elapsed_us,
+                            airtime_us: report.airtime_us + second.airtime_us,
+                            ..report
+                        }),
+                        Err(e) => Err(e),
+                    }
+                }
+                other => other,
+            };
             match sent {
                 Ok(report) => {
                     defmt::debug!(
-                        "tx: {=usize} bytes in {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
+                        "tx: {=usize} bytes in {=usize} frames, {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
                         payload.len(),
+                        split.frames(),
                         report.elapsed_us,
                         report.csma.senses,
                         report.csma.busy,

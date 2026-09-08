@@ -261,7 +261,7 @@ itself and with any peer that keeps packets short. That header byte -- one
 byte with a sequence nibble and a split flag, `HEADER_L 1` in the RNode
 firmware's `Config.h` -- is also something oxinode does not send or strip,
 which means an oxinode and a stock RNode do not talk on the air at all today.
-Out of scope for this spike, and it should not stay out of scope for long.
+Out of scope for this spike, and it should not stay out of scope for long. *It did not: phase 17.*
 
 ## Question 3: how slow is the crypto?
 
@@ -400,7 +400,8 @@ Two things that are not about phase 15 and should not be lost in it:
 * **No air header, no split.** oxinode puts raw Reticulum packets on the
   air; a stock RNode puts one header byte in front and splits at 255. The
   two do not interoperate over the air today, and oxinode cannot carry a
-  full-MTU Reticulum packet.
+  full-MTU Reticulum packet. *Done as phase 17; see
+  [phase-17-air-header.md](phase-17-air-header.md).*
 
 ## Reproducing
 

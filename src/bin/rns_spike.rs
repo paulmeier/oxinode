@@ -56,11 +56,12 @@ use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use embedded_alloc::LlffHeap as Heap;
 use oxinode::board::{self, Led};
-use oxinode::modem::{Modem, TxOutcome};
+use oxinode::modem::{CsmaReport, Modem, RxReport, TxOutcome, TxReport};
 use oxinode::store::Storage;
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::lr1121::config::{self as radio_config, RadioConfig, ValidConfig, MAX_PAYLOAD};
 use oxinode_core::lr1121::csma::Backoff;
+use oxinode_core::rnode::air::{self, Reassembler, Sequence, Split};
 use rns_core::announce::AnnounceData;
 use rns_core::constants;
 use rns_core::destination;
@@ -757,11 +758,11 @@ impl<'d> Node<'d> {
         match iface {
             SERIAL => self.serial_out.extend_from_slice(&Hdlc::frame(raw)),
             LORA => {
-                if raw.len() > MAX_PAYLOAD as usize {
-                    // `rnode` does not split either: the air carries one LoRa
-                    // frame per packet. Worth knowing, and worth counting.
+                if raw.len() > air::PACKET_MAX {
+                    // The air carries a packet as one LoRa frame or two, the
+                    // way `rnode` and a stock RNode do; more does not go.
                     defmt::warn!(
-                        "air: {=usize} bytes is more than one LoRa frame; dropped",
+                        "air: {=usize} bytes is more than two LoRa frames; dropped",
                         raw.len()
                     );
                 } else {
@@ -899,6 +900,29 @@ async fn write_host<'d, D: UsbDriverTrait<'d>>(tx: &mut Sender<'d, D>, data: &[u
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(20);
 const TICK: Duration = Duration::from_secs(1);
 
+/// A frame off the air: through the reassembler, and if it completes a
+/// packet, to the node with its signal -- the mean of two frames' for a
+/// packet that came as two.
+fn heard(node: &mut Node<'_>, air_in: &mut Reassembler, report: &RxReport, rx_buf: &[u8]) {
+    let signal = air::Signal {
+        rssi_dbm: report.rssi_dbm,
+        snr_quarter_db: report.snr_quarter_db,
+    };
+    match air_in.feed(&rx_buf[..report.len], signal, Instant::now().as_micros()) {
+        Some(packet) => {
+            let rx = RxMetadata {
+                rssi: Some(packet.signal.rssi_dbm),
+                snr: Some(packet.signal.snr_quarter_db as f32 / 4.0),
+            };
+            node.inbound(LORA, packet.payload, rx);
+        }
+        None => defmt::debug!(
+            "air: {=usize} bytes, half of a split packet; holding it",
+            report.len
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run<'d, D, S, B>(
     mut node: Node<'_>,
@@ -918,6 +942,11 @@ where
     let mut hdlc = Hdlc::new();
     let mut usb_buf = [0u8; 64];
     let mut rx_buf = [0u8; MAX_PAYLOAD as usize];
+    // Frames off the air become packets here, and packets become frames on
+    // the way out, the same as in `rnode`: one header byte, and a split at
+    // 255. See `oxinode_core::rnode::air`.
+    let mut air_in = Reassembler::new(air::max_age_us(&config));
+    let mut sequence = Sequence::new(Instant::now().as_ticks() as u8);
     let mut last_announce: Option<Instant> = None;
     let mut announced = 0usize;
     let mut ticks = 0u32;
@@ -995,11 +1024,7 @@ where
                                 report.rssi_dbm,
                                 report.snr_db
                             );
-                            let rx = RxMetadata {
-                                rssi: Some(report.rssi_dbm),
-                                snr: Some(report.snr_quarter_db as f32 / 4.0),
-                            };
-                            node.inbound(LORA, &rx_buf[..report.len], rx);
+                            heard(&mut node, &mut air_in, &report, &rx_buf);
                         }
                         Ok(None) => {}
                         Err(e) => defmt::error!("air: receive failed: {}", e),
@@ -1016,17 +1041,21 @@ where
                 write_host(tx, &out).await;
             }
         }
-        while let Some(frame) = node.air_out.first().cloned() {
+        while let Some(packet) = node.air_out.first().cloned() {
             node.air_out.remove(0);
-            let mut backoff = Backoff::new(
-                &config,
-                frame.len().min(MAX_PAYLOAD as usize) as u8,
-                Instant::now().as_ticks(),
-            );
+            // `send` refused anything longer than two frames, so this holds.
+            let Some(split) = Split::new(&packet, sequence.take()) else {
+                continue;
+            };
+            let mut frame = [0u8; air::FRAME_MAX];
+            let Some(n) = split.frame(0, &mut frame) else {
+                continue;
+            };
+            let mut backoff = Backoff::new(&config, n as u8, Instant::now().as_ticks());
             let sent = loop {
                 let mut modem = Modem::new(dev, irq);
                 match modem
-                    .transmit(&config, &frame, &mut backoff, &mut rx_buf)
+                    .transmit(&config, &frame[..n], &mut backoff, &mut rx_buf)
                     .await
                 {
                     Ok(TxOutcome::Sent(report)) => break Ok(report),
@@ -1040,19 +1069,38 @@ where
                             report.rssi_dbm,
                             report.snr_db
                         );
-                        let rx = RxMetadata {
-                            rssi: Some(report.rssi_dbm),
-                            snr: Some(report.snr_quarter_db as f32 / 4.0),
-                        };
-                        node.inbound(LORA, &rx_buf[..report.len], rx);
+                        heard(&mut node, &mut air_in, &report, &rx_buf);
                     }
                     Err(e) => break Err(e),
                 }
             };
+            // The second frame goes straight after the first, with no wait:
+            // the receiver is holding the first half for it.
+            let sent = match sent {
+                Ok(report) if split.frames() == 2 => {
+                    let Some(n) = split.frame(1, &mut frame) else {
+                        continue;
+                    };
+                    let mut modem = Modem::new(dev, irq);
+                    match modem
+                        .send(&config, &frame[..n], CsmaReport::default())
+                        .await
+                    {
+                        Ok(second) => Ok(TxReport {
+                            elapsed_us: report.elapsed_us + second.elapsed_us,
+                            airtime_us: report.airtime_us + second.airtime_us,
+                            ..report
+                        }),
+                        Err(e) => Err(e),
+                    }
+                }
+                other => other,
+            };
             match sent {
                 Ok(report) => defmt::info!(
-                    "air: sent {=usize} bytes in {=u32} us (airtime {=u32} us) after {=u32} senses ({=u32} busy, {=u32} us waiting{=str})",
-                    frame.len(),
+                    "air: sent {=usize} bytes in {=usize} frames, {=u32} us (airtime {=u32} us) after {=u32} senses ({=u32} busy, {=u32} us waiting{=str})",
+                    packet.len(),
+                    split.frames(),
                     report.elapsed_us,
                     report.airtime_us,
                     report.csma.senses,
