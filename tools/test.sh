@@ -47,6 +47,11 @@ try cargo clippy --lib --bins -- -D warnings
 step "lint (firmware, ble)"
 try cargo clippy --no-default-features --features ble --lib --bins -- -D warnings
 
+# The phase 15 spike image links a protocol stack nothing else uses, behind
+# its own feature. Linted so it keeps building; it is not a product image.
+step "lint (firmware, spike)"
+try cargo clippy --features spike --bin rns-spike -- -D warnings
+
 # The interface crate has one optional feature, the embedded-graphics
 # adapter, and the two builds are different code: without it the crate has
 # no dependencies at all, which is a property worth checking on every run.
