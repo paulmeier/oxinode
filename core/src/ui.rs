@@ -240,6 +240,22 @@ pub enum Action {
     Bootloader,
 }
 
+impl Action {
+    /// Its name, for a log.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Action::Close => "close",
+            Action::SleepScreen => "sleep screen",
+            Action::Redraw => "redraw",
+            Action::ToggleRadio => "radio on/off",
+            Action::ResetRadioConfig => "reset config",
+            Action::ForgetBonds => "forget phones",
+            Action::Reboot => "reboot",
+            Action::Bootloader => "bootloader",
+        }
+    }
+}
+
 /// Which way the user moved.
 ///
 /// Named for the gesture and not the hardware, though on this board the two
@@ -595,6 +611,23 @@ mod tests {
                 assert_ne!(a.name(), b.name());
             }
         }
+    }
+
+    /// Every menu item's action has a name of its own.
+    #[test]
+    fn every_action_has_its_own_name() {
+        let mut names = Vec::new();
+        for screen in Screen::ALL {
+            for item in screen.menu() {
+                let name = item.action.name();
+                assert!(!name.is_empty());
+                if item.action != Action::Close {
+                    assert!(!names.contains(&name), "{name} repeats");
+                    names.push(name);
+                }
+            }
+        }
+        assert_eq!(Action::Close.name(), "close");
     }
 
     /// Walk the whole strip and come back to where you started.

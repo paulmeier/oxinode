@@ -32,6 +32,20 @@
 //! up or says why not, and then talks to a host. Neither is a better version of
 //! the other.
 //!
+//! # The panel is an interface now
+//!
+//! Phase 11. The modem loop owns a [`Ui`]: the navigator from `oxinode-core`,
+//! the frame the controller has been sent, and the frame the next page is
+//! drawn into. Once per redraw the loop copies what the screens are allowed
+//! to know out of the protocol and its own bookkeeping into a
+//! [`screens::State`] -- plain values -- and hands that to the renderer, which
+//! reaches into nothing. Gestures from the pad go to the navigator, and a
+//! menu item the user picks comes back as a [`ui::Action`] for
+//! [`perform`] to carry out. Only the actions that change nothing about the
+//! modem are carried out here; the ones that would -- radio on and off,
+//! resetting the configuration, forgetting phones -- are phase 12's, and
+//! say so in the log until then.
+//!
 //! # Idling in standby XOSC
 //!
 //! Phase 3 measured the oscillator startup as a fixed 5 ms charged to the first
@@ -50,7 +64,7 @@ use embassy_futures::join::{join, join5};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_futures::yield_now;
 use embassy_nrf::usb::{self, Driver};
-use embassy_nrf::{bind_interrupts, interrupt, peripherals, spim, twim};
+use embassy_nrf::{bind_interrupts, interrupt, peripherals, saadc, spim, twim};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::pipe::{Pipe, Reader, Writer};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
@@ -58,6 +72,7 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Sender, State};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::{Builder, Config as UsbConfig};
 use nrf_sdc::{self as sdc, mpsl};
+use oxinode::battery::Sense;
 use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
@@ -70,12 +85,15 @@ use oxinode_core::ble as interop;
 use oxinode_core::lr1121::config::ValidConfig;
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
+use oxinode_core::rnode::eeprom;
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::outbox::Outbox;
 use oxinode_core::rnode::protocol::{Action, Protocol, Sink};
 use oxinode_core::rnode::store::DeviceStore;
+use oxinode_core::screens::{self, Air, Host, Identity};
+use oxinode_core::sh1107;
 use oxinode_core::status::Bluetooth;
-use oxinode_core::{sh1107, status};
+use oxinode_core::ui::{self, Nav};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -83,6 +101,7 @@ bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    SAADC => saadc::InterruptHandler;
     // The link layer's own. MPSL sets their priorities itself.
     RADIO => mpsl::HighPrioInterruptHandler;
     TIMER0 => mpsl::HighPrioInterruptHandler;
@@ -185,7 +204,12 @@ async fn main(_spawner: Spawner) {
     // Before any of these peripherals is built: their constructors enable
     // their interrupts, and the NVIC's reset priority is the one the link
     // layer runs at.
-    ble::yield_to_mpsl(&[interrupt::USBD, interrupt::SPI2, interrupt::TWISPI0]);
+    ble::yield_to_mpsl(&[
+        interrupt::USBD,
+        interrupt::SPI2,
+        interrupt::TWISPI0,
+        interrupt::SAADC,
+    ]);
 
     let spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
     let reset = radio::RadioReset::new(p.P1_10, p.P1_11);
@@ -252,6 +276,11 @@ async fn main(_spawner: Spawner) {
     let mode_switch = pad::ModeSwitch::new(p.P1_09, p.P0_12);
     let pad_events = pad::Events::new();
     let nav_pad = pad::run(&mut pad_pins, &pad_events);
+
+    // Phase 11: the cell through its divider on P0.31, and the charger's
+    // status line. Read once per redraw, for the Home screen's battery row
+    // and the title bar's percentage.
+    let mut battery = Sense::new(p.SAADC, Irqs, p.P0_31, p.P1_02);
 
     // Read before anything else touches it. What comes back is either a record
     // this firmware wrote, or the state of a board nobody has provisioned --
@@ -440,6 +469,27 @@ async fn main(_spawner: Spawner) {
         );
         mode_switch.report();
 
+        // The ADC's offset calibration, then one reading for the log, so
+        // the divider arithmetic can be checked against a meter without a
+        // screen: the count is what the ADC said, the rest is the core's.
+        battery.calibrate().await;
+        let count = battery.raw().await;
+        match oxinode_core::battery::reading(count) {
+            Some(cell) => defmt::info!(
+                "battery: count {=i16}, {=u32} mV, {=u8}%, charging={=bool}",
+                count,
+                cell.millivolts,
+                cell.percent,
+                battery.is_charging()
+            ),
+            None => defmt::info!(
+                "battery: count {=i16}, {=u32} mV: no cell; charging={=bool}",
+                count,
+                oxinode_core::battery::cell_millivolts(count),
+                battery.is_charging()
+            ),
+        }
+
         let mut dev = match bringup::bring_up(spi, reset, &mut irq).await {
             Ok(dev) => dev,
             Err(e) => {
@@ -464,6 +514,7 @@ async fn main(_spawner: Spawner) {
                     mcu_id,
                     panel.as_mut(),
                     &pad_events,
+                    &mut battery,
                 )
                 .await;
             }
@@ -484,6 +535,7 @@ async fn main(_spawner: Spawner) {
             mcu_id,
             panel.as_mut(),
             &pad_events,
+            &mut battery,
         )
         .await
     };
@@ -661,6 +713,7 @@ async fn run<'d, D, S, B>(
     mcu_id: u64,
     mut panel: Option<&mut Panel<'_>>,
     pad_events: &pad::Events,
+    battery: &mut Sense<'_>,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -681,18 +734,13 @@ where
     // written out. See `PERSIST_IDLE`.
     let mut dirty_since: Option<Instant> = None;
 
-    // The panel's state. `live` is what the controller has been sent; `scratch`
-    // is where a page is drawn before being committed by comparison, so an
-    // update costs the pages that changed rather than the pages that were
-    // redrawn. See `sh1107::Frame::copy_from`.
-    let mut live = sh1107::Frame::new();
-    let mut scratch = sh1107::Frame::new();
-    let mut last_render = Instant::now() - RENDER_INTERVAL;
+    // The interface: see `Ui`.
+    let mut ui = Ui::new();
     let mut last_signal: Option<(i16, i8)> = None;
-    let mut screen_name = [b'-'; 4];
-    for (slot, byte) in screen_name.iter_mut().zip(serial_tail(mcu_id)) {
-        *slot = byte;
-    }
+    // When a frame last passed between the modem and a host, on either
+    // transport and in either direction, for the Home screen's "talking".
+    let mut last_host_frame: Option<Instant> = None;
+    let facts = Facts::new(mcu_id);
     // What the radio is currently programmed with, so a configuration is not
     // reprogrammed on every packet -- and, more to the point, so that a change
     // is applied exactly once and can be logged when it happens.
@@ -765,6 +813,7 @@ where
                     defmt::warn!("kiss: {=str}", e.message());
                 }
                 kiss::Step::Frame => {
+                    last_host_frame = Some(Instant::now());
                     let command = command::decode(dec.command(), dec.payload());
                     match protocol.handle(command, out) {
                         // Not a radio action, and not "write it out now"
@@ -789,14 +838,12 @@ where
                         }
                         // Force the next pass to redraw rather than waiting
                         // for the tick.
-                        Action::Redraw => {
-                            last_render = Instant::now() - RENDER_INTERVAL;
-                        }
+                        Action::Redraw => ui.redraw_now(),
                         // The pixels the host wants are the ones on the panel,
                         // and those are here rather than in the protocol.
                         Action::ReportDisplay => {
                             let mut image = [0u8; rnode_display::DISP_LEN];
-                            rnode_display::read_display(&live, &mut image);
+                            rnode_display::read_display(&ui.live, &mut image);
                             out.frame(command::cmd::DISP_READ, &image);
                         }
                         action => {
@@ -851,6 +898,7 @@ where
                         Ok(Some(report)) => {
                             led.off();
                             last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
+                            last_host_frame = Some(Instant::now());
                             protocol.received(
                                 report.rssi_dbm,
                                 // Quarter-dB throughout: the chip reports it
@@ -885,16 +933,16 @@ where
             }
         }
 
-        // Gestures from the pad. Phase 10 is the driver; what the interface
-        // does with each one is phase 11. Until then a gesture is logged here,
-        // where it arrived, and brings the next redraw forward -- so a person
-        // at the board can see that it was heard, and so a burst of presses
-        // is taken off the channel at the pace the panel is drawn.
-        if pad::drain(pad_events, |input| {
-            defmt::debug!("ui: {=str}", input.name())
-        }) > 0
-        {
-            last_render = Instant::now() - RENDER_INTERVAL;
+        // Gestures from the pad go to the navigator; what it hands back is
+        // done here, where the storage and the panel are.
+        let mut chosen = heapless::Vec::<ui::Action, { pad::QUEUE }>::new();
+        if ui.drain(pad_events, &mut chosen) {
+            if let Some(panel) = panel.as_deref_mut() {
+                ui.wake(panel).await;
+            }
+        }
+        for action in chosen {
+            perform(action, &mut ui, panel.as_deref_mut(), storage, &protocol).await;
         }
 
         // Draw, and send at most two pages of it. A full repaint is 218 ms on
@@ -902,41 +950,24 @@ where
         // filled in over several passes -- under half a second for a whole
         // screen, and never away for more than 28 ms at a time.
         if let Some(panel) = panel.as_deref_mut() {
-            if last_render.elapsed() >= RENDER_INTERVAL {
-                last_render = Instant::now();
+            if ui.due() {
                 if protocol.external().enabled() {
-                    protocol.external().draw(&mut scratch);
+                    protocol.external().draw(&mut ui.scratch);
                 } else {
-                    let (rx, tx_count) = protocol.counters();
-                    let config = protocol.config();
-                    status::render(
-                        &status::Status {
-                            name: screen_name,
-                            frequency_hz: config.frequency_hz,
-                            bandwidth_hz: config.bandwidth_hz,
-                            spreading_factor: config.spreading_factor,
-                            coding_rate: config.coding_rate,
-                            tx_power_dbm: config.tx_power_dbm,
-                            radio_on: protocol.radio_is_on(),
-                            tnc: protocol.is_tnc(),
-                            provisioned: protocol.rom().is_provisioned(),
-                            rx_count: rx,
-                            tx_count,
-                            last_rssi_dbm: last_signal.map(|(rssi, _)| rssi),
-                            last_snr_quarter_db: last_signal.map(|(_, snr)| snr),
-                            bluetooth: bluetooth_state(),
-                            passkey: passkey_state(),
-                        },
-                        &mut scratch,
+                    let state = facts.state(
+                        &protocol,
+                        air_of(&protocol, receiving),
+                        host_of(control),
+                        is_talking(last_host_frame),
+                        last_signal,
+                        battery.read().await,
+                        battery.is_charging(),
                     );
+                    screens::render(&mut ui.scratch, &mut ui.nav, &state);
                 }
-                live.copy_from(&scratch);
+                ui.commit();
             }
-            if !live.is_clean() {
-                if let Err(e) = panel.flush_pages(&mut live, 2).await {
-                    defmt::error!("panel: {}", e);
-                }
-            }
+            ui.flush(panel).await;
         }
 
         // A phone that has just paired goes into the record with everything
@@ -948,7 +979,7 @@ where
             protocol.store_mut().add_bond(bond);
             dirty_since = Some(Instant::now());
             // Redraw promptly: the passkey box has to go.
-            last_render = Instant::now() - RENDER_INTERVAL;
+            ui.redraw_now();
         }
 
         // Write the EEPROM out once it has stopped changing. Checked on every
@@ -1112,8 +1143,9 @@ async fn serve_without_a_radio<'d, D>(
     storage: &mut Storage<'_>,
     device: DeviceStore,
     mcu_id: u64,
-    panel: Option<&mut Panel<'_>>,
+    mut panel: Option<&mut Panel<'_>>,
     pad_events: &pad::Events,
+    battery: &mut Sense<'_>,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -1126,18 +1158,12 @@ where
     let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut ble_buf = [0u8; 256];
     let mut dirty_since: Option<Instant> = None;
-
-    // Say so on the panel, which is the only place somebody holding the board
-    // can be told.
-    if let Some(panel) = panel {
-        let mut frame = sh1107::Frame::new();
-        let mut page = status::Status::new();
-        page.name = *b"DEAD";
-        page.provisioned = protocol.rom().is_provisioned();
-        status::render(&page, &mut frame);
-        oxinode_core::font::draw(&mut frame, 4, 118, "NO RADIO", true);
-        let _ = panel.flush(&mut frame).await;
-    }
+    // The same interface as with a radio, and every screen says "no radio"
+    // where the radio would be -- which is the only place somebody holding
+    // the board can be told.
+    let mut ui = Ui::new();
+    let mut last_host_frame: Option<Instant> = None;
+    let facts = Facts::new(mcu_id);
 
     loop {
         if usb_log::is_bootloader_touch_tx(tx, control) {
@@ -1160,6 +1186,7 @@ where
         {
             for &byte in bytes {
                 if dec.feed(byte) == kiss::Step::Frame {
+                    last_host_frame = Some(Instant::now());
                     let command = command::decode(dec.command(), dec.payload());
                     match protocol.handle(command, out) {
                         Action::None => {}
@@ -1182,14 +1209,10 @@ where
                         }
                         // The display works whether or not the radio does, and
                         // a host reading the screen should get the screen.
-                        Action::Redraw => {}
+                        Action::Redraw => ui.redraw_now(),
                         Action::ReportDisplay => {
                             let mut image = [0u8; rnode_display::DISP_LEN];
-                            let mut frame = sh1107::Frame::new();
-                            let mut page = status::Status::new();
-                            page.name = *b"DEAD";
-                            status::render(&page, &mut frame);
-                            rnode_display::read_display(&frame, &mut image);
+                            rnode_display::read_display(&ui.live, &mut image);
                             out.frame(command::cmd::DISP_READ, &image);
                         }
                         // Anything that needed the radio: say why it cannot
@@ -1205,9 +1228,35 @@ where
                 dirty_since = None;
             }
         }
-        // Nothing on this screen answers the pad, but the channel still has
-        // to be emptied or the driver starts reporting drops.
-        pad::drain(pad_events, |_| {});
+        let mut chosen = heapless::Vec::<ui::Action, { pad::QUEUE }>::new();
+        if ui.drain(pad_events, &mut chosen) {
+            if let Some(panel) = panel.as_deref_mut() {
+                ui.wake(panel).await;
+            }
+        }
+        for action in chosen {
+            perform(action, &mut ui, panel.as_deref_mut(), storage, &protocol).await;
+        }
+        if let Some(panel) = panel.as_deref_mut() {
+            if ui.due() {
+                if protocol.external().enabled() {
+                    protocol.external().draw(&mut ui.scratch);
+                } else {
+                    let state = facts.state(
+                        &protocol,
+                        Air::NoRadio,
+                        host_of(control),
+                        is_talking(last_host_frame),
+                        None,
+                        battery.read().await,
+                        battery.is_charging(),
+                    );
+                    screens::render(&mut ui.scratch, &mut ui.nav, &state);
+                }
+                ui.commit();
+            }
+            ui.flush(panel).await;
+        }
         led.off();
         Timer::after(Duration::from_millis(100)).await;
         flush(&mut outbox, tx).await;
@@ -1215,11 +1264,16 @@ where
     }
 }
 
-/// How often the status page is redrawn.
+/// How often the screen is redrawn.
 ///
 /// Half a second: fast enough that a packet counter looks live, slow enough
 /// that the rendering and the diff are lost in the noise next to the radio.
+/// A gesture brings the next redraw forward, so the interface never waits on
+/// this.
 const RENDER_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long after the last frame the Home screen still says "talking".
+const TALKING_FOR: Duration = Duration::from_secs(10);
 
 /// Contrast the panel starts at: the SH1107's own power-on value, so a host
 /// that never sends `CMD_DISP_INT` gets what the part was designed for.
@@ -1227,11 +1281,264 @@ const fn status_intensity() -> u8 {
     0x80
 }
 
-/// The last four hex digits of the device ID, which is what the host names the
-/// port with and therefore what a person can match the board against.
-fn serial_tail(mcu_id: u64) -> [u8; 4] {
-    let hex = oxinode_core::serial::hex_u64(mcu_id);
-    [hex[12], hex[13], hex[14], hex[15]]
+/// The panel's side of the interface.
+///
+/// `live` is what the controller has been sent; `scratch` is where a page is
+/// drawn before being committed by comparison, so an update costs the pages
+/// that changed rather than the pages that were redrawn -- see
+/// `sh1107::Frame::copy_from`. A screen change is therefore not a full-panel
+/// flush: the title and the strip and the rows that differ, and nothing
+/// else. Nothing here marks the whole panel dirty except the user, from the
+/// menu item that exists for it.
+struct Ui {
+    nav: Nav,
+    live: sh1107::Frame,
+    scratch: sh1107::Frame,
+    /// `Sleep Screen` was chosen: the panel is off until the next gesture,
+    /// which wakes it and is otherwise ignored.
+    asleep: bool,
+    last_render: Instant,
+}
+
+impl Ui {
+    fn new() -> Self {
+        Ui {
+            nav: Nav::new(),
+            live: sh1107::Frame::new(),
+            scratch: sh1107::Frame::new(),
+            asleep: false,
+            last_render: Instant::now() - RENDER_INTERVAL,
+        }
+    }
+
+    /// Whether the tick has come round.
+    fn due(&self) -> bool {
+        self.last_render.elapsed() >= RENDER_INTERVAL
+    }
+
+    /// Bring the next redraw forward to the next pass.
+    fn redraw_now(&mut self) {
+        self.last_render = Instant::now() - RENDER_INTERVAL;
+    }
+
+    /// The page in `scratch` is the one to show: mark what changed.
+    fn commit(&mut self) {
+        self.last_render = Instant::now();
+        self.live.copy_from(&self.scratch);
+    }
+
+    /// Send at most two dirty pages, unless the screen is asleep.
+    async fn flush(&mut self, panel: &mut Panel<'_>) {
+        if self.asleep || self.live.is_clean() {
+            return;
+        }
+        if let Err(e) = panel.flush_pages(&mut self.live, 2).await {
+            defmt::error!("panel: {}", e);
+        }
+    }
+
+    /// Take every waiting gesture: a sleeping screen wakes and swallows the
+    /// press, an awake one hands it to the navigator. Returns whether the
+    /// screen has to be woken.
+    fn drain(
+        &mut self,
+        events: &pad::Events,
+        chosen: &mut heapless::Vec<ui::Action, { pad::QUEUE }>,
+    ) -> bool {
+        let mut woke = false;
+        let taken = pad::drain(events, |input| {
+            defmt::debug!("ui: {=str}", input.name());
+            if self.asleep {
+                self.asleep = false;
+                woke = true;
+            } else if let Some(action) = self.nav.handle(input) {
+                // The channel and this vector are the same size, so a push
+                // cannot fail; if it ever did, dropping the action would be
+                // the right thing anyway.
+                let _ = chosen.push(action);
+            }
+        });
+        if taken > 0 {
+            self.redraw_now();
+        }
+        woke
+    }
+
+    /// Put the panel back on after a sleep.
+    async fn wake(&mut self, panel: &mut Panel<'_>) {
+        if let Err(e) = panel.power(true).await {
+            defmt::error!("panel: could not wake: {}", e);
+        }
+        // Whatever changed while it was off has been accumulating in `live`
+        // and goes out on the next flushes.
+        self.redraw_now();
+    }
+}
+
+/// Do what a menu item asked for.
+///
+/// Only the actions that leave the modem as it was. `ToggleRadio`,
+/// `ResetRadioConfig` and `ForgetBonds` change what a host believes about
+/// the board, and what should happen when the host disagrees is phase 12's
+/// question; until it is answered they are logged and not done, so the
+/// screen never shows a change the modem did not make.
+async fn perform(
+    action: ui::Action,
+    ui: &mut Ui,
+    panel: Option<&mut Panel<'_>>,
+    storage: &mut Storage<'_>,
+    protocol: &Protocol,
+) {
+    match action {
+        // The navigator's own; never handed out.
+        ui::Action::Close => {}
+        // A full repaint, which is the one thing that is allowed to cost
+        // one: the user asked.
+        ui::Action::Redraw => {
+            ui.live.mark_all_dirty();
+            ui.redraw_now();
+        }
+        ui::Action::SleepScreen => {
+            ui.asleep = true;
+            if let Some(panel) = panel {
+                if let Err(e) = panel.power(false).await {
+                    defmt::error!("panel: could not sleep: {}", e);
+                }
+            }
+        }
+        // Both restarts write the record first, for the reason the host's
+        // reset does: a reboot is exactly when losing a provisioning would
+        // be least welcome.
+        ui::Action::Reboot => {
+            defmt::info!("ui: reboot");
+            commit(storage, protocol);
+            boot::reboot();
+        }
+        ui::Action::Bootloader => {
+            defmt::info!("ui: bootloader");
+            commit(storage, protocol);
+            boot::reboot_to_bootloader();
+        }
+        ui::Action::ToggleRadio | ui::Action::ResetRadioConfig | ui::Action::ForgetBonds => {
+            defmt::info!(
+                "ui: {=str} changes the modem; that is phase 12, nothing done",
+                action.name()
+            );
+        }
+    }
+}
+
+/// What the screens know that never changes: the two names the board has.
+struct Facts {
+    serial: [u8; 16],
+    ble_name: [u8; interop::NAME_LEN],
+}
+
+impl Facts {
+    fn new(mcu_id: u64) -> Self {
+        Facts {
+            serial: oxinode_core::serial::hex_u64(mcu_id),
+            ble_name: interop::advertised_name(mcu_id),
+        }
+    }
+
+    /// Copy what the screens are allowed to know out of the modem loop.
+    ///
+    /// Plain values, every one. The renderer is handed this and nothing
+    /// else, which is what keeps the render path out of the modem.
+    #[allow(clippy::too_many_arguments)]
+    fn state(
+        &self,
+        protocol: &Protocol,
+        air: Air,
+        host: Host,
+        talking: bool,
+        last_signal: Option<(i16, i8)>,
+        battery: Option<oxinode_core::battery::Reading>,
+        charging: bool,
+    ) -> screens::State {
+        let (rx_count, tx_count) = protocol.counters();
+        let link = bluetooth_state();
+        screens::State {
+            home: screens::Home {
+                host,
+                talking,
+                air,
+                rx_count,
+                tx_count,
+                last_rssi_dbm: last_signal.map(|(rssi, _)| rssi),
+                last_snr_quarter_db: last_signal.map(|(_, snr)| snr),
+                uptime_s: Some(Instant::now().as_secs().min(u32::MAX as u64) as u32),
+                battery,
+                charging,
+            },
+            radio: screens::Radio {
+                config: *protocol.config(),
+                air,
+                tnc: protocol.is_tnc(),
+            },
+            bluetooth: screens::BluetoothScreen {
+                link,
+                name: (link != Bluetooth::Absent).then_some(self.ble_name),
+                passkey: passkey_state(),
+                bonded: protocol.store().bonds().count() as u8,
+            },
+            position: screens::Position,
+            system: screens::System {
+                version: env!("CARGO_PKG_VERSION"),
+                serial: Some(self.serial),
+                identity: identity_of(protocol),
+                free_ram: board::free_ram_bytes(),
+            },
+        }
+    }
+}
+
+/// What the radio is doing, from what it was asked and whether that took.
+fn air_of(protocol: &Protocol, receiving: bool) -> Air {
+    if receiving {
+        Air::Receiving
+    } else if protocol.radio_is_on() {
+        // Asked for and valid, and the chip would not take it.
+        Air::Failed
+    } else if let Some(reason) = protocol.last_error() {
+        Air::Refused(reason)
+    } else {
+        Air::Off
+    }
+}
+
+/// Who has the line: a connected phone, else whoever has the KISS port open.
+fn host_of(control: &ControlChanged<'_>) -> Host {
+    if BLE_CONNECTED.load(Ordering::Relaxed) {
+        Host::Bluetooth
+    } else if control.dtr() {
+        Host::Usb
+    } else {
+        Host::None
+    }
+}
+
+/// Whether a frame has passed recently enough to call the link live.
+fn is_talking(last_host_frame: Option<Instant>) -> bool {
+    last_host_frame.is_some_and(|at| at.elapsed() < TALKING_FOR)
+}
+
+/// What the device can say about its own identity. It cannot check the RSA
+/// signature -- that needs the host's public key -- so "signed" means one is
+/// stored; the checksum is the part it verifies itself.
+fn identity_of(protocol: &Protocol) -> Identity {
+    match protocol.rom().status() {
+        eeprom::Status::Unprovisioned => Identity::None,
+        eeprom::Status::ChecksumMismatch => Identity::BadChecksum,
+        eeprom::Status::Provisioned => {
+            if protocol.store().device_signature.is_some() {
+                Identity::Signed
+            } else {
+                Identity::Unsigned
+            }
+        }
+    }
 }
 
 /// Write the device record out, and say so if it will not go.

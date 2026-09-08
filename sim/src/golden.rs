@@ -8,15 +8,19 @@
 //!
 //! The set is generated from the screen list, not written out, so a screen or
 //! a menu item added to the core is a golden image *missing* on the next run
-//! rather than a screen nobody looks at.
+//! rather than a screen nobody looks at. Since phase 11 every screen is drawn
+//! twice: once from a board that knows nothing, once from one mid-session, so
+//! that the empty-state rule -- a dash, never a plausible zero -- is in the
+//! pictures as well as in the tests.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use oxinode_core::ui::{self, Screen};
+use oxinode_core::screens::State;
+use oxinode_core::ui::Screen;
 
 use crate::image::Image;
-use crate::scene::Scene;
+use crate::scene::{self, Scene};
 use crate::script;
 
 /// One state worth a picture.
@@ -26,48 +30,66 @@ pub struct Case {
     pub name: String,
     /// How to get there from a fresh [`Scene`].
     pub script: String,
-    /// How many sample lines the screen shows; zero for the bare chrome.
-    pub sample_lines: usize,
+    /// What the screens draw from.
+    pub state: State,
 }
 
 impl Case {
     /// Render this case.
     pub fn render(&self) -> Image {
-        let mut scene = Scene::new().with_sample_lines(self.sample_lines);
+        let mut scene = Scene::with_state(self.state);
         let inputs = script::parse(&self.script).expect("a golden case's script parses");
         scene.run(&inputs);
         Image::render(&scene.frame())
     }
 }
 
-/// Every screen, every menu, every menu selection, and a scrolled page at
-/// each end and in the middle.
+/// Every screen empty and populated, every item of every menu, a scrolled
+/// page at each end and in the middle, and the two overlays that are not
+/// screens: a pairing in progress, and a refused configuration.
 pub fn cases() -> Vec<Case> {
     let mut cases = Vec::new();
+    let populated = scene::populated();
     for screen in Screen::ALL {
         let walk = format!("right*{}", screen.index());
         let title = slug(screen.title());
         cases.push(Case {
             name: title.clone(),
             script: walk.clone(),
-            sample_lines: 0,
+            state: State::default(),
+        });
+        cases.push(Case {
+            name: format!("{title}-populated"),
+            script: walk.clone(),
+            state: populated,
         });
         for (n, item) in screen.menu().iter().enumerate() {
             cases.push(Case {
                 name: format!("{title}-menu-{}", slug(item.label)),
                 script: format!("{walk} select down*{n}"),
-                sample_lines: 0,
+                state: populated,
             });
         }
     }
-    let long = ui::visible_lines() + 6;
-    for (name, downs) in [("top", 0), ("middle", 3), ("bottom", long)] {
+    // The radio screen is the long one; see `scene::populated`.
+    let radio = format!("right*{}", Screen::Radio.index());
+    for (name, downs) in [("top", 0), ("middle", 2), ("bottom", 100)] {
         cases.push(Case {
-            name: format!("home-scrolled-{name}"),
-            script: format!("down*{downs}"),
-            sample_lines: long,
+            name: format!("radio-scrolled-{name}"),
+            script: format!("{radio} down*{downs}"),
+            state: populated,
         });
     }
+    cases.push(Case {
+        name: "bluetooth-pairing".to_string(),
+        script: format!("right*{}", Screen::Bluetooth.index()),
+        state: scene::pairing(),
+    });
+    cases.push(Case {
+        name: "radio-refused".to_string(),
+        script: radio,
+        state: scene::refused(),
+    });
     cases
 }
 
@@ -164,19 +186,24 @@ fn write(dir: &Path, name: &str, image: &Image) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxinode_core::ui;
     use std::collections::HashSet;
 
-    /// The case list is the screen list: a picture of every screen, of every
-    /// item of every menu, and nothing twice.
+    /// The case list is the screen list: a picture of every screen empty and
+    /// populated, of every item of every menu, and nothing twice.
     #[test]
     fn the_cases_cover_every_screen_and_every_menu_item() {
         let cases = cases();
         let names: HashSet<&str> = cases.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names.len(), cases.len(), "a name repeats");
         let items: usize = Screen::ALL.iter().map(|s| s.menu().len()).sum();
-        assert_eq!(cases.len(), Screen::COUNT + items + 3);
+        assert_eq!(cases.len(), 2 * Screen::COUNT + items + 3 + 2);
         for screen in Screen::ALL {
-            assert!(names.contains(slug(screen.title()).as_str()), "{screen:?}");
+            let title = slug(screen.title());
+            assert!(names.contains(title.as_str()), "{screen:?}");
+            assert!(names.contains(format!("{title}-populated").as_str()));
+            let empty = cases.iter().find(|c| c.name == title).unwrap();
+            assert_eq!(empty.state, State::default(), "{screen:?} empty");
             for item in screen.menu() {
                 let name = format!("{}-menu-{}", slug(screen.title()), slug(item.label));
                 assert!(names.contains(name.as_str()), "{name}");
@@ -188,7 +215,7 @@ mod tests {
     #[test]
     fn every_case_lands_where_its_name_says() {
         for case in cases() {
-            let mut scene = Scene::new().with_sample_lines(case.sample_lines);
+            let mut scene = Scene::with_state(case.state);
             scene.run(&script::parse(&case.script).unwrap());
             let screen = scene.nav.screen();
             assert!(
@@ -204,9 +231,24 @@ mod tests {
                 None => assert!(!scene.nav.menu_is_open(), "{}", case.name),
             }
         }
-        let mut bottom = Scene::new().with_sample_lines(ui::visible_lines() + 6);
-        bottom.run(&script::parse("down*100").unwrap());
-        assert_eq!(bottom.nav.scroll(), 6);
+        // The scrolled cases really scroll: the bottom is past the middle,
+        // and the middle is past the top.
+        let scroll_of = |name: &str| {
+            let case = cases().into_iter().find(|c| c.name == name).unwrap();
+            let mut scene = Scene::with_state(case.state);
+            scene.run(&script::parse(&case.script).unwrap());
+            scene.frame();
+            scene.nav.scroll()
+        };
+        assert_eq!(scroll_of("radio-scrolled-top"), 0);
+        assert!(scroll_of("radio-scrolled-middle") > 0);
+        assert!(scroll_of("radio-scrolled-bottom") > scroll_of("radio-scrolled-middle"));
+        let mut lines = oxinode_core::screens::Lines::new();
+        scene::populated().lines(Screen::Radio, &mut lines);
+        assert_eq!(
+            scroll_of("radio-scrolled-bottom"),
+            lines.len() - ui::visible_lines()
+        );
     }
 
     #[test]

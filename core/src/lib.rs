@@ -15,6 +15,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod battery;
 pub mod ble;
 pub mod font;
 pub mod gpio;
@@ -25,6 +26,7 @@ pub mod lr1121;
 pub mod meshtastic;
 pub mod pad;
 pub mod rnode;
+pub mod screens;
 pub mod serial;
 pub mod sh1107;
 pub mod status;

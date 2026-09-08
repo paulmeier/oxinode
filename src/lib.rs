@@ -16,6 +16,7 @@ compile_error!(
 #[cfg(not(any(feature = "ble", feature = "cs-single-core")))]
 compile_error!("no critical-section implementation selected: enable `ble` or `cs-single-core`");
 
+pub mod battery;
 #[cfg(feature = "ble")]
 pub mod ble;
 pub mod board;

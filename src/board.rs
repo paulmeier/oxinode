@@ -134,3 +134,23 @@ pub fn regulator_decivolts() -> Option<u8> {
         _ => None,
     }
 }
+
+/// Bytes between the end of static data and the stack pointer right now.
+///
+/// The only honest free-RAM figure on a board with no allocator: everything
+/// static is laid out from the bottom of RAM and the stack grows down from
+/// the top, so the gap is what the stack has left to grow into. `__sheap` is
+/// the linker's name for the end of `.uninit`, which is the top of the static
+/// data; the stack pointer is read from the register, which on the main stack
+/// this executor runs on is the main stack pointer. The subtraction is in the
+/// core, where it is tested not to wrap.
+pub fn free_ram_bytes() -> Option<u32> {
+    extern "C" {
+        static __sheap: u8;
+    }
+    // Taking the address of a linker symbol is the whole of what this does
+    // with it; the symbol is never read, so no `unsafe` is needed.
+    let heap_start = core::ptr::addr_of!(__sheap) as u32;
+    let stack_pointer = cortex_m::register::msp::read();
+    oxinode_core::screens::free_ram(heap_start, stack_pointer)
+}

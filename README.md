@@ -26,6 +26,7 @@ Being precise about that:
 | 8 | Bluetooth LE transport — the same KISS stream, for Sideband | **done** — iOS Sideband pairs with a passkey on the OLED and drives the radio, [notes](docs/phase-8-bluetooth.md) |
 | 9 | An on-device interface, and a simulator to build it with | **done** — the shell is pure code and every screen has a golden image, [notes](docs/phase-9-simulator.md) |
 | 10 | The navigation pad driver | **done** — verified on hardware: six switches, repeat, debounce, and the mode switch read in every position it has, [notes](docs/phase-10-pad.md) |
+| 11 | The screens, drawn from real modem state | **done** — every screen renders from what the modem knows and says so where it knows nothing; read back from the board, [notes](docs/phase-11-screens.md) |
 
 The display comes before Bluetooth on purpose: BLE pairing needs somewhere to
 show a six-digit passkey, and the OLED is that somewhere.
@@ -75,7 +76,17 @@ settled against the board rather than guessed. It also turned up what
 `embassy-nrf` does to `UICR.NFCPINS` when asked for P0.10 — see
 [docs/phase-10-pad.md](docs/phase-10-pad.md) before flashing it.
 
-Phases 1 to 8 and 10 are confirmed on hardware.
+Phase 11 fills the screens. Each one is handed plain values copied out of the
+modem loop — which host has the line, the radio's configuration and whether it
+took, the Bluetooth link and how many phones are bonded, the identity and the
+free RAM — and draws them, reaching into nothing. A field that is not known is
+a dash, never a plausible zero, and the `Position` screen says the GPS is not
+driven yet rather than placing the board in the Gulf of Guinea. The battery
+sense on P0.31 is read for the first time. Every screen has a golden image
+empty and populated, and the render path is the same code on the board and in
+the simulator. See [docs/phase-11-screens.md](docs/phase-11-screens.md).
+
+Phases 1 to 8, 10 and 11 are confirmed on hardware.
 What that actually establishes:
 
 * the image links and boots at `0x26000`, so the S140 SoftDevice does forward to
@@ -242,13 +253,14 @@ to work from.
 | Navigation pad up / down / left / right | P0.21 / P0.17 / P1.05 / P0.16 | active low, internal pull-ups; auto-repeat |
 | Navigation pad OK / back | P0.10 / P0.15 | active low; **P0.10 is an NFC pin**, see below |
 | Power OFF / Power ON / GPS ON switch | P1.09 / P0.12 | P1.09 high in Power ON, P0.12 high in GPS ON, no pull; Power OFF cuts the board's power |
+| Battery sense | P0.31 (`AIN7`) | the cell through 806 kΩ / 1.5 MΩ, ratio 0.65048; read by the SAADC at gain 1/6, 12-bit |
+| Charger status | P1.02 | BQ25185 `STAT`, open drain, **low while charging**; internal pull-up |
 | SWDIO / SWDCLK | — | test pads TP1 / TP2, no header |
 
 Out of scope for now, recorded so nobody has to re-derive it: second I²C bus
 P0.04/P0.06 (IMU, RX8130CE RTC at `0x32`, *and* the Qwiic/STEMMA QT connector,
-5.1 kΩ pull-ups on board), GPS UART P0.20/P0.19, battery sense P0.31 through an
-806 kΩ/1.5 MΩ divider (ratio 0.65048), and BQ25185 charger status on P0.27 and
-P1.02.
+5.1 kΩ pull-ups on board), GPS UART P0.20/P0.19, and the BQ25185 charger's
+fault output on P0.27.
 
 Two of those pins are not what their Meshtastic names suggest:
 
@@ -616,7 +628,7 @@ sim/src/scene.rs      a navigator plus what a page borrows, rendered as the boar
 sim/src/text.rs       a frame as braille or half blocks, for a terminal
 sim/src/tty.rs        the interactive mode: arrow keys against the real menu tree
 sim/src/golden.rs     the golden-image set and the comparison
-sim/golden/           the committed images: every screen, every menu, every selection
+sim/golden/           the committed images: every screen empty and populated, every menu item
 core/src/rnode/display.rs     phase 7: the host's framebuffer and display readback
 src/display.rs        phase 7: the I2C bus, the 12 V rail, and the panel transport
 src/bin/display.rs    phase 7: the display bring-up image
@@ -726,10 +738,17 @@ the firmware:
 sim tty
 ```
 
-**Something to scroll.** The screens do not draw their own content yet; that
-needs the modem's state and is the rest of phase 9. `--sample 20` gives the
-current screen twenty numbered lines, enough to exercise scrolling and the
-scrollbar.
+**What the screens draw from.** Since phase 11 the screens draw from a
+`State` — the same plain values the board copies out of its modem loop — and
+the simulator has two fixtures for it. `--state populated`, the default, is a
+board mid-session with every field known; `--state empty` is one that knows
+nothing yet, so every screen shows how it says so. The populated radio screen
+is longer than the panel, which is what exercises scrolling and the scrollbar:
+
+```bash
+sim render --script "right down*3" -o radio-scrolled.png
+sim render --state empty --script "right*4" -o system-empty.png
+```
 
 **A frame from the board.** A 2048-byte dump of the controller's RAM, as the
 RNode display-read command returns it, renders the same way:
