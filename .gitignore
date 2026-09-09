@@ -38,7 +38,3 @@ __pycache__/
 
 # Session scratch: throwaway scripts, virtualenvs and captures
 /scratchpad/
-
-# The phase 15 peer's own Reticulum configuration and identity, made by
-# tools/spike_peer.py on first run. An identity key is not something to commit.
-/tools/.spike-peer/

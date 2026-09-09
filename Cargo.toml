@@ -28,13 +28,6 @@ members = ["panel", "core", "sim"]
 default = ["cs-single-core"]
 cs-single-core = ["cortex-m/critical-section-single-core"]
 
-# Phase 15 spike. A throwaway image that runs `rns-core` on the board; see
-# docs/phase-15-spike.md. A feature rather than a plain dependency so the
-# product image is not built against a protocol stack it does not use.
-# Build with:
-#     cargo build --release --features spike --bin rns-spike
-spike = ["dep:rns-core", "dep:rns-crypto", "dep:embedded-alloc", "dep:log"]
-
 # Phase 8. Build with:
 #     cargo build --release --no-default-features --features ble
 ble = [
@@ -131,14 +124,6 @@ trouble-host = { version = "0.8", optional = true, default-features = false, fea
 ] }
 static_cell = "2.1"
 
-# Phase 15 spike: a `no_std` Reticulum. `rns-core` needs `alloc`, which is
-# why the allocator is here, and logs through `log`, which the spike image
-# bridges to defmt. None of this is linked unless the `spike` feature is on.
-rns-core = { version = "0.1.17", optional = true, default-features = false }
-rns-crypto = { version = "0.1.10", optional = true, default-features = false }
-embedded-alloc = { version = "0.7", optional = true, features = ["llff"] }
-log = { version = "0.4", optional = true }
-
 [build-dependencies]
 # Shares the memory.x parser with the firmware, so the address baked into the
 # image and the address in the linker script cannot disagree.
@@ -183,15 +168,6 @@ path = "src/bin/display.rs"
 name = "ble"
 path = "src/bin/ble.rs"
 required-features = ["ble"]
-
-# Phase 15 spike: `rns-core` on the board, announcing over the air and over
-# a serial Reticulum interface on the first USB port. Not a product image and
-# not a bring-up image: it exists to be measured. See docs/phase-15-spike.md.
-#     cargo build --release --features spike --bin rns-spike
-[[bin]]
-name = "rns-spike"
-path = "src/bin/rns_spike.rs"
-required-features = ["spike"]
 
 # Debug builds of this still have to fit in 784K of flash and run at 64 MHz,
 # so keep some optimisation on even in dev.
