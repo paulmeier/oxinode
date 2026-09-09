@@ -8,17 +8,16 @@
 //! menu items to carry, a modal for the third level, and a canvas -- which is
 //! [`Frame`], over in [`crate::sh1107`], where the SH1107's layout is.
 //!
-//! The division of labour is the one phase 9 drew and phase 13 enforced with
-//! a crate boundary. Nothing here decides *what is true*: the screens'
-//! content is [`crate::screens`]'s, formatted from a `State` the caller
-//! copies out of the modem loop. Nothing here performs an action either;
-//! [`Nav::handle`] returns an [`Action`] and the caller does the work. So a
-//! menu item that reboots the board is, in here, only ever the word `Reboot`
-//! and a value in an enum.
+//! The division of labour is enforced with a crate boundary. Nothing here
+//! decides *what is true*: the screens' content is [`crate::screens`]'s,
+//! formatted from a `State` the caller copies out of the modem loop. Nothing
+//! here performs an action either; [`Nav::handle`] returns an [`Action`] and
+//! the caller does the work. So a menu item that reboots the board is, in
+//! here, only ever the word `Reboot` and a value in an enum.
 //!
 //! # The third level
 //!
-//! Phase 12's exception -- one value, opened from a menu item -- is the
+//! The one exception -- one value, opened from a menu item -- is the
 //! crate's [`Modal`]. oxinode's is [`Overlay`]: an [`Editor`] for one radio
 //! parameter, or a [`Lock`] notice saying why it cannot be edited right now.
 //! An editor is opened by the caller with [`NavExt::edit`] rather than by
@@ -234,8 +233,8 @@ pub enum Action {
     Set(Setting),
     /// Drop every stored pairing.
     ForgetBonds,
-    /// Power the GPS receiver up or down. Phase 14's rule: the switch
-    /// decides when it moves, and this decides in between.
+    /// Power the GPS receiver up or down. The rule: the switch decides
+    /// when it moves, and this decides in between.
     ToggleGps,
     /// Restart into the application.
     Reboot,
@@ -264,8 +263,9 @@ impl Action {
     /// Whether carrying this out changes the live radio configuration or the
     /// radio's state -- the things a host that has the line believes it owns.
     ///
-    /// This is the phase 12 rule in one place. A caller with a host on the
-    /// line refuses these and does the rest; see `docs/phase-12-settings.md`.
+    /// This is the host-ownership rule in one place. A caller with a host on
+    /// the line refuses these and does the rest; see
+    /// `docs/architecture/interface.md`.
     pub const fn changes_the_radio(self) -> bool {
         matches!(
             self,
@@ -511,7 +511,7 @@ mod tests {
         }
     }
 
-    // ---- phase 12: the editor level --------------------------------------
+    // ---- the editor level ------------------------------------------------
 
     fn on_radio_menu(item: usize) -> Nav {
         let mut nav = nav();

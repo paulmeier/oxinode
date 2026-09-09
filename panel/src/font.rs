@@ -7,7 +7,7 @@
 //! glyph looks like a missing glyph rather than like a space.
 //!
 //! Lowercase arrived with the on-device menus. A status panel reads perfectly
-//! well in capitals, and for phases 7 and 8 it was all capitals: the table held
+//! well in capitals, and originally it was all capitals: the table held
 //! fifty-five glyphs and folded lowercase input to uppercase. Menus are a
 //! different kind of reading. A screen of prose-cased labels — `Display
 //! Options`, `Bluetooth Toggle` — is scanned rather than read, and word shape

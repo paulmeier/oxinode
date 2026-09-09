@@ -87,9 +87,9 @@ pub mod addr {
     /// Holds [`super::CONF_OK_BYTE`] when the block above is valid.
     pub const CONF_OK: u8 = 0xA7;
 
-    /// Bluetooth enabled. Phase 8.
+    /// Bluetooth enabled.
     pub const CONF_BT: u8 = 0xB0;
-    /// Display present, intensity, address, blanking, rotation. Phase 7.
+    /// Display present, intensity, address, blanking, rotation.
     pub const CONF_DSET: u8 = 0xB1;
     /// See [`CONF_DSET`].
     pub const CONF_DINT: u8 = 0xB2;
@@ -103,7 +103,7 @@ pub mod addr {
     pub const CONF_PSET: u8 = 0xB5;
     /// See [`CONF_PSET`].
     pub const CONF_PINT: u8 = 0xB6;
-    /// Bluetooth set. Phase 8.
+    /// Bluetooth set.
     pub const CONF_BSET: u8 = 0xB7;
     /// Interference avoidance disabled.
     pub const CONF_DIA: u8 = 0xB9;

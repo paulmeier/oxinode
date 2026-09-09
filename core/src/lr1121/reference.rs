@@ -1,11 +1,11 @@
-//! The module's frequency reference, and the correction phase 3 left open.
+//! The module's frequency reference, and the correction for its error.
 //!
-//! Phase 3 measured this board's transmitter at **−73.3 ppm** and then proved
-//! the number belongs to the nRFLR1121 module rather than to the unit on the
-//! bench: sweeping the receive frequency against a *second* Base Duo gives a
-//! reception window centred on zero, which it could not be if only one of the
-//! two were wrong. Both boards are off by the same amount, so replacing either
-//! would change nothing.
+//! This board's transmitter was measured at **−73.3 ppm** on an SDR, and the
+//! number was then shown to belong to the nRFLR1121 module rather than to the
+//! unit on the bench: sweeping the receive frequency against a *second* Base
+//! Duo gives a reception window centred on zero, which it could not be if
+//! only one of the two were wrong. Both boards are off by the same amount, so
+//! replacing either would change nothing.
 //!
 //! That is what makes a software correction the right answer rather than a
 //! workaround. The error is a property of the part, it is stable — the drift
@@ -38,8 +38,8 @@
 /// How far this module's reference sits from nominal, in tenths of a ppm.
 ///
 /// Negative because the transmitter is **low**: a commanded 915.000 MHz carrier
-/// was measured at 914.934 MHz. Phase 3's `pa::MEASURED_TX_ERROR_PPM` carries
-/// the same number as a float for documentation; this is the one that is used.
+/// was measured at 914.934 MHz. `pa::MEASURED_TX_ERROR_PPM` carries the same
+/// number as a float for documentation; this is the one that is used.
 pub const MEASURED_ERROR_TENTH_PPM: i32 = -733;
 
 /// How much to add to a commanded frequency, in tenths of a ppm.
@@ -53,7 +53,7 @@ pub const CORRECTION_TENTH_PPM: i32 = -MEASURED_ERROR_TENTH_PPM;
 
 /// Temperature coefficient of the reference, in hundredths of a ppm per °C.
 ///
-/// Measured in phase 3 and recorded here because it bounds how good a *static*
+/// Measured, and recorded here because it bounds how good a *static*
 /// correction can be. A TCXO is 0.5–2 ppm over its whole range; this drifts
 /// that much every two or three degrees, which is the strongest evidence that
 /// what is in the module is not a compensated oscillator at all.
@@ -86,7 +86,7 @@ pub const fn shift_tenth_ppm(hz: u32, tenth_ppm: i32) -> u32 {
 /// What to command in order to land on `hz`.
 ///
 /// This is the function that goes in front of `SetRfFrequency`. Everything
-/// above it — the config, the console, phase 5's protocol — deals in the
+/// above it — the config, the console, the RNode protocol — deals in the
 /// frequency that is wanted; only this converts to the one the chip has to be
 /// told.
 pub const fn command_for(hz: u32) -> u32 {
@@ -131,7 +131,7 @@ const _: () = assert!(correction_hz(915_000_000) > 60_000);
 mod tests {
     use super::*;
 
-    /// The number phase 3 measured, in the units it was measured in. Pinned so
+    /// The number the SDR measured, in the units it was measured in. Pinned so
     /// that a change to the constant has to be a decision rather than a typo.
     #[test]
     fn the_correction_is_the_measured_error_negated() {

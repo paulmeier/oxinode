@@ -10,11 +10,11 @@
 //! of 508 is exactly two frames of 254 bytes, and that is where
 //! [`PACKET_MAX`] comes from.
 //!
-//! Until this module oxinode sent raw packets, which meant two things phase
-//! 15 recorded: it could not carry a full-MTU packet at all, and a stock
-//! RNode read the first byte of every oxinode packet as a header and
-//! oxinode read every stock RNode header as the first byte of a packet, so
-//! the two did not interoperate over the air.
+//! Until this module oxinode sent raw packets, which meant two things: it
+//! could not carry a full-MTU packet at all, and a stock RNode read the
+//! first byte of every oxinode packet as a header and oxinode read every
+//! stock RNode header as the first byte of a packet, so the two did not
+//! interoperate over the air.
 //!
 //! # Provenance
 //!

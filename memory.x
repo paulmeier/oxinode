@@ -51,12 +51,11 @@
  * RAM is the full 256 KB because we never call sd_softdevice_enable(); a
  * SoftDevice that is present in flash but disabled reserves no RAM.
  *
- * Phase 8 adds Bluetooth and does NOT change that. It uses Nordic's
- * SoftDevice Controller through `nrf-sdc`, which is a library linked into this
- * image rather than the S140 sitting at 0x1000 -- so S140 stays exactly as
- * dead as it has been since phase 1, and this layout stays as it is. If
- * oxinode ever did enable S140, this would have to shrink and gain a matching
- * ORIGIN offset.
+ * Bluetooth does NOT change that. It uses Nordic's SoftDevice Controller
+ * through `nrf-sdc`, which is a library linked into this image rather than the
+ * S140 sitting at 0x1000 -- so S140 stays unused, and this layout stays as it
+ * is. If oxinode ever did enable S140, this would have to shrink and gain a
+ * matching ORIGIN offset.
  *
  * build.rs parses ORIGIN(FLASH) out of this file, so keep that line's shape.
  */

@@ -13,7 +13,7 @@
 //! once each is read from its own end: the module transmits on P0.20. That
 //! is what is tried first, and it is not trusted: the probe below listens on
 //! each pin at each baud rate until a sentence with a good checksum arrives,
-//! and logs which one it was. See `docs/phase-14-gps.md` for the answer the
+//! and logs which one it was. See `docs/hardware/gps.md` for the answer the
 //! board gave.
 //!
 //! # What this module does and does not decide

@@ -3,7 +3,7 @@
 //! Everything here is from the Sino Wealth SH1107 datasheet (rev. 2018-04) and
 //! from the panel the Super IO board actually carries — **128 × 128**, 1.12
 //! inches, which the vendor states and which is *not* what the RNode protocol
-//! assumes. See `docs/phase-7-display.md`.
+//! assumes. See `docs/hardware/display.md`.
 //!
 //! # Which way the axes run, settled on the bench
 //!
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn the_panel_is_the_one_the_vendor_ships() {
         // 128 x 128, which is *not* the 128 x 64 the RNode protocol's
-        // 1024-byte display read assumes. See docs/phase-7-display.md.
+        // 1024-byte display read assumes. See docs/hardware/display.md.
         assert_eq!((WIDTH, HEIGHT), (128, 128));
         assert_eq!(BUFFER_LEN, 2048);
         assert_eq!(BUFFER_LEN, WIDTH * HEIGHT / 8);

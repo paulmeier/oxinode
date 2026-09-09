@@ -1,8 +1,8 @@
-//! The SPI link to the LR1121 (phase 3, step 1).
+//! The SPI link to the LR1121.
 //!
 //! This module owns the bus ([`new_spi`]) and the two control lines `lr11xx`
 //! does not manage ([`RadioReset`]). Anything that actually *says* something to
-//! the chip belongs to the steps after this one — see `docs/phase-3-radio.md`.
+//! the chip belongs to the modules above — see `docs/hardware/radio.md`.
 //!
 //! # There is nothing to probe
 //!
@@ -64,7 +64,7 @@ pub type RadioSpi<'d> = ExclusiveDevice<Spim<'d>, Output<'d>, Delay>;
 /// that number has not been checked against the errata sheet here. `embassy-nrf`
 /// implements no workaround for it either way. At 1 MHz nothing SPIM3 offers is
 /// worth having, so the quiet instance is the better trade; it also leaves both
-/// TWI/SPI-shared instances free for the phase-7 display.
+/// TWI/SPI-shared instances free for the display.
 pub fn new_spi<'d>(
     spim: Peri<'d, SPI2>,
     irq: impl Binding<interrupt::typelevel::SPI2, spim::InterruptHandler<SPI2>> + 'd,

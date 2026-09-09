@@ -830,7 +830,7 @@ impl Control {
 pub struct Attempt {
     /// Listen on P0.19 instead of P0.20. The schematic and the variant
     /// agree, read carefully, that the module transmits on P0.20 -- see
-    /// `docs/phase-14-gps.md` -- so that is tried first, and the other
+    /// `docs/hardware/gps.md` -- so that is tried first, and the other
     /// order is tried before giving up rather than trusted never to be
     /// needed.
     pub swapped: bool,

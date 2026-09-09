@@ -1,6 +1,6 @@
-//! Phase 8 bring-up image for the Bluetooth stack.
+//! Bring-up image for the Bluetooth stack.
 //!
-//! Currently at step 1: it starts MPSL and the SoftDevice Controller, reports
+//! It starts MPSL and the SoftDevice Controller, reports
 //! what they say about themselves, and advertises as `RNode XXXX`. It accepts
 //! a connection and logs what happens to it.
 //!
@@ -107,10 +107,10 @@ const USB_PID: u16 = 0x0005;
 // # Why this image handles faults and the others do not
 //
 // A fault and a spin loop are the same thing from the outside: a board that
-// stops answering. Phases 1 to 7 never needed to tell them apart, because
-// every stall had a log line just before it. This one is bringing up a binary
-// blob that runs with interrupts of its own, and "it went quiet" has already
-// cost several trips to the reset button.
+// stops answering. The other images never need to tell them apart, because
+// every stall has a log line just before it. This one is bringing up a binary
+// blob that runs with interrupts of its own, and "it went quiet" is all the
+// symptom it gives.
 //
 // So both are caught, recorded in a register that survives the reset, and
 // turned into a reboot into the bootloader -- which is visible from the host,
@@ -290,8 +290,8 @@ async fn main(_spawner: Spawner) {
 
         // The crystal is the board's clock and the default. The RC oscillator
         // stays selectable because it was the control that showed the failure
-        // was a race and not a configuration -- see docs/phase-8-bluetooth.md
-        // -- and a control is worth keeping.
+        // was a race and not a configuration -- see
+        // docs/architecture/bluetooth.md -- and a control is worth keeping.
         let source = if key == b'i' {
             ble::LfSource::InternalRc
         } else {

@@ -3,7 +3,7 @@ name = "oxinode"
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license-file = "LICENSE"
 description = "RNode-compatible LoRa modem firmware for the muzi.works Base Duo (nRF52840 + LR1121)"
 repository = "https://github.com/paulmeier/oxinode"
 publish = false
@@ -16,7 +16,8 @@ members = ["panel", "core", "sim"]
 # need different ones -- so the choice is a feature rather than a dependency.
 #
 # `cortex-m`'s single-core implementation masks *every* interrupt. That is
-# correct for phases 1-7 and wrong the moment MPSL is running: the Bluetooth
+# correct for the images without Bluetooth and wrong the moment MPSL is
+# running: the Bluetooth
 # controller's timing is kept by RADIO, RTC0 and TIMER0, and a critical section
 # that stops those loses connections. `nrf-mpsl` ships an implementation that
 # masks everything *except* those three.
@@ -28,7 +29,7 @@ members = ["panel", "core", "sim"]
 default = ["cs-single-core"]
 cs-single-core = ["cortex-m/critical-section-single-core"]
 
-# Phase 8. Build with:
+# The Bluetooth stack. Build with:
 #     cargo build --release --no-default-features --features ble
 ble = [
     "dep:nrf-mpsl",
@@ -58,14 +59,14 @@ embassy-nrf = { version = "0.11", features = [
     "gpiote",
     "time",
     "unstable-pac",   # POWER.GPREGRET, for reboot-into-bootloader
-    # Phase 10. P0.10 carries the pad's OK switch and is an NFC pin, and
+    # P0.10 carries the pad's OK switch and is an NFC pin, and
     # embassy-nrf does not even *name* P0.09/P0.10 without this feature. It
     # is not only a name: with it, `embassy_nrf::init` clears the PROTECT bit
     # of `UICR.NFCPINS` if it is set -- a single masked word write that only
     # ever turns a 1 into a 0, so no page erase and `UICR.REGOUT0` is never
     # touched -- and resets once so it takes. On a board Meshtastic has
     # already programmed the bit is clear and the write is a no-op. See
-    # docs/phase-10-pad.md before changing this.
+    # docs/hardware/pad-and-switch.md before changing this.
     "nfc-pins-as-gpio",
 ] }
 embassy-usb = "0.6"
@@ -78,7 +79,7 @@ defmt = "1.0"
 # Radio. `lr11xx` needs an *async* embedded-hal SpiDevice; `embedded-hal-bus`
 # supplies the exclusive-owner wrapper that turns embassy's SPIM plus a
 # chip-select GPIO into one. `lora-phy` and `defmt` are mandatory dependencies
-# of `lr11xx` with no feature to switch them off -- see docs/phase-3-radio.md
+# of `lr11xx` with no feature to switch them off -- see docs/hardware/radio.md
 # for why oxinode uses the low-level API and lets LTO drop the rest.
 lr11xx = "0.1"
 # `lr11xx` takes its bit-packed command arguments as arbitrary-width ints.
@@ -86,11 +87,11 @@ arbitrary-int = "1.3"
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", default-features = false, features = ["async"] }
-# The internal-flash driver speaks embedded-storage; phase 6 stores the device
-# record in the 40 KB the bootloader reserves above the application.
+# The internal-flash driver speaks embedded-storage; the device record lives
+# in the 40 KB the bootloader reserves above the application.
 embedded-storage = "0.3"
 
-# Phase 8: Bluetooth LE. `nrf-mpsl` and `nrf-sdc` wrap Nordic's own
+# Bluetooth LE. `nrf-mpsl` and `nrf-sdc` wrap Nordic's own
 # SoftDevice Controller -- a binary blob under LicenseRef-Nordic-5-Clause,
 # vendored in `nrf-sdc-sys` and licensed for use on Nordic silicon, which is
 # what this is. `trouble-host` is the host stack above it. These are optional
@@ -99,8 +100,8 @@ embedded-storage = "0.3"
 #
 # The versions are not a free choice: nrf-mpsl 0.4 and nrf-sdc 0.4 both pin
 # embassy-nrf 0.11 and embassy-sync 0.8, and trouble-host 0.8 pins embassy-time
-# 0.5.1 -- exactly what phases 1 to 7 already use. Moving any of them moves all
-# of them.
+# 0.5.1 -- exactly what the rest of the workspace uses. Moving any of them
+# moves all of them.
 nrf-mpsl = { version = "0.4", optional = true, features = ["defmt", "nrf52840"] }
 nrf-sdc = { version = "0.4", optional = true, default-features = false, features = [
     "defmt",
@@ -137,30 +138,30 @@ path = "src/bin/blink.rs"
 name = "usb-cdc"
 path = "src/bin/usb_cdc.rs"
 
-# Phase 3 bring-up image. Deliberately separate from `usb-cdc` until phase 5
-# merges the transports: with no debug probe, a failure you can bisect by
-# choosing which image to flash is worth the duplication.
+# Radio bring-up image. Deliberately separate from `usb-cdc`: with no debug
+# probe, a failure you can bisect by choosing which image to flash is worth
+# the duplication.
 [[bin]]
 name = "radio"
 path = "src/bin/radio.rs"
 
-# Phase 5: the product image. A Reticulum host opens the first serial port and
-# finds a modem; the second carries the log. Since phase 8 it also carries the
-# Bluetooth stack, and therefore the `ble` feature's critical section:
+# The product image. A Reticulum host opens the first serial port and finds a
+# modem; the second carries the log. It also carries the Bluetooth stack, and
+# therefore the `ble` feature's critical section:
 #     cargo build --release --no-default-features --features ble --bin rnode
 [[bin]]
 name = "rnode"
 path = "src/bin/rnode.rs"
 required-features = ["ble"]
 
-# Phase 7 bring-up image for the Super IO board's OLED. Separate from `rnode`
-# for the same reason `radio` was: with no debug probe, a failure you can
+# Bring-up image for the Super IO board's OLED. Separate from `rnode` for the
+# same reason `radio` is: with no debug probe, a failure you can
 # bisect by choosing which image to flash is worth the duplication.
 [[bin]]
 name = "display"
 path = "src/bin/display.rs"
 
-# Phase 8 bring-up image for the Bluetooth stack. Needs the `ble` feature, and
+# Bring-up image for the Bluetooth stack. Needs the `ble` feature, and
 # therefore a different critical section, so it cannot be built in the same
 # invocation as the others:
 #     cargo build --release --no-default-features --features ble --bin ble

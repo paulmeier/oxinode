@@ -1,8 +1,8 @@
 //! One place that programs a configuration into the LR1121, and one place each
 //! for transmitting and receiving with it.
 //!
-//! Phase 3's bring-up image talked to the radio directly, in three different
-//! places, with the parameters written into each. That was the right shape for
+//! The bring-up image talks to the radio directly, in three different
+//! places, with the parameters written into each. That is the right shape for
 //! answering "does this work at all"; it is the wrong shape for a modem, where
 //! the parameters arrive from a host and the question is whether the chip ends
 //! up configured the way it was asked to be.
@@ -10,9 +10,9 @@
 //! Everything here takes an [`oxinode_core::lr1121::config::ValidConfig`] and
 //! nothing takes anything else. That is not politeness — it is the reason
 //! "somebody forgot to check the frequency was in band" is not a bug that can
-//! be written in phase 5.
+//! be written here.
 //!
-//! # Two habits from phase 3 that are not optional
+//! # Two habits from bring-up that are not optional
 //!
 //! **Never trust a command's `Result`.** The LR11xx protocol returns the status
 //! of the *previous* command, so `lr11xx` returning `Ok` means the command
@@ -162,9 +162,8 @@ pub struct RxReport {
 
 /// The modem: an LR1121 and the line it interrupts on.
 ///
-/// Borrows rather than owns, so the phase 3 bring-up steps that need the raw
-/// device can keep it. Phase 5 will want the owning form; the difference is one
-/// line and no logic.
+/// Borrows rather than owns, so the bring-up steps that need the raw device
+/// can keep it. An owning form would differ by one line and no logic.
 pub struct Modem<'a, 'd, S, B>
 where
     S: embedded_hal_async::spi::SpiDevice<u8>,
@@ -192,8 +191,8 @@ where
     /// since the field means the actual length on transmit and the maximum
     /// accepted on receive.
     ///
-    /// `SetPacketType` goes first and is not optional. Phase 3 spent a
-    /// bisection discovering that: without it `SetTxCw` is rejected with
+    /// `SetPacketType` goes first and is not optional. This was established
+    /// by bisection on hardware: without it `SetTxCw` is rejected with
     /// `cmd_error` while `GetErrors` stays clean, and the crate's own
     /// documentation says only frequency and PA config are needed.
     ///
@@ -206,7 +205,7 @@ where
             //
             // The LR1121 only accepts its configuration commands in standby. In
             // receive it takes them and then reports `CMD_FAIL` on the next
-            // status read -- the same silent refusal phase 3 met with
+            // status read -- the same silent refusal bring-up meets with
             // `SetRegMode` and `SetTxCw`. So the first configuration after boot
             // works, because the chip is already in standby, and every
             // *re*-configuration fails: a host that reconnects, or changes one
@@ -214,7 +213,7 @@ where
             // settings it had.
             //
             // XOSC rather than RC, so the 32 MHz reference is already running.
-            // Phase 3 measured the startup as a fixed 5 ms charged to the first
+            // The oscillator startup is a fixed 5 ms charged to the first
             // operation that needs it, which is a tenth of the airtime at SF7
             // if it is paid once per packet.
             self.dev.standby(true).await?;
@@ -251,8 +250,7 @@ where
             // rather than on the header. The listening slots are shorter
             // than a preamble and a header together, so with the default a
             // packet that starts mid-slot is timed out just before it could
-            // have been decoded -- which is exactly what happened on the
-            // first phase 16 run. Stopped on the preamble, the slot stretches
+            // have been decoded. Stopped on the preamble, the slot stretches
             // to receive the whole packet.
             self.dev.set_stop_timeout_on_preamble(true).await?;
             // And a positive detection falls into receive rather than back
@@ -477,8 +475,8 @@ where
                 .await?;
             self.dev.write_buffer8(payload).await?;
             // Standby on the crystal rather than the RC oscillator, so the
-            // 32 MHz reference is already running when SetTx is issued. Phase 3
-            // measured that difference at 5 ms, charged to whichever operation
+            // 32 MHz reference is already running when SetTx is issued. That
+            // difference measures 5 ms, charged to whichever operation
             // first needs the oscillator -- and if that is SetTx, the 5 ms
             // lands inside the airtime measurement.
             self.dev.standby(true).await?;
@@ -553,9 +551,9 @@ where
             // The receive timer stops on preamble detection, which is what
             // lets a packet that starts mid-slot be received whole -- and
             // what would leave the chip receiving forever after a false
-            // preamble, or one whose header a collision corrupted. Phase 16
-            // saw exactly that: a transmission failed with no interrupt
-            // after a second of silence. So the chip's other timer is set
+            // preamble, or one whose header a collision corrupted. That shows
+            // up as a transmission that fails with no interrupt after a
+            // second of silence. So the chip's other timer is set
             // too, in symbols from the start of the receive, long enough for
             // a real packet to validate its header and no longer.
             self.dev

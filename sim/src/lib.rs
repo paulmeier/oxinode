@@ -1,11 +1,11 @@
 //! A panel simulator, so the interface can be built without a board.
 //!
-//! Phase 9 built the on-device interface as pure code: a
+//! The on-device interface is pure code: a
 //! [`Nav`](oxinode_core::ui::Nav) that takes an input and says what happened,
-//! and render functions that take a canvas and draw. Since phase 13 the
-//! interface is its own crate, [`monopanel`], and oxinode's screens are what
-//! it draws. All of it is testable by assertions about pixels, and none of it
-//! can be *looked at* that way. This crate is the looking.
+//! and render functions that take a canvas and draw. The interface itself is
+//! its own crate, [`monopanel`], and oxinode's screens are what it draws. All
+//! of it is testable by assertions about pixels, and none of it can be
+//! *looked at* that way. This crate is the looking.
 //!
 //! Five things, each in its own module:
 //!

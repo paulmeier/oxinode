@@ -5,7 +5,7 @@
 //! a [`State`] by reference, because on the board the caller copies the state
 //! out of the modem loop once per redraw. Here the caller is this struct, and
 //! the state is a fixture: a board that has just booted with nothing known,
-//! one mid-session with every field filled in, or -- since phase 12 -- one
+//! one mid-session with every field filled in, or one
 //! running on its own with no host attached, which is the one whose settings
 //! the panel may change.
 //!
@@ -155,7 +155,7 @@ pub fn searching() -> State {
 }
 
 /// The populated board with nobody on the line: a TNC running on its own,
-/// which is the case phase 12 exists for. Same numbers, so the editors open
+/// which is the case the editors exist for. Same numbers, so the editors open
 /// on values a person would recognise from the other pictures.
 pub fn standalone() -> State {
     let mut state = populated();

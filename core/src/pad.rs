@@ -64,8 +64,8 @@ pub type Millis = u64;
 /// How long a level must hold before it is believed.
 ///
 /// Measured, not guessed: 130 presses across all six switches on the board
-/// on 2026-09-07 and not one of them showed a second edge inside the window
-/// -- `settled in 0 ms after 0 bounce(s)`, every time. Tactile domes are
+/// and not one of them showed a second edge inside the window --
+/// `settled in 0 ms after 0 bounce(s)`, every time. Tactile domes are
 /// specified to bounce for 5 ms at most, so 10 ms is twice the worst the
 /// part is allowed to be and ten times worse than anything seen, at half the
 /// latency the first figure of 20 ms cost. If a worn switch ever logs a
@@ -391,8 +391,8 @@ impl Pad {
 ///
 /// It is labelled on the board, and the labels are the truth of it: **Power
 /// OFF / Power ON / GPS ON**. It is a power switch first and a mode switch
-/// second. Read on the board on 2026-09-07, with the switch in each position
-/// and the firmware logging the raw levels:
+/// second. Read on the board, with the switch in each position and the
+/// firmware logging the raw levels:
 ///
 /// | position  | P1.09 | P0.12 |
 /// |-----------|-------|-------|

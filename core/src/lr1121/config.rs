@@ -1,10 +1,10 @@
 //! The radio's settable parameters, their validation, and the chip's encodings.
 //!
-//! This is the seam phase 5 sits on. An RNode host sets frequency, bandwidth,
-//! spreading factor, coding rate and transmit power one at a time, in any
-//! order, and expects the modem to be running with whatever the last complete
-//! set was. Two things follow, and both are why this module has the shape it
-//! does.
+//! This is the seam the RNode protocol layer sits on. An RNode host sets
+//! frequency, bandwidth, spreading factor, coding rate and transmit power one
+//! at a time, in any order, and expects the modem to be running with whatever
+//! the last complete set was. Two things follow, and both are why this module
+//! has the shape it does.
 //!
 //! # An invalid configuration is a normal thing to hold
 //!
@@ -36,8 +36,8 @@ use super::reference;
 ///
 /// The LR1121 goes down to SF5 and [`RadioConfig::check`] allows it, because
 /// what the chip can do and what a protocol can express are different
-/// questions. This constant is here so phase 5 has the protocol's answer
-/// without having to invent it.
+/// questions. This constant is here so the protocol layer has the protocol's
+/// answer without having to invent it.
 pub const RNODE_SF_MIN: u8 = 7;
 /// Highest spreading factor an RNode host can ask for. The same as the chip's.
 pub const RNODE_SF_MAX: u8 = 12;
@@ -129,7 +129,8 @@ pub const DEFAULT: RadioConfig = RadioConfig {
 ///
 /// One variant per reason, rather than a single "invalid". A host that is told
 /// *which* limit it hit can correct itself; one that is told "no" cannot, and
-/// phase 5 has to answer a host over a serial line with no other diagnostics.
+/// the protocol layer has to answer a host over a serial line with no other
+/// diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {
     /// The frequency is outside the band this board's antenna is cut for.
@@ -281,9 +282,9 @@ impl RadioConfig {
 
     /// Whether an RNode host could express this configuration.
     ///
-    /// Separate from [`RadioConfig::check`] on purpose — see its note. Phase 5
-    /// needs this to know whether a locally-set configuration can be reported
-    /// back honestly.
+    /// Separate from [`RadioConfig::check`] on purpose — see its note. The
+    /// protocol layer needs this to know whether a locally-set configuration
+    /// can be reported back honestly.
     pub const fn is_rnode_representable(&self) -> bool {
         self.spreading_factor >= RNODE_SF_MIN
             && self.spreading_factor <= RNODE_SF_MAX
@@ -294,7 +295,7 @@ impl RadioConfig {
 /// One radio parameter with a value, as the panel sets it.
 ///
 /// The five things an RNode host sets, one at a time -- see the module docs.
-/// Phase 12's editor changes one of them per confirmation, and this is what
+/// The panel's editor changes one of them per confirmation, and this is what
 /// it hands back; [`RadioConfig::apply`] is the one place a setting lands in
 /// a configuration, so the panel and the host cannot disagree about which
 /// field a setting means.

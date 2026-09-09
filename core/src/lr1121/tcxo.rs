@@ -2,7 +2,7 @@
 //! believed.
 //!
 //! The Base Duo drives a 3.0 V TCXO from the LR1121's own DIO3. Two
-//! consequences run through the rest of phase 3:
+//! consequences run through the rest of the radio bring-up:
 //!
 //! * **DIO3 is not available as an interrupt line**, which is why the board
 //!   jumpers DIO9 out to the MCU on P1.08 instead.
@@ -25,7 +25,7 @@ pub const STEP_NS: u32 = 30_520;
 
 /// `tune` code for a 3.0 V TCXO supply.
 ///
-/// **Chosen from the phase-3 plan, not from the board.** Nobody has established
+/// **Chosen as a nominal value, not from the board.** Nobody has established
 /// what the Base Duo's TCXO actually wants, and the transmitter is 73 ppm low —
 /// far outside what a TCXO should manage, which points at it being driven wrong
 /// rather than at a bad part. See [`TUNE_CODES`].

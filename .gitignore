@@ -38,3 +38,6 @@ __pycache__/
 
 # Session scratch: throwaway scripts, virtualenvs and captures
 /scratchpad/
+
+# MkDocs output
+/site/

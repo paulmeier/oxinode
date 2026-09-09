@@ -46,13 +46,12 @@ pub mod use_case {
 /// radio does something the datasheet does not explain, this is the first thing
 /// to look at.
 ///
-/// This replaced a list of "known" versions carried over from the phase-3 plan
-/// — `0x0307`, `0x0401`, `0x0402`, attributed to RadioLib. That list was wrong
-/// for the job. It is family-wide rather than per-part, it could not be checked
-/// against RadioLib from here, and the first real board to answer reported 1.1
-/// and was duly announced as running firmware "no reference implementation
-/// documents". A check that calls healthy hardware suspect is worse than no
-/// check.
+/// This replaced a list of "known" versions — `0x0307`, `0x0401`, `0x0402`,
+/// attributed to RadioLib. That list was wrong for the job. It is family-wide
+/// rather than per-part, it could not be checked against RadioLib from here,
+/// and the first real board to answer reported 1.1 and was duly announced as
+/// running firmware "no reference implementation documents". A check that
+/// calls healthy hardware suspect is worse than no check.
 ///
 /// A difference from this value is not a fault. It means the board in hand is
 /// not the board the behaviour in this repository was observed on, which is
