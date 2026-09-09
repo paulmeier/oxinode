@@ -131,7 +131,8 @@ content row — what the test guards is that nothing does so on principle.
 Gestures go to the navigator and a menu item the user picks comes back as an
 `Action`. Four of them are carried out: `Redraw` (the one full repaint),
 `Sleep Screen` (the panel off until the next gesture, which wakes it and is
-otherwise swallowed), `Reboot` and `Bootloader` (both write the device record
+otherwise swallowed; the panel also goes out on its own after a minute with
+no gesture, from boot or from the last one), `Reboot` and `Bootloader` (both write the device record
 first, for the reason the host's reset does). The other three — `Radio
 On/Off`, `Reset Config`, `Forget Phones` — change what a host believes about
 the board, and what should happen when the host disagrees is phase 12's

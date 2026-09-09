@@ -1077,6 +1077,13 @@ where
             }
         }
 
+        // Nobody has touched the pad for a minute: put the panel out. The
+        // page keeps being drawn into `live` underneath, so the wake shows
+        // what is true then rather than what was true at the sleep.
+        if ui.idle() {
+            ui.sleep(panel.as_deref_mut()).await;
+        }
+
         // Draw, and send at most two pages of it. A full repaint is 218 ms on
         // this bus and the radio cannot be left that long, so the panel is
         // filled in over several passes -- under half a second for a whole
@@ -1503,6 +1510,9 @@ where
                 defmt::info!("ui: no radio to apply that to");
             }
         }
+        if ui.idle() {
+            ui.sleep(panel.as_deref_mut()).await;
+        }
         if let Some(panel) = panel.as_deref_mut() {
             if ui.due() {
                 if protocol.external().enabled() {
@@ -1541,6 +1551,15 @@ const RENDER_INTERVAL: Duration = Duration::from_millis(500);
 /// How long after the last frame the Home screen still says "talking".
 const TALKING_FOR: Duration = Duration::from_secs(10);
 
+/// How long the panel stays on with nobody touching the pad.
+///
+/// A minute, measured from boot and from the last gesture. The OLED is the
+/// one part of the board that wears with use and the only one a person has
+/// to be looking at to be worth lighting; a modem left on a desk has neither.
+/// The next press wakes it and is otherwise ignored, exactly as after
+/// `Sleep Screen`.
+const IDLE_SLEEP: Duration = Duration::from_secs(60);
+
 /// Contrast the panel starts at: the SH1107's own power-on value, so a host
 /// that never sends `CMD_DISP_INT` gets what the part was designed for.
 const fn status_intensity() -> u8 {
@@ -1560,10 +1579,14 @@ struct Ui {
     nav: Nav,
     live: sh1107::Frame,
     scratch: sh1107::Frame,
-    /// `Sleep Screen` was chosen: the panel is off until the next gesture,
-    /// which wakes it and is otherwise ignored.
+    /// `Sleep Screen` was chosen, or the pad went untouched for
+    /// `IDLE_SLEEP`: the panel is off until the next gesture, which wakes
+    /// it and is otherwise ignored.
     asleep: bool,
     last_render: Instant,
+    /// When the pad was last touched, for the idle sleep. Starts at boot,
+    /// so a board nobody picks up goes dark a minute after it lights.
+    last_gesture: Instant,
 }
 
 impl Ui {
@@ -1574,7 +1597,13 @@ impl Ui {
             scratch: sh1107::Frame::new(),
             asleep: false,
             last_render: Instant::now() - RENDER_INTERVAL,
+            last_gesture: Instant::now(),
         }
+    }
+
+    /// Whether the pad has been left alone long enough to put the panel out.
+    fn idle(&self) -> bool {
+        !self.asleep && self.last_gesture.elapsed() >= IDLE_SLEEP
     }
 
     /// Whether the tick has come round.
@@ -1625,9 +1654,21 @@ impl Ui {
             }
         });
         if taken > 0 {
+            self.last_gesture = Instant::now();
             self.redraw_now();
         }
         woke
+    }
+
+    /// Put the panel out. Its RAM keeps the page, so waking is one command
+    /// and the pages that changed in the meantime.
+    async fn sleep(&mut self, panel: Option<&mut Panel<'_>>) {
+        self.asleep = true;
+        if let Some(panel) = panel {
+            if let Err(e) = panel.power(false).await {
+                defmt::error!("panel: could not sleep: {}", e);
+            }
+        }
     }
 
     /// Put the panel back on after a sleep.
@@ -1676,12 +1717,7 @@ async fn perform(
             PanelChange::NONE
         }
         ui::Action::SleepScreen => {
-            ui.asleep = true;
-            if let Some(panel) = panel {
-                if let Err(e) = panel.power(false).await {
-                    defmt::error!("panel: could not sleep: {}", e);
-                }
-            }
+            ui.sleep(panel).await;
             PanelChange::NONE
         }
         // Both restarts write the record first, for the reason the host's
