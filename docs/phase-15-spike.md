@@ -1,5 +1,12 @@
 # Phase 15 — messaging from the node: the spike
 
+> **This direction was abandoned.** oxinode is an RNode that a companion
+> app drives, over USB or Bluetooth, and nothing more; it does not run a
+> Reticulum node of its own and has no messaging on the panel. The spike
+> image, its `spike` feature and dependencies, and `tools/spike_peer.py`
+> were removed from the tree; the last commit that has them is `bd5c2b2`.
+> What follows is kept as the record of what was measured.
+
 Where phase 15 stands: **measured, not built.** The issue asked whether a
 Reticulum stack fits on this board and talks to a real one before anything
 is designed, and said no implementation should start until that was known.

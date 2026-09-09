@@ -297,8 +297,8 @@ mod tests {
         ValidConfig::new(config).expect("a valid configuration")
     }
 
-    /// The spike's configuration: SF8 at 125 kHz.
-    fn spike() -> ValidConfig {
+    /// The configuration phase 15 was measured at: SF8 at 125 kHz.
+    fn bench() -> ValidConfig {
         valid(8, 125_000)
     }
 
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn a_slot_is_twelve_symbols_within_its_bounds() {
         // SF8 at 125 kHz: 2.048 ms a symbol, 24.576 ms a slot.
-        assert_eq!(slot_us(&spike()), 24_576);
+        assert_eq!(slot_us(&bench()), 24_576);
         // SF7 at 500 kHz: 256 µs a symbol, 3 ms of symbols, clamped up.
         assert_eq!(slot_us(&valid(7, 500_000)), SLOT_MIN_US);
         // SF12 at 62.5 kHz: 65.5 ms a symbol, clamped down.
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn the_budget_is_airtimes_within_its_bounds() {
         // 180 bytes at SF8/125k is about half a second; ten of those.
-        let config = spike();
+        let config = bench();
         let airtime = config.airtime_us(180);
         assert!((400_000..600_000).contains(&airtime), "{airtime}");
         assert_eq!(budget_us(&config, 180), BUDGET_AIRTIMES * airtime);
@@ -343,15 +343,15 @@ mod tests {
     fn a_detection_waits_in_receive_for_an_empty_packets_worth() {
         // SF8 at 125 kHz, eight symbols of preamble: 12.25 symbols of it,
         // then 13 of header, CRC and the minimum block at 4/5.
-        assert_eq!(cad_rx_timeout_us(&spike()), 51_712);
+        assert_eq!(cad_rx_timeout_us(&bench()), 51_712);
         // It is a wait that ends: well under a slot's budget share.
-        assert!(cad_rx_timeout_us(&spike()) < budget_us(&spike(), 1) / 10);
+        assert!(cad_rx_timeout_us(&bench()) < budget_us(&bench(), 1) / 10);
     }
 
     #[test]
     fn the_symbol_timeout_covers_a_slot_a_preamble_and_a_header() {
         // SF8 at 125 kHz: 12 slot symbols, 8 + 5 of preamble, 8, 8.
-        assert_eq!(sync_timeout_symbols(&spike()), 41);
+        assert_eq!(sync_timeout_symbols(&bench()), 41);
         // A fast link's slot is clamped up to 6 ms, which is many symbols.
         let fast = valid(7, 500_000);
         assert_eq!(sync_timeout_symbols(&fast), 24 + 13 + 16);
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn the_cad_timeout_covers_the_symbols_and_the_oscillator() {
-        let t = cad_timeout_us(&spike());
+        let t = cad_timeout_us(&bench());
         assert!(t > CAD_SYMBOLS as u32 * 2048);
         assert!(t >= 20_000);
     }
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn a_clear_channel_is_transmitted_on_after_the_difs_and_the_window() {
         for seed in 0..64 {
-            let mut b = Backoff::new(&spike(), 180, seed);
+            let mut b = Backoff::new(&bench(), 180, seed);
             let window = draw(seed);
             let (step, slots) = run(&mut b, |_| Channel::Clear);
             assert_eq!(step, Step::Transmit);
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn a_zero_window_still_waits_the_difs() {
         let seed = (0..u64::MAX).find(|s| draw(*s) == 0).unwrap();
-        let mut b = Backoff::new(&spike(), 180, seed);
+        let mut b = Backoff::new(&bench(), 180, seed);
         assert_eq!(b.next(Channel::Clear), Step::Wait(b.slot_us()));
         assert_eq!(b.next(Channel::Clear), Step::Transmit);
     }
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_busy_sense_starts_the_count_over_with_a_new_window() {
         let seed = (0..u64::MAX).find(|s| draw(*s) == 3).unwrap();
-        let mut b = Backoff::new(&spike(), 180, seed);
+        let mut b = Backoff::new(&bench(), 180, seed);
         assert_eq!(b.remaining(), DIFS_SLOTS + 3);
         b.next(Channel::Clear);
         b.next(Channel::Clear);
@@ -436,7 +436,7 @@ mod tests {
         // The phase 15 collision: the other board is mid-way through half a
         // second of announce when the host hands this one a reply. Busy for
         // twenty slots, then quiet.
-        let mut b = Backoff::new(&spike(), 131, 7);
+        let mut b = Backoff::new(&bench(), 131, 7);
         let (step, slots) = run(&mut b, |slot| {
             if slot < 20 {
                 Channel::Busy
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_channel_that_never_clears_is_forced_within_the_budget() {
-        let config = spike();
+        let config = bench();
         let mut b = Backoff::new(&config, 180, 1);
         let (step, slots) = run(&mut b, |_| Channel::Busy);
         assert_eq!(step, Step::Force);

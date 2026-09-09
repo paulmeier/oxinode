@@ -290,6 +290,11 @@ Two ways to close it, either of which is its own small phase:
 
 ## Reproducing
 
+The spike image and `tools/spike_peer.py` used here were removed when the
+on-board node direction was dropped (see the note at the top of
+[phase-15-spike.md](phase-15-spike.md)); check out `bd5c2b2` to rebuild
+them.
+
 ```
 # the product image on one board and the spike on the other. With two
 # boards attached the flasher must be told which; a board already sitting
