@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="oxinode: a Rust crab holding a small radio">
+  <!-- Radio waves from the antenna tip -->
+  <g fill="none" stroke="#26A69A" stroke-width="4" stroke-linecap="round">
+    <path d="M 51 43.9 A 14 14 0 0 1 70.1 63"/>
+    <path d="M 46 35.2 A 24 24 0 0 1 78.8 68"/>
+    <path d="M 41 26.6 A 34 34 0 0 1 87.4 73"/>
+  </g>
+
+  <!-- Legs -->
+  <g stroke="#E0551B" stroke-width="7" stroke-linecap="round">
+    <line x1="70" y1="175" x2="44" y2="192"/>
+    <line x1="74" y1="190" x2="50" y2="212"/>
+    <line x1="84" y1="202" x2="66" y2="224"/>
+    <line x1="186" y1="175" x2="212" y2="192"/>
+    <line x1="182" y1="190" x2="206" y2="212"/>
+    <line x1="172" y1="202" x2="190" y2="224"/>
+  </g>
+
+  <!-- Arms -->
+  <g stroke="#F46623" stroke-width="12" stroke-linecap="round">
+    <line x1="72" y1="158" x2="50" y2="140"/>
+    <line x1="194" y1="148" x2="216" y2="116"/>
+  </g>
+
+  <!-- Left pincer, holding the radio (mouth opens upward) -->
+  <path fill="#F46623" d="M 52 138 L 38.2 126.4 A 18 18 0 1 0 65.8 126.4 Z"/>
+  <!-- Right pincer, open -->
+  <path fill="#F46623" d="M 218 102 L 223.1 87.9 A 15 15 0 1 0 232.8 99.4 Z"/>
+
+  <!-- Body with Ferris-style spikes -->
+  <path fill="#F46623" d="M 88 116 L 96 102 L 106 111 L 116 98 L 128 108 L 140 98 L 150 111 L 160 102 L 168 116 Z"/>
+  <ellipse cx="128" cy="160" rx="74" ry="52" fill="#F46623"/>
+
+  <!-- Eyes -->
+  <circle cx="106" cy="148" r="13" fill="#FFFFFF"/>
+  <circle cx="150" cy="148" r="13" fill="#FFFFFF"/>
+  <circle cx="108" cy="150" r="6" fill="#1F1F1F"/>
+  <circle cx="152" cy="150" r="6" fill="#1F1F1F"/>
+  <circle cx="110" cy="147" r="2" fill="#FFFFFF"/>
+  <circle cx="154" cy="147" r="2" fill="#FFFFFF"/>
+  <!-- Mouth -->
+  <path d="M 116 174 Q 128 186 140 174" fill="none" stroke="#B83E15" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- The radio -->
+  <line x1="58" y1="80" x2="58" y2="56" stroke="#546E7A" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="58" cy="56" r="3" fill="#26A69A"/>
+  <rect x="42" y="80" width="22" height="52" rx="4" fill="#455A64" stroke="#CFD8DC" stroke-width="1.5"/>
+  <rect x="46" y="86" width="14" height="10" rx="1.5" fill="#80CBC4"/>
+  <g stroke="#B0BEC5" stroke-width="2" stroke-linecap="round">
+    <line x1="47" y1="104" x2="59" y2="104"/>
+    <line x1="47" y1="109" x2="59" y2="109"/>
+    <line x1="47" y1="114" x2="59" y2="114"/>
+  </g>
+  <circle cx="53" cy="124" r="2.5" fill="#FF7043"/>
+</svg>

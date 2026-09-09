@@ -8,6 +8,8 @@ copyright: Copyright &copy; 2026 Paul Meier. Released under the Reticulum Licens
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
   features:
     - navigation.sections
     - navigation.top
