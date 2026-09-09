@@ -1,4 +1,14 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" width="200" alt="oxinode: a Rust crab holding a small radio">
+</p>
+
 # oxinode
+
+[![ci](https://github.com/paulmeier/oxinode/actions/workflows/ci.yml/badge.svg)](https://github.com/paulmeier/oxinode/actions/workflows/ci.yml)
+[![docs](https://github.com/paulmeier/oxinode/actions/workflows/docs.yml/badge.svg)](https://paulmeier.github.io/oxinode/)
+[![release](https://img.shields.io/github/v/release/paulmeier/oxinode?display_name=tag&color=00897b)](https://github.com/paulmeier/oxinode/releases/latest)
+[![rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-f46623?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![license: Reticulum](https://img.shields.io/badge/license-Reticulum-00897b)](LICENSE)
 
 RNode-compatible LoRa modem firmware in Rust for the
 [muzi.works](https://muzi.works) **Base Duo** (Nordic nRF52840 + Semtech
