@@ -1,9 +1,9 @@
 //! Listening before transmitting: when the channel counts as clear, and how
 //! long to wait when it is not.
 //!
-//! Phase 15's spike put two oxinodes on the bench and lost a packet every
-//! time one transmitted while the other was still on the air. A LoRa radio
-//! is half duplex and the modem transmitted the moment a host handed it a
+//! Two oxinodes on one bench, both with traffic, lost a packet every time
+//! one transmitted while the other was still on the air. A LoRa radio is
+//! half duplex and the modem transmitted the moment a host handed it a
 //! frame; nothing anywhere asked whether somebody else was already talking.
 //!
 //! This module is the decision. The chip-facing part -- issuing a channel
@@ -297,7 +297,7 @@ mod tests {
         ValidConfig::new(config).expect("a valid configuration")
     }
 
-    /// The configuration phase 15 was measured at: SF8 at 125 kHz.
+    /// The bench configuration these numbers were measured at: SF8 at 125 kHz.
     fn bench() -> ValidConfig {
         valid(8, 125_000)
     }
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_packet_in_progress_is_waited_out_and_then_the_way_is_clear() {
-        // The phase 15 collision: the other board is mid-way through half a
+        // The bench collision: the other board is mid-way through half a
         // second of announce when the host hands this one a reply. Busy for
         // twenty slots, then quiet.
         let mut b = Backoff::new(&bench(), 131, 7);

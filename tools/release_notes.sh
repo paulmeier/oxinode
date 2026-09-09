@@ -2,8 +2,7 @@
 # Write the body of a GitHub Release to stdout.
 #
 # Built by hand rather than with `gh --generate-notes` so that the flashing
-# instructions and the status caveat are always present. Given how early this
-# project is, a release that looks like a finished product would be misleading.
+# instructions and the description of each image are always present.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,20 +12,21 @@ version="${1:?usage: release_notes.sh vX.Y.Z}"
 base="$(tools/layout.py memory.x --field FLASH.origin)"
 
 cat <<MSG
-> **This firmware is not an RNode yet.** oxinode is an in-progress
-> RNode-compatible LoRa modem for the muzi.works Base Duo. The radio works —
-> it identifies itself, transmits carriers and sends LoRa packets — but there
-> is **no RNode/KISS protocol and no display**, so nothing here answers
-> \`rnodeconf\` and Reticulum will not talk to it. See the README for which
-> phase this is.
+oxinode is RNode-compatible LoRa modem firmware for the muzi.works Base Duo
+(nRF52840 + LR1121) with the Super IO expansion board. A host running
+Reticulum sees it as an ordinary RNode over USB serial or Bluetooth LE; the
+OLED and navigation pad give it an on-device interface. See the
+[documentation](https://paulmeier.github.io/oxinode/) for what it does and
+what it does not do yet.
 
 ## Files
 
 | File | What it does |
 |---|---|
+| \`oxinode-rnode-$version.uf2\` | **The product image.** KISS/RNode protocol on the first USB serial port, defmt log on the second, Bluetooth LE for Sideband, the panel, the pad and the GPS. |
+| \`oxinode-radio-$version.uf2\` | LR1121 bring-up diagnostic: walks the radio bring-up, reports what it found, and offers a serial console for carriers and test packets. |
+| \`oxinode-usb-cdc-$version.uf2\` | Enumerates as a USB serial port and echoes. Proves the USB path. |
 | \`oxinode-blink-$version.uf2\` | Blinks the green LED. Proves flashing works. |
-| \`oxinode-usb-cdc-$version.uf2\` | Enumerates as a USB serial port and echoes. |
-| \`oxinode-radio-$version.uf2\` | LR1121 bring-up: identifies the radio, starts its oscillator, and offers a console for carriers and test packets. |
 
 \`.elf\` files are the exact binaries the images were built from, kept so a fault
 address can be resolved later. \`SHA256SUMS\` covers every asset.
@@ -40,8 +40,10 @@ board with a different bootloader layout.
 1. Double-tap the reset button. A USB drive appears.
 2. Copy the \`.uf2\` onto it. The board reboots into the new firmware.
 
-Recovery is always another double-tap of reset: the bootloader sits above the
-application and is never overwritten. Once \`usb-cdc\` is running, opening its
+On macOS 26 the UF2 drive does not write through; flash over serial DFU
+instead (see the documentation's flashing page). Recovery is always another
+double-tap of reset: the bootloader sits above the application and is never
+overwritten. Once an image with USB serial is running, opening its first
 serial port at 1200 baud and closing it puts the board back in the bootloader
 without touching the button.
 
@@ -49,13 +51,7 @@ without touching the button.
 
 \`radio\` is a diagnostic, not a product. It enumerates one serial port, waits
 for a terminal to open it, then walks the whole radio bring-up and says what it
-found — SPI pin selection read back from the peripheral, the reset and BUSY
-trace, the chip's identity and firmware version, oscillator startup, the RF
-switch masks, and the interrupt line.
-
-It then takes single-character commands on the same port. The radio's
-parameters are settable at runtime, so this is also how a configuration gets
-tried before phase 5 gives a host any way to ask for one:
+found. It then takes single-character commands on the same port:
 
 | Key | What it does |
 |---|---|

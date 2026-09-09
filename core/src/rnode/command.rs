@@ -51,17 +51,17 @@ pub mod cmd {
     pub const STAT_BAT: u8 = 0x27;
     /// Blink the indicator.
     pub const BLINK: u8 = 0x30;
-    /// Display intensity. Phase 7.
+    /// Display intensity.
     pub const DISP_INT: u8 = 0x45;
     /// Random byte.
     pub const RANDOM: u8 = 0x40;
-    /// Framebuffer extents. Phase 7.
+    /// Framebuffer extents.
     pub const FB_EXT: u8 = 0x41;
-    /// Read the framebuffer. Phase 7.
+    /// Read the framebuffer.
     pub const FB_READ: u8 = 0x42;
-    /// Write the framebuffer. Phase 7.
+    /// Write the framebuffer.
     pub const FB_WRITE: u8 = 0x43;
-    /// Bluetooth control. Phase 8.
+    /// Bluetooth control.
     pub const BT_CTRL: u8 = 0x46;
     /// Which board this is. See [`super::super::eeprom::BOARD_HMBRW`].
     pub const BOARD: u8 = 0x47;
@@ -93,9 +93,9 @@ pub mod cmd {
     pub const HASHES: u8 = 0x60;
     /// A firmware update is about to happen.
     pub const FW_UPD: u8 = 0x61;
-    /// Bluetooth pairing PIN, four bytes. Phase 8.
+    /// Bluetooth pairing PIN, four bytes.
     pub const BT_PIN: u8 = 0x62;
-    /// Display address, blanking, rotation, reconditioning. Phase 7.
+    /// Display address, blanking, rotation, reconditioning.
     pub const DISP_ADR: u8 = 0x63;
     /// See [`DISP_ADR`].
     pub const DISP_BLNK: u8 = 0x64;
@@ -103,7 +103,7 @@ pub mod cmd {
     pub const DISP_ROT: u8 = 0x67;
     /// See [`DISP_ADR`].
     pub const DISP_RCND: u8 = 0x68;
-    /// Read the display. Phase 7.
+    /// Read the display.
     pub const DISP_READ: u8 = 0x66;
     /// Neopixel intensity. This board has no neopixel.
     pub const NP_INT: u8 = 0x65;
@@ -153,7 +153,8 @@ pub mod hash_kind {
 }
 
 /// `KISS.PLATFORM_NRF52`. The host uses this to decide the device has a
-/// display, which is why phase 7 is a consequence of answering honestly here.
+/// display, which is why display support is a consequence of answering
+/// honestly here.
 pub const PLATFORM_NRF52: u8 = 0x70;
 /// `ROM.MCU_NRF52`, from `rnodeconf`.
 pub const MCU_NRF52: u8 = 0x71;
@@ -172,7 +173,7 @@ pub const RSSI_OFFSET: i16 = 157;
 ///
 /// So this is a statement about protocol compatibility rather than about
 /// oxinode's release: it says "I speak what a 1.52 RNode speaks". oxinode's own
-/// version is reported through the board and ROM commands in phase 6.
+/// version is reported through the board and ROM commands.
 pub const FW_VERSION_MAJOR: u8 = 1;
 /// See [`FW_VERSION_MAJOR`].
 pub const FW_VERSION_MINOR: u8 = 52;
@@ -190,7 +191,7 @@ pub mod error {
     pub const INITRADIO: u8 = 0x01;
     /// A transmission failed. Host drops the interface.
     pub const TXFAILED: u8 = 0x02;
-    /// The EEPROM is locked. Phase 6.
+    /// The EEPROM is locked.
     pub const EEPROM_LOCKED: u8 = 0x03;
     /// The outbound queue is full. Host records it and continues.
     pub const QUEUE_FULL: u8 = 0x04;
@@ -369,12 +370,12 @@ pub enum Command<'a> {
     SetDisplayIntensity(u8),
 
     /// A command for hardware this board does not have — WiFi, a neopixel.
-    /// Distinct from [`Command::NotYetImplemented`] because there is no phase
-    /// in which it becomes implemented; the answer is "not on this board".
+    /// Distinct from [`Command::NotYetImplemented`] because it never becomes
+    /// implemented; the answer is "not on this board".
     NotApplicable(u8),
-    /// A command that is understood but not implemented in this phase — the
-    /// display and Bluetooth ones, mostly. Kept distinct from [`Command::Unknown`]
-    /// so a log can say "phase 7" rather than "no idea".
+    /// A command that is understood but not implemented — the display and
+    /// Bluetooth ones, mostly. Kept distinct from [`Command::Unknown`] so a
+    /// log can say "known, not implemented" rather than "unknown".
     NotYetImplemented(u8),
     /// A command byte this firmware does not know.
     Unknown(u8),
@@ -811,8 +812,8 @@ mod tests {
         assert_eq!(decode(cmd::DATA, &[]), Command::Data(&[]));
     }
 
-    /// Commands that exist and are somebody else's phase are reported as such,
-    /// so a log line can say which phase rather than "unknown command".
+    /// Commands that exist but are not implemented are reported as such, so a
+    /// log line can say "known, not implemented" rather than "unknown command".
     #[test]
     fn the_display_and_bluetooth_commands_are_known_but_not_implemented() {
         for c in [
@@ -832,9 +833,9 @@ mod tests {
     }
 
     /// Commands for hardware this board does not have are a third thing again.
-    /// There is no phase in which a WiFi command becomes implemented on a
-    /// board with no WiFi, and a log that said "phase 7" about one would be
-    /// telling somebody to wait for something that is not coming.
+    /// A WiFi command never becomes implemented on a board with no WiFi, and
+    /// a log that said "not yet" about one would be telling somebody to wait
+    /// for something that is not coming.
     #[test]
     fn wifi_and_neopixel_commands_are_not_applicable_rather_than_pending() {
         for c in [

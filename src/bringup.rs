@@ -1,8 +1,8 @@
 //! Bringing the LR1121 from power-on to a radio that will accept a
 //! configuration.
 //!
-//! This is phase 3's sequence, distilled. Each step is there because phase 3
-//! established it was needed, and the notes say which:
+//! Each step is there because bring-up on hardware established it was needed,
+//! and `docs/hardware/radio.md` says which:
 //!
 //! 1. **Reset, and wait for BUSY.** 191 ms on this part — two hundred times
 //!    what an SX126x takes, and the reason the first timeout written for it was
@@ -99,10 +99,10 @@ where
         dev.set_tcxo_mode(
             TcxoMode::builder()
                 .with_delay(arbitrary_int::u24::new(tcxo::STARTUP_STEPS))
-                // 3.0 V. Phase 4 swept all eight supply codes against a
-                // receiver: the oscillator starts on every one and the
-                // frequency does not care, so this is the board's documented
-                // value rather than a tuned one.
+                // 3.0 V. Sweeping all eight supply codes against a
+                // receiver showed the oscillator starts on every one and
+                // the frequency does not care, so this is the board's
+                // documented value rather than a tuned one.
                 .with_tune(TcxoTune::V3p0)
                 .build(),
         )
@@ -132,7 +132,7 @@ where
     defmt::info!("radio: 32 MHz oscillator running, die {=f32} C", temp);
 
     // The antenna switch. This step cannot check itself: a wrong mask gives a
-    // clean TxDone into a dead port. Phase 3 proved these masks on a receiver,
+    // clean TxDone into a dead port. These masks were proved on a receiver,
     // which is the only instrument that can tell the difference.
     let switch = async {
         dev.set_dio_as_rf_switch(RfSwitchConfig::new_with_raw_value(
@@ -171,7 +171,7 @@ where
 
     // The switching regulator. Only accepted in standby RC -- in any other mode
     // the chip takes the command and then reports CMD_FAIL on the next status,
-    // which is the same silent failure SetTxCw produced in phase 3.
+    // which is the same silent failure SetTxCw produces without a packet type.
     let regulator = async {
         dev.standby(false).await?;
         dev.set_reg_mode(true).await?;

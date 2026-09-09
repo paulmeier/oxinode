@@ -1,13 +1,15 @@
-//! Phase 3 bring-up image for the LR1121.
+//! Bring-up image for the LR1121.
 //!
-//! Currently at step 4: it configures the SPI bus, reports what the peripheral
+//! It configures the SPI bus, reports what the peripheral
 //! actually claimed, pulses NRESET and reports what BUSY did about it, asks the
 //! chip what it is, starts its 32 MHz oscillator off the board's TCXO, and
 //! tells it which of its own DIOs drive the antenna switch. See
-//! `docs/phase-3-radio.md` for what each step adds.
+//! `docs/hardware/radio.md` for what each step adds. It then offers a
+//! single-character console for carriers, test packets, receive sweeps and
+//! a radio reboot; see `docs/architecture/images.md` for the key table.
 //!
-//! **Nothing here transmits.** No carrier, no packet, no antenna port
-//! energised.
+//! **This image transmits when asked to.** Attach an antenna to the sub-GHz
+//! SMA before pressing anything that keys the PA.
 //!
 //! Unlike `usb-cdc`, this image exposes a **single** CDC-ACM port, and it is a
 //! log port. That is not a simplification for its own sake: DTR is only visible
@@ -20,7 +22,7 @@
 //!     over to double-tap the reset button.
 //!
 //! The cost is that this image cannot also carry a data port. It does not need
-//! one; phase 5 is where the two transports have to coexist.
+//! one; the RNode image is where the two transports have to coexist.
 
 #![no_std]
 #![no_main]
@@ -487,7 +489,7 @@ where
     let mut cw_until: Option<Instant> = None;
     let mut tune_code = tcxo::TUNE_3V0;
     let mut ticks: u32 = 0;
-    // Phase 4's whole point: the radio's parameters are a value that lives
+    // The radio's parameters are a value that lives
     // here and changes, not constants compiled into the transmit path.
     let mut cfg = config::DEFAULT;
 
@@ -559,9 +561,9 @@ where
                         // Step to the next TCXO supply voltage and restart the
                         // radio on it. The transmitter is 73 ppm low, which is
                         // far outside what a TCXO should do, and 3.0 V was
-                        // taken from the plan rather than from the board -- so
-                        // the voltage is swept against a receiver instead of
-                        // being assumed.
+                        // taken from the documentation rather than from the
+                        // board -- so the voltage is swept against a receiver
+                        // instead of being assumed.
                         b'g' => {
                             if let Some(dev) = radio.as_mut() {
                                 cw_until = None;
@@ -709,7 +711,7 @@ where
 
 /// Output powers the console's `1`, `2` and `3` keys select, lowest first.
 ///
-/// Lowest first is the order the plan asks for, and the order that makes the
+/// Lowest first is the order that makes the
 /// SDR measurement conclusive: three distinct levels at one frequency, stepped
 /// in a known direction, is evidence that the transmitter is under control.
 /// A single burst is only evidence that *something* appeared.
@@ -1050,18 +1052,17 @@ where
     }
 }
 
-/// Phase 4: transmit one LoRa packet with whatever the console is configured
+/// Transmit one LoRa packet with whatever the console is configured
 /// for, and check the `TxDone` latency against what that configuration predicts.
 ///
-/// Phase 3 did this with the parameters compiled in. The check is the same and
-/// the point of it is the same — a `TxDone` that arrives immediately, or after
-/// some unrelated interval, is a `TxDone` that did not come from a packet — but
-/// now the prediction comes from the configuration rather than from a constant,
-/// which means it also tests that the configuration reached the chip.
+/// The check: a `TxDone` that arrives immediately, or after some unrelated
+/// interval, is a `TxDone` that did not come from a packet. The prediction
+/// comes from the configuration rather than from a constant, which means it
+/// also tests that the configuration reached the chip.
 ///
 /// The tolerance is a prediction rather than a widened window. Transmitting is
-/// always done from Standby XOSC here, so the 5 ms oscillator startup phase 3
-/// measured is paid before `SetTx` rather than inside the measurement.
+/// always done from Standby XOSC here, so the 5 ms oscillator startup is paid
+/// before `SetTx` rather than inside the measurement.
 async fn tx_packet<S, B>(
     dev: Option<&mut Lr11xx<S, B>>,
     irq: &mut radio::RadioIrq<'_>,
@@ -1075,7 +1076,7 @@ async fn tx_packet<S, B>(
     };
 
     // Recognisable on a receiver, and short enough for any spreading factor.
-    let payload = b"oxinode phase 4";
+    let payload = b"oxinode test pk";
     let airtime_us = valid.airtime_us(payload.len() as u8);
     log_config(&valid);
     defmt::info!(
@@ -1289,11 +1290,11 @@ where
 
 /// Step the receive frequency across a range and count what arrives at each.
 ///
-/// Phase 3 used this to establish that the 73 ppm error belongs to the module:
-/// against a second Base Duo the window came out centred on zero, which it
+/// One use is establishing that the 73 ppm error belongs to the module:
+/// against a second Base Duo the window comes out centred on zero, which it
 /// could not be if only one of the two boards were wrong.
 ///
-/// Phase 4 uses the same sweep for the opposite purpose. With the reference
+/// The other use is the opposite purpose. With the reference
 /// correction on, this board is deliberately 73 ppm away from the peer, so the
 /// window must move *down* by about 67 kHz. That is a prediction with a sign
 /// and a magnitude, and it is the only check available that the correction does
@@ -1356,12 +1357,12 @@ struct SweepPlan {
 
 /// The reconnaissance sweep: ±700 kHz in 100 kHz steps.
 ///
-/// Phase 3 swept ±240 kHz in 40 kHz steps and found both edges inside it. On
-/// this bench it no longer does — the boards have moved apart, the peer arrives
-/// at −69 dBm rather than −45 dBm, and the window is wider than ±300 kHz. That
+/// A sweep of ±240 kHz in 40 kHz steps finds both edges inside it with the
+/// boards close together. With them apart — the peer arriving at −69 dBm
+/// rather than −45 dBm — the window is wider than ±300 kHz. That
 /// is a fact about how much frequency error a LoRa receiver tolerates when it
 /// has 60 dB of margin over its sensitivity, and it means a sweep that assumes
-/// phase 3's answer measures nothing.
+/// the narrow answer measures nothing.
 ///
 /// So this one is for finding where the edges *are*. [`SWEEP_EDGE`] is for
 /// measuring one once it has been found.
@@ -1374,7 +1375,7 @@ const SWEEP_COARSE: SweepPlan = SweepPlan {
 
 /// The fine sweep: the window's upper edge, in 20 kHz steps.
 ///
-/// The coarse sweep cannot answer phase 4's question. LoRa's frequency
+/// The coarse sweep cannot answer the correction question. LoRa's frequency
 /// tolerance at SF11 and 250 kHz is wider than the 67 kHz correction, so both
 /// runs receive at every offset in the middle and the tables come out looking
 /// identical. What moves is not whether the middle works — it is where the
@@ -1459,9 +1460,9 @@ fn edit_config(config: &mut RadioConfig, key: u8) {
                 .min(pa::US915_MAX_HZ);
         }
         b'R' => config.correct_reference = !config.correct_reference,
-        // Two sync words, because there are two things on this bench worth
-        // talking to: an RNode uses the private-network value and the
-        // Meshtastic board next to it does not.
+        // Two sync words, because there are two kinds of neighbour worth
+        // talking to: an RNode uses the private-network value and a
+        // Meshtastic board does not.
         b'N' => {
             config.sync_word = if config.sync_word == config::SYNC_WORD_PRIVATE {
                 meshtastic::long_fast::SYNC_WORD
@@ -1518,8 +1519,8 @@ fn validate(config: &RadioConfig) -> Option<ValidConfig> {
 /// Print a configuration in the units a person reasons in.
 ///
 /// Both frequencies, always. The commanded one is what the chip is told and the
-/// wanted one is what should come out of the antenna; phase 3 spent a long time
-/// on the 73 ppm between them, and a status line that showed only one of the two
+/// wanted one is what should come out of the antenna; the 73 ppm between them
+/// took a long time to find, and a status line that showed only one of the two
 /// would make that distinction invisible again.
 fn log_config(config: &ValidConfig) {
     defmt::info!(
@@ -1556,7 +1557,7 @@ fn log_config(config: &ValidConfig) {
     }
     if config.pa_config().pa_sel != 0 {
         defmt::warn!(
-            "config: {=i8} dBm selects the HIGH-POWER PA, which nothing on this board has ever measured. Phase 3 only ever keyed the low-power one. Attach an antenna and expect a number you have not seen before",
+            "config: {=i8} dBm selects the HIGH-POWER PA, which nothing on this board has ever measured. Only the low-power PA has ever been measured on this board. Attach an antenna and expect a number you have not seen before",
             config.tx_power_dbm
         );
     }

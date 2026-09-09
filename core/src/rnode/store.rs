@@ -3,7 +3,7 @@
 //!
 //! Four things persist: the [`Eeprom`] image, the device signature
 //! `rnodeconf --sign` produces, the firmware hash `--firmware-hash` sets, and
-//! — since phase 8 — the Bluetooth bonds a phone has made with this board.
+//! the Bluetooth bonds a phone has made with this board.
 //! The EEPROM is the only one the host can read back byte for byte; the other
 //! two are answered through their own commands. They are stored together
 //! because they are written together, by the same tool, in the same minute.
@@ -37,7 +37,7 @@ pub const MAGIC: [u8; 4] = *b"OXN1";
 ///
 /// Version 2 added the bond table after the firmware hash. A version 1 record
 /// still decodes, with no bonds, which is exactly what a board provisioned
-/// before phase 8 has.
+/// with a version 1 record has.
 pub const VERSION: u8 = 2;
 /// The last version without bonds, and how long its record was.
 const VERSION_1: u8 = 1;
@@ -518,7 +518,8 @@ mod bond_tests {
 
     #[test]
     fn a_version_1_record_still_decodes_with_no_bonds() {
-        // Exactly what every board provisioned before phase 8 has in flash.
+        // Exactly what a board provisioned with a version 1 record has in
+        // flash.
         let mut v1 = DeviceStore::new().encode();
         v1[OFF_VERSION] = VERSION_1;
         let crc = record_crc(&v1[..RECORD_LEN_V1]);

@@ -1,6 +1,6 @@
 //! The RNode image: a Reticulum host opens the serial port and finds a modem.
 //!
-//! Two CDC-ACM ports and, since phase 8, a Bluetooth peripheral. The USB
+//! Two CDC-ACM ports and a Bluetooth peripheral. The USB
 //! **first** port carries the KISS stream and is the one
 //! `rnsd` is pointed at; the **second** carries the defmt log. That order is
 //! the contract with the host — it decides which tty gets the lower number —
@@ -34,7 +34,7 @@
 //!
 //! # The panel is an interface now
 //!
-//! Phase 11. The modem loop owns a [`Ui`]: the navigator from `oxinode-core`,
+//! The modem loop owns a [`Ui`]: the navigator from `oxinode-core`,
 //! the frame the controller has been sent, and the frame the next page is
 //! drawn into. Once per redraw the loop copies what the screens are allowed
 //! to know out of the protocol and its own bookkeeping into a
@@ -45,7 +45,7 @@
 //!
 //! # The panel is a second controller
 //!
-//! Phase 12. An RNode is host-controlled, and Reticulum checks its
+//! An RNode is host-controlled, and Reticulum checks its
 //! configuration against the device exactly once, when it brings the
 //! interface up; a change underneath it afterwards is a debug line in its
 //! log and nothing else. So the rule is: **a live session on USB or
@@ -54,11 +54,12 @@
 //! opens the notice that says so instead. With nobody on the line the panel
 //! edits the configuration through the same setters and the same validation
 //! the host gets, and in TNC mode the edit goes into the stored configuration
-//! too, so it is what the board boots with. See `docs/phase-12-settings.md`.
+//! too, so it is what the board boots with. See
+//! `docs/architecture/interface.md`.
 //!
 //! # The GPS is a third task
 //!
-//! Phase 14. The receiver has a task of its own, `oxinode::gps::serve`,
+//! The receiver has a task of its own, `oxinode::gps::serve`,
 //! beside the Bluetooth one: it follows the mode switch and the menu, drives
 //! the load switch, probes for the module and parses what it sends. The modem
 //! loop meets it at two points only -- a copy of the `Position` for the
@@ -67,7 +68,7 @@
 //!
 //! # Idling in standby XOSC
 //!
-//! Phase 3 measured the oscillator startup as a fixed 5 ms charged to the first
+//! The oscillator startup is a fixed 5 ms charged to the first
 //! operation that needs the 32 MHz reference. Idling in standby RC would pay it
 //! on every packet — a tenth of the airtime at SF7 — so the modem idles with
 //! the crystal running instead. The cost is a milliamp; the alternative is a
@@ -126,7 +127,7 @@ bind_interrupts!(struct Irqs {
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
     SAADC => saadc::InterruptHandler;
-    // Phase 14: the GPS UART.
+    // The GPS UART.
     UARTE0 => buffered_uarte::InterruptHandler<peripherals::UARTE0>;
     // The link layer's own. MPSL sets their priorities itself.
     RADIO => mpsl::HighPrioInterruptHandler;
@@ -307,7 +308,7 @@ async fn main(_spawner: Spawner) {
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
 
-    // Phase 10: the navigation pad. Claimed whether or not a Super IO is
+    // The navigation pad. Claimed whether or not a Super IO is
     // attached -- with the pull-ups on, an unconnected line reads released,
     // and an idle driver costs nothing. The channel is what the modem loop
     // reads gestures from.
@@ -316,7 +317,7 @@ async fn main(_spawner: Spawner) {
     let pad_events = pad::Events::new();
     let nav_pad = pad::run(&mut pad_pins, &pad_events);
 
-    // Phase 14: the GPS. A task of its own that follows the mode switch and
+    // The GPS. A task of its own that follows the mode switch and
     // the menu, probes for the module when powered, and publishes what it
     // knows for the Position screen; see `oxinode::gps`.
     static GPS_RX: StaticCell<[u8; gps::RX_BUFFER]> = StaticCell::new();
@@ -336,7 +337,7 @@ async fn main(_spawner: Spawner) {
     );
     let gps_task = gps::serve(receiver, &mode_switch);
 
-    // Phase 11: the cell through its divider on P0.31, and the charger's
+    // The cell through its divider on P0.31, and the charger's
     // status line. Read once per redraw, for the Home screen's battery row
     // and the title bar's percentage.
     let mut battery = Sense::new(p.SAADC, Irqs, p.P0_31, p.P1_02);
@@ -1684,8 +1685,8 @@ impl Ui {
 
 /// Do what a menu item asked for.
 ///
-/// The phase 12 rule is applied here and nowhere else in the firmware: an
-/// action that would change the live radio while a host has the line gets
+/// The host-ownership rule is applied here and nowhere else in the firmware:
+/// an action that would change the live radio while a host has the line gets
 /// the notice instead of being done. Everything else is done as asked. What
 /// the radio has to do about it, and whether the record changed, are handed
 /// back for the loop, which is where the modem and the persist timer are.

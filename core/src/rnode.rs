@@ -10,7 +10,7 @@
 //! # Provenance
 //!
 //! This is a clean-room implementation. RNode_Firmware_CE is GPLv3 and none of
-//! it has been read, ported or transliterated; oxinode is MIT/Apache-2.0.
+//! it has been read, ported or transliterated; see `docs/license.md`.
 //!
 //! The protocol is taken from the **counterpart** instead — Reticulum's own
 //! `RNS/Interfaces/RNodeInterface.py`, version 1.5.0 — which is the

@@ -134,8 +134,8 @@ pub const fn high_power(dbm: i8) -> PaConfigWord {
 /// −17 dBm to 14 dBm. That is a deliberate preference and not an arithmetic
 /// consequence: the two PAs overlap from −9 to 14 dBm, the low-power one draws
 /// less current, and — the reason that decides it — the low-power one is the
-/// only one this project has ever measured. Phase 3 keyed carriers at −17, 0
-/// and +14 dBm and saw them on a receiver. Nothing has ever come out of the
+/// only one this project has ever measured. Bring-up keyed carriers at −17,
+/// 0 and +14 dBm and saw them on a receiver. Nothing has ever come out of the
 /// high-power PA on this board.
 pub const fn pa_config_for(dbm: i8) -> Option<PaConfigWord> {
     if low_power_pa_accepts(dbm) {
@@ -211,7 +211,7 @@ pub const CW_SWEEP_CENTER_HZ: u32 = 914_500_000;
 /// **This is a problem, not a curiosity.** 73 ppm is 67 kHz at 915 MHz — over
 /// half of a 125 kHz LoRa channel — and it is far outside what a TCXO should
 /// do, which suggests the TCXO is not being driven as it expects rather than
-/// that it is simply a bad part. Phase 5 cannot ignore it.
+/// that it is simply a bad part. The protocol layer cannot ignore it.
 pub const MEASURED_TX_ERROR_PPM: f32 = -73.3;
 
 /// Whether a frequency is inside the US915 ISM band.

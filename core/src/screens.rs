@@ -1,7 +1,7 @@
 //! What each screen is allowed to know, and how it is drawn from that.
 //!
-//! Phase 9's shell can navigate five screens and phase 10's pad can drive it;
-//! this is what the screens *say*. The division the shell enforces holds:
+//! The navigator can move between five screens and the pad can drive it;
+//! this is what the screens *say*. The division the navigator enforces holds:
 //! [`crate::ui`] never decides what is true, and neither does this module. It
 //! is handed a [`State`] -- plain values, copied out of the modem loop by the
 //! caller -- and formats and draws it. The render path takes state by borrow
@@ -98,8 +98,9 @@ impl Air {
 }
 
 impl Host {
-    /// Who has the radio, if it is not the panel: phase 12's rule, in one
-    /// place. A live session on either transport owns the live configuration.
+    /// Who has the radio, if it is not the panel: the host-ownership rule, in
+    /// one place. A live session on either transport owns the live
+    /// configuration.
     pub const fn lock(self) -> Option<Lock> {
         match self {
             Host::None => None,
@@ -818,7 +819,7 @@ impl Lock {
 }
 
 /// What goes in the title bar's right corner: nothing without a stack, `BT`
-/// while advertising, `BT*` with a phone on the line -- as the phase 7 page
+/// while advertising, `BT*` with a phone on the line -- as the status page
 /// had it.
 pub const fn badge(link: Link) -> &'static str {
     match link {
@@ -1468,7 +1469,7 @@ mod tests {
         assert!(dirty > 2, "a screen change touched only {dirty} pages");
     }
 
-    // ---- phase 12: the editor ---------------------------------------------
+    // ---- the editor -------------------------------------------------------
 
     use crate::edit::{Editor, Field, Lock};
 

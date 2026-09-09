@@ -50,6 +50,11 @@ base="$(tools/layout.py memory.x --field FLASH.origin)"
 
 echo "package: building $version (load address $base)"
 cargo build --release --locked
+# The product image carries the Bluetooth stack, which swaps the
+# critical-section implementation for the whole image, so it cannot be built
+# in the same invocation as the others. Named explicitly so the images above
+# are not rebuilt BLE-flavoured underneath their layout checks.
+cargo build --release --locked --no-default-features --features ble --bin rnode
 
 rm -rf "$outdir"
 mkdir -p "$outdir"

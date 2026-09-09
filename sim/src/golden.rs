@@ -8,18 +8,18 @@
 //!
 //! The set is generated from the screen list, not written out, so a screen or
 //! a menu item added to the core is a golden image *missing* on the next run
-//! rather than a screen nobody looks at. Since phase 11 every screen is drawn
-//! twice: once from a board that knows nothing, once from one mid-session, so
-//! that the empty-state rule -- a dash, never a plausible zero -- is in the
-//! pictures as well as in the tests. Since phase 12 every editor is drawn
-//! too, open on a standalone board, refused where a refusal can be reached,
-//! and as the notice a host on the line turns it into.
+//! rather than a screen nobody looks at. Every screen is drawn twice: once
+//! from a board that knows nothing, once from one mid-session, so that the
+//! empty-state rule -- a dash, never a plausible zero -- is in the pictures
+//! as well as in the tests. Every editor is drawn too, open on a standalone
+//! board, refused where a refusal can be reached, and as the notice a host
+//! on the line turns it into.
 //!
-//! Since phase 13 there is a second set, under `128x64/`, of the same
-//! screens on the other common panel: every screen populated, the long menu
-//! windowed, a scrolled page, an editor, a notice and a pairing. That is
-//! what proves the interface's layout is derived from the canvas rather
-//! than assumed, and it is drawn from the same scenes and the same scripts.
+//! There is a second set, under `128x64/`, of the same screens on the other
+//! common panel: every screen populated, the long menu windowed, a scrolled
+//! page, an editor, a notice and a pairing. That is what proves the
+//! interface's layout is derived from the canvas rather than assumed, and it
+//! is drawn from the same scenes and the same scripts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -122,7 +122,7 @@ pub fn cases() -> Vec<Case> {
         state: scene::refused(),
         size: square,
     });
-    // Phase 14: the receiver on and looking, which is neither of the two
+    // The receiver on and looking, which is neither of the two
     // states every screen is drawn in and the one the power question is
     // about.
     cases.push(Case {
@@ -132,7 +132,7 @@ pub fn cases() -> Vec<Case> {
         size: square,
     });
 
-    // Phase 12: the editors. Each one open on a standalone board; the ones
+    // The editors. Each one open on a standalone board; the ones
     // that can be driven to a refusal, refused; one after a confirmed change,
     // back on the screen showing it; and the notice a host on the line turns
     // an edit -- or the toggle -- into.
@@ -206,7 +206,7 @@ pub fn cases() -> Vec<Case> {
         size: square,
     });
 
-    // Phase 13: the second panel. Every screen populated; the radio menu at
+    // The second panel. Every screen populated; the radio menu at
     // its top, in its middle and at its bottom, because nine items do not
     // fit and the window has to slide; the radio screen scrolled to its
     // end; an editor with its refusal; the notice; and a pairing, whose box
@@ -377,11 +377,10 @@ mod tests {
         assert_eq!(names.len(), cases.len(), "a name repeats");
         let items: usize = Screen::ALL.iter().map(|s| s.menu().len()).sum();
         // Screens twice, every menu item, three scroll positions, pairing
-        // and refused, then phase 12: five editors, three refusals, the
-        // cursor, the screen after an edit, and two notices. Then phase 13:
-        // every screen, three menu windows, a scroll, an editor, a notice
-        // and a pairing on the second panel. Then phase 14: the receiver
-        // searching.
+        // and refused, then five editors, three refusals, the cursor, the
+        // screen after an edit, and two notices. Then every screen, three
+        // menu windows, a scroll, an editor, a notice and a pairing on the
+        // second panel. Then the receiver searching.
         let square = 2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1;
         let wide = Screen::COUNT + 3 + 1 + 1 + 1 + 1;
         assert_eq!(cases.len(), square + wide);

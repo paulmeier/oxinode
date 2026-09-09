@@ -2,8 +2,9 @@
 //!
 //! Airtime is not a nicety. It is the timeout for waiting on `TxDone`, so
 //! getting it wrong turns a working transmission into a spurious error or a
-//! failed one into a hang. It is also the thing phase 5 needs in order to
-//! answer `rnodeconf`, and the thing a duty-cycle limit is computed from.
+//! failed one into a hang. It is also the thing the RNode protocol layer
+//! needs in order to answer `rnodeconf`, and the thing a duty-cycle limit is
+//! computed from.
 //!
 //! The formula is Semtech's, implemented from the specification rather than
 //! copied: symbol time, a preamble of `n + 4.25` symbols, and a payload symbol
@@ -95,7 +96,7 @@ pub const fn airtime_us(
 ///
 /// SF7 at 125 kHz with the shortest coding rate: fast enough that a bench test
 /// is not spent waiting, slow enough to be an ordinary LoRa packet rather than
-/// an exotic one. Not a claim about what phase 5 should default to.
+/// an exotic one. Not a claim about what the modem should default to.
 pub mod bench {
     /// Spreading factor.
     pub const SF: u8 = 7;

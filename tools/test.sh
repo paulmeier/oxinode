@@ -97,8 +97,8 @@ done
 
 # Last, and named binaries only, so the images checked above are not quietly
 # replaced by BLE-flavoured rebuilds of themselves. `rnode` -- the product
-# image -- lives here since phase 8: it carries the Bluetooth stack and so
-# needs this feature set.
+# image -- lives here: it carries the Bluetooth stack and so needs this
+# feature set.
 step "build firmware (ble: rnode, ble)"
 try cargo build --release --no-default-features --features ble --bin rnode --bin ble
 

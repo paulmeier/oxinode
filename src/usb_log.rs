@@ -60,8 +60,8 @@ pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() ->
             // Bounded, because `write_packet` waits for the host to collect
             // the data and a host with the port closed never does. Unbounded,
             // the pump parks on its first write and the port stays silent even
-            // after somebody attaches a terminal -- which is exactly what it
-            // did, and it cost a debugging session that had no log to read.
+            // after somebody attaches a terminal -- a failure that leaves no
+            // log to read while it is being debugged.
             //
             // Dropping the chunk on a timeout is consistent with the buffer
             // behind it, which already discards the oldest bytes when nothing
@@ -99,9 +99,8 @@ pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() ->
 /// executor never gets another chance to poll `usb.run()` — which is the task
 /// that would have enabled the endpoint. The board becomes a device that will
 /// not enumerate, with no log and no bootloader, and nothing anywhere says
-/// why. That is exactly what the first two phase 8 images did, and it cost two
-/// walks to the reset button to work out that the Bluetooth stack was not
-/// involved at all.
+/// why. An image that does this is a board that has gone quiet, and nothing
+/// in the symptom says whether the Bluetooth stack is involved at all.
 ///
 /// So a disabled endpoint is treated as "nothing to read for a while" rather
 /// than as an event: `None` comes back, after `period` has actually elapsed.

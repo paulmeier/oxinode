@@ -1,4 +1,4 @@
-//! Phase 1: prove the toolchain, the linker script and the UF2 flashing path.
+//! Prove the toolchain, the linker script and the UF2 flashing path.
 //!
 //! Blinks the green user LED (P1.03). If this runs, then the image is linked at
 //! the right offset, the SoftDevice hands control over as expected, the

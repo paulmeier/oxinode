@@ -79,4 +79,4 @@ does that with no allocator, no `std`, and no dependency.
 
 ## License
 
-MIT or Apache-2.0, at your option, as oxinode is.
+The [Reticulum License](../LICENSE), as oxinode is.

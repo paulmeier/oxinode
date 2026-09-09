@@ -1,4 +1,4 @@
-//! Phase 2: enumerate as a USB CDC-ACM serial port.
+//! Enumerate as a USB CDC-ACM serial port.
 //!
 //! This is the transport the RNode/KISS protocol will eventually run over, so
 //! the goal here is only to prove the plumbing: the board appears as a serial
@@ -12,7 +12,7 @@
 //!   * reboots into the UF2 bootloader on a 1200-baud open/close ("touch"),
 //!     the same convention Arduino and Adafruit boards use.
 //!
-//! There is no RNode framing here yet -- see the README for what phase 5 adds.
+//! There is no RNode framing here -- see the README for what `rnode` adds.
 
 #![no_std]
 #![no_main]
@@ -95,7 +95,7 @@ async fn main(_spawner: Spawner) {
     );
 
     // Interface order is the contract with the host: the data port is added
-    // first so it enumerates as the lower-numbered tty. Phase 5's KISS stream
+    // first so it enumerates as the lower-numbered tty. The RNode KISS stream
     // takes this one, which is why the log port exists separately rather than
     // being multiplexed in later.
     let data = CdcAcmClass::new(&mut builder, DATA_STATE.init(State::new()), MAX_PACKET_SIZE);

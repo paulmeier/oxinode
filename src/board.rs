@@ -4,10 +4,10 @@
 //! (`variants/nrf52840/muzi_base/variant.h`). Pin numbers are hardware facts,
 //! not borrowed code.
 //!
-//! Only what the current phase actually drives is declared here. Radio, flash,
-//! display and IMU pins are documented in the README until the phase that
-//! needs them arrives -- an unused `const` is just a comment that can go stale
-//! without anyone noticing.
+//! Only what the firmware actually drives is declared here. Pins it does not
+//! use yet are documented in the README until the code that needs them
+//! arrives -- an unused `const` is just a comment that can go stale without
+//! anyone noticing.
 
 use embassy_nrf::config::{Config, HfclkSource, LfclkSource};
 use embassy_nrf::gpio::{Level, Output, OutputDrive, Pin};
@@ -63,8 +63,8 @@ impl<'d> Led<'d> {
 /// The nRF52840's factory device ID.
 ///
 /// Read-only, set at manufacture, and unique to the chip. It is what the USB
-/// serial string is made from, and what phase 6 binds the device hash to so a
-/// signature made for one board does not validate another.
+/// serial string is made from, and what provisioning binds the device hash to
+/// so a signature made for one board does not validate another.
 pub fn device_id() -> u64 {
     let ficr = embassy_nrf::pac::FICR;
     ((ficr.deviceid(1).read() as u64) << 32) | ficr.deviceid(0).read() as u64
@@ -92,7 +92,7 @@ pub fn take_device_serial() -> &'static str {
 /// page, and changing it means writing that page rather than setting a
 /// register.
 ///
-/// This only *reports*. What writes it, since phase 10, is `embassy_nrf::init`
+/// This only *reports*. What writes it is `embassy_nrf::init`
 /// under the `nfc-pins-as-gpio` feature -- the only way `embassy-nrf` names
 /// P0.10 at all -- and it does so carefully: a masked word write that clears
 /// the `PROTECT` bit and changes nothing else. Flash bits go from 1 to 0

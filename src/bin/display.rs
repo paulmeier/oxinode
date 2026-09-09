@@ -1,10 +1,10 @@
-//! Phase 7 bring-up image for the Super IO board's OLED.
+//! Bring-up image for the Super IO board's OLED.
 //!
-//! Currently at step 1: it brings up the I²C peripheral, reports which pins it
+//! It brings up the I²C peripheral, reports which pins it
 //! actually claimed, and scans the bus — once with the panel's 12 V rail off
-//! and once with it on. See `docs/phase-7-display.md`.
-//!
-//! **Nothing here draws anything.** No display initialisation, no pixels.
+//! and once with it on, then initialises the controller, draws a test
+//! pattern that settles which way the axes run, and renders a status page.
+//! See `docs/hardware/display.md`.
 //!
 //! Like `radio`, this image exposes a **single** CDC-ACM port and it is a log
 //! port, so that DTR can hold the sequence until a terminal is attached and can
@@ -132,9 +132,9 @@ async fn main(_spawner: Spawner) {
         //
         // Sampled every 20 ms, and the touch is checked on every one of them.
         // A 1200-baud open/close is over in tens of milliseconds, so a loop
-        // that looked once a second could miss the window entirely -- and this
-        // image did, twice, rebooting into the bootloader seconds after the
-        // flasher had given up waiting for it. Two trips to the reset button.
+        // that looked once a second could miss the window entirely, and then
+        // reboot into the bootloader seconds after the flasher had given up
+        // waiting for it.
         let mut ticks = 0u32;
         while !control.dtr() {
             if usb_log::is_bootloader_touch(&log_rx, &control) {

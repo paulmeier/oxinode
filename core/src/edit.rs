@@ -1,6 +1,6 @@
 //! Editing one radio parameter from the panel: the value model.
 //!
-//! Phase 12. The shell stopped at two levels on purpose and left room for one
+//! The navigator stops at two levels on purpose and leaves room for one
 //! exception, and this is it: open a field, change it, confirm or cancel. What
 //! is here is the *value* side of that -- which fields there are, what each
 //! steps through, how a frequency is typed a digit at a time, and what happens
@@ -14,7 +14,7 @@
 //! [`ValidConfig::new`] -- the same function that decides whether a host's
 //! configuration may reach the chip. A candidate that fails stays in the
 //! editor with the reason under it, unapplied; nothing rounds it to the nearest
-//! legal value. That is phase 4's rule, and the panel is not an exception to
+//! legal value. That is the modem's rule, and the panel is not an exception to
 //! it: a person who asked for 21 dBm and was given 20 without being told has
 //! no way to find out.
 //!

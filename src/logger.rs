@@ -33,8 +33,8 @@ static TAKEN: AtomicBool = AtomicBool::new(false);
 //
 // defmt requires *a* timestamp definition -- the link fails with an undefined
 // `_defmt_timestamp` without one -- but microsecond uptime is worth having for
-// its own sake. Phase 3 spends its time waiting on BUSY and on TX airtime, and
-// both are far easier to reason about when the log says how long they took.
+// its own sake. The firmware spends its time waiting on BUSY and TX airtime,
+// and both are far easier to reason about when the log says how long they took.
 defmt::timestamp!("{=u64:us}", embassy_time::Instant::now().as_micros());
 
 #[defmt::global_logger]

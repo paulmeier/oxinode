@@ -8,7 +8,7 @@
 //! * **The SoftDevice Controller** (`nrf-sdc`) is the Bluetooth link layer,
 //!   also a blob, speaking HCI. Note that this is *not* the S140 SoftDevice
 //!   sitting in flash at `0x1000`: that one stays disabled exactly as it has
-//!   since phase 1, and we keep linking above it. See the README.
+//!   always been, and we keep linking above it. See the README.
 //! * **TrouBLE** (`trouble-host`) is the host — L2CAP, ATT, GATT, and the
 //!   security manager — and is ordinary Rust.
 //!
@@ -29,7 +29,7 @@
 //! There is a fifth that this module cannot solve, and it is written down here
 //! because it is invisible from the outside: **`NVMC` stalls the CPU.** An
 //! erase of one flash page takes about 85 ms during which the core does not
-//! execute, and MPSL cannot keep a connection alive through that. Phase 6
+//! execute, and MPSL cannot keep a connection alive through that. Provisioning
 //! writes the device record with `NVMC` directly. Until that moves onto
 //! `nrf_mpsl::Flash` — which schedules the write inside a timeslot — a
 //! provisioning run while a phone is connected will drop the connection.
@@ -99,7 +99,7 @@ pub fn yield_to_mpsl(irqs: &[interrupt::Interrupt]) {
 
 /// Low-frequency clock configuration, handed to MPSL at init.
 ///
-/// The Base Duo has a real 32.768 kHz crystal and phase 1 proved it runs, so
+/// The Base Duo has a real 32.768 kHz crystal that is known to run, so
 /// this says so. The alternative — the internal RC — drifts by a couple of
 /// hundred ppm, and BLE spends that drift on longer receive windows: the
 /// controller widens every one to cover the worst case it is told about. A
@@ -196,7 +196,7 @@ pub fn report_lfclk() {
 /// On the nRF52840 the `POWER` and `CLOCK` peripherals share one interrupt
 /// vector *and* one interrupt-enable register, with disjoint bits.
 /// `embassy-usb` normally binds the vector through `HardwareVbusDetect`, which
-/// is how every image before phase 8 learns that a cable was plugged in. MPSL
+/// is how the images without Bluetooth learn that a cable was plugged in. MPSL
 /// needs the same vector for the clock, and only one handler can be bound.
 ///
 /// # What happens if `POWER` is left to nobody
@@ -208,8 +208,8 @@ pub fn report_lfclk() {
 /// After a plain press of reset the word reads `0`. `USBPWRRDY` is latched
 /// from the moment the regulator comes up.
 ///
-/// Phases 1 to 7 never noticed, because `HardwareVbusDetect` clears those
-/// events. The first Bluetooth image bound the vector to MPSL's handler
+/// Images without Bluetooth never notice, because `HardwareVbusDetect` clears
+/// those events. The first Bluetooth image bound the vector to MPSL's handler
 /// alone, and the moment `mpsl_init` unmasked it the line was high with
 /// nothing to lower it — 841,653 handler entries in two seconds, at the
 /// lowest priority there is, so USB control transfers kept working while
@@ -553,8 +553,8 @@ where
 /// How many connections the host keeps state for.
 ///
 /// One. A phone connects to a modem; nothing in the RNode protocol has a
-/// second host in mind, and phase 8 step 3 has to decide what two of them even
-/// means before there is any point in paying for it.
+/// second host in mind, and what two of them would even mean has to be decided
+/// before there is any point in paying for it.
 pub const CONNECTIONS: usize = 1;
 
 /// L2CAP channels the host keeps state for.
@@ -646,7 +646,7 @@ pub mod fault {
 
 /// Where the controller's initialiser stops, when it stops.
 ///
-/// The one fact the phase 8 investigation never had was *where* `mpsl_init`
+/// The one fact a hang does not give up from outside is *where* `mpsl_init`
 /// spins. Everything else about the hang — that it is not a fault, not an
 /// assertion, not the executor, not the clock — was established by exclusion.
 /// This module gets the address.

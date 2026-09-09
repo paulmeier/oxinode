@@ -14,17 +14,17 @@
 //! with what it will do about it.
 //!
 //! That distinction is the whole of [`Protocol::set_frequency`]'s subtlety. The
-//! frequency phase 4 *commands* is 73 ppm above the one the host asked for —
-//! 67 kHz at 915 MHz, against a 100 Hz tolerance, or 670 times too far. The
-//! host must be told the frequency it asked for, and phase 4 keeping the wanted
-//! and commanded frequencies as separate fields is what makes that one line
-//! instead of a bug hunt.
+//! frequency the modem *commands* is 73 ppm above the one the host asked for
+//! — 67 kHz at 915 MHz, against a 100 Hz tolerance, or 670 times too far. The
+//! host must be told the frequency it asked for, and the config keeping the
+//! wanted and commanded frequencies as separate fields is what makes that one
+//! line instead of a bug hunt.
 //!
 //! # Invalid configurations
 //!
 //! A host is free to ask for a configuration this board cannot do — 868 MHz on
-//! a US antenna, or 22 dBm on a module rated for 20. Nothing here clamps, for
-//! phase 4's reason: a clamp is a lie the host cannot detect.
+//! a US antenna, or 22 dBm on a module rated for 20. Nothing here clamps: a
+//! clamp is a lie the host cannot detect.
 //!
 //! Instead the setter stores and echoes what was asked, and the radio simply
 //! does not come on. The host then finds a radio-state mismatch and reports
@@ -76,7 +76,7 @@ pub enum Action<'a> {
     /// that erased a flash page for each of them would need thirteen seconds
     /// to absorb one second of commands. The caller is expected to hold the
     /// change in memory and commit once the writes stop — see
-    /// `docs/phase-6-provisioning.md`.
+    /// `docs/architecture/provisioning.md`.
     Persist,
     /// The host asked the device to restart.
     Reset,
@@ -139,7 +139,7 @@ impl Default for Protocol {
 }
 
 impl Protocol {
-    /// A modem that has just booted: radio off, phase 4's default configuration
+    /// A modem that has just booted: radio off, the default configuration
     /// loaded, nothing detected yet.
     ///
     /// Off is the right starting state and not merely the cautious one. The
@@ -495,15 +495,15 @@ impl Protocol {
         }
     }
 
-    // ---- phase 12: changes from the panel ----------------------------------
+    // ---- changes from the panel --------------------------------------------
     //
     // The panel is a second controller, and the rule for when it may act is
-    // the caller's -- see `docs/phase-12-settings.md`. What is here is what
-    // acting *means*, and it means the same as it does for a host: a setting
-    // lands unvalidated, the radio is reprogrammed only through `ValidConfig`,
-    // and a configuration the radio cannot do leaves it off with the reason
-    // in `last_error`. None of it answers on the wire, because by the rule
-    // nobody is on the wire when it happens.
+    // the caller's -- see `docs/architecture/interface.md`. What is here is
+    // what acting *means*, and it means the same as it does for a host: a
+    // setting lands unvalidated, the radio is reprogrammed only through
+    // `ValidConfig`, and a configuration the radio cannot do leaves it off
+    // with the reason in `last_error`. None of it answers on the wire, because
+    // by the rule nobody is on the wire when it happens.
 
     /// Bring the radio up on the current configuration, or refuse: the
     /// same steps as `CMD_RADIO_STATE` on, without the reply.
@@ -572,8 +572,8 @@ impl Protocol {
     /// `Reset Config` from the panel: back to what the board boots with.
     ///
     /// With a stored configuration that is TNC mode, resumed exactly as at
-    /// boot -- radio on. Without one it is phase 4's default, with the radio
-    /// left in whatever state it was: on stays on, reprogrammed.
+    /// boot -- radio on. Without one it is the default, with the radio left
+    /// in whatever state it was: on stays on, reprogrammed.
     pub fn reset_from_panel(&mut self) -> Action<'static> {
         if self.is_tnc() {
             return self.resume_stored_config();
@@ -602,11 +602,11 @@ impl Protocol {
 
     /// The **wanted** frequency, not the commanded one.
     ///
-    /// Phase 4 commands 73 ppm high to cancel the module's reference error. At
-    /// 915 MHz that is 67 kHz, and the host rejects a mismatch beyond 100 Hz —
-    /// so reporting the commanded frequency would make every interface fail to
-    /// come online, with a message pointing at the frequency the operator had
-    /// configured correctly.
+    /// The modem commands 73 ppm high to cancel the module's reference error.
+    /// At 915 MHz that is 67 kHz, and the host rejects a mismatch beyond
+    /// 100 Hz — so reporting the commanded frequency would make every
+    /// interface fail to come online, with a message pointing at the frequency
+    /// the operator had configured correctly.
     fn report_frequency<S: Sink>(&self, out: &mut S) {
         out.frame(cmd::FREQUENCY, &self.config.frequency_hz.to_be_bytes());
     }
@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(echoed as f32 / 100.0, 2.5);
     }
 
-    // ---- phase 6: provisioning ------------------------------------------
+    // ---- provisioning ---------------------------------------------------
 
     /// `rnodeconf`'s probe is twice as long as `rnsd`'s, and an unprovisioned
     /// board answers five of the eight. The three it does not answer are
@@ -1409,9 +1409,9 @@ mod tests {
     }
 
     /// The whole `rnodeconf --rom` bootstrap, as bytes, followed by the
-    /// `download_eeprom` it validates with. This is the phase in one test: if
-    /// it passes, a real host provisioning a real board gets a device it calls
-    /// provisioned.
+    /// `download_eeprom` it validates with. This is provisioning in one test:
+    /// if it passes, a real host provisioning a real board gets a device it
+    /// calls provisioned.
     #[test]
     fn provisioning_over_the_wire_produces_an_eeprom_the_host_accepts() {
         let mut p = Protocol::new();
@@ -1683,7 +1683,7 @@ mod tests {
         assert_eq!(p.config(), &before);
     }
 
-    // ---- phase 12: changes from the panel ----------------------------------
+    // ---- changes from the panel --------------------------------------------
 
     /// A panel edit with the radio on reprograms it, and what a host would
     /// read back afterwards is the new value.
@@ -1845,7 +1845,7 @@ mod tests {
         assert_eq!(on.config(), &DEFAULT);
     }
 
-    // ---- phase 7: the display --------------------------------------------
+    // ---- the display -----------------------------------------------------
 
     /// The whole `display_image` sequence the host writes: enable, then
     /// sixty-four rows. It must not repaint per row -- the host sends them in

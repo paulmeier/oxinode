@@ -18,7 +18,7 @@
 //!   MCU.
 //! * [`lora`] — modulation parameters, and how long a packet takes to send.
 //! * [`config`] — the settable parameters, their validation, and the chip's
-//!   encodings. Phase 4's seam: the only thing the modem will accept.
+//!   encodings. The modem's seam: the only thing it will accept.
 //! * [`reference`] — the module's 73 ppm frequency error, and the arithmetic
 //!   that cancels it.
 //! * [`csma`] — listening before transmitting: when the channel counts as

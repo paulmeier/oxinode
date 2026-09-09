@@ -1,0 +1,87 @@
+site_name: oxinode
+site_description: RNode-compatible LoRa modem firmware in Rust for the muzi.works Base Duo
+site_url: https://paulmeier.github.io/oxinode/
+repo_url: https://github.com/paulmeier/oxinode
+repo_name: paulmeier/oxinode
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Paul Meier. Released under the Reticulum License.
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Flashing: getting-started/flashing.md
+      - Using it with Reticulum: getting-started/reticulum.md
+      - The panel: getting-started/panel.md
+  - Hardware:
+      - The board: hardware/board.md
+      - Memory layout: hardware/memory-layout.md
+      - The radio: hardware/radio.md
+      - The display: hardware/display.md
+      - Pad and mode switch: hardware/pad-and-switch.md
+      - GPS: hardware/gps.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Firmware images: architecture/images.md
+      - The modem: architecture/modem.md
+      - On the air: architecture/air.md
+      - The RNode protocol: architecture/rnode-protocol.md
+      - Provisioning and storage: architecture/provisioning.md
+      - Bluetooth: architecture/bluetooth.md
+      - The interface: architecture/interface.md
+  - Development:
+      - Local setup: development/setup.md
+      - Building: development/building.md
+      - Testing: development/testing.md
+      - The simulator: development/simulator.md
+      - Debugging without a probe: development/debugging.md
+      - Releasing: development/releasing.md
+      - Contributing: development/contributing.md
+  - Reference:
+      - Host tools: reference/tools.md
+      - RNode commands: reference/commands.md
+      - Known limitations: reference/limitations.md
+  - License: license.md

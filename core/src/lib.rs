@@ -5,17 +5,17 @@
 //! test harness on the board anyway. So anything that is *decidable without a
 //! peripheral* lives here instead, where `cargo test` can reach it on the host.
 //!
-//! Today that is a small pile -- phases 0-2 are mostly register pokes, which are
-//! not meaningfully testable off-target. The seam matters more than the current
-//! contents: the RNode/KISS layer in phase 5 is almost entirely pure byte
-//! manipulation, and that is where the bugs will be.
+//! The RNode/KISS layer, the radio configuration, provisioning, the screens
+//! and the GPS parser all live here because they are pure byte and value
+//! manipulation, and that is where the bugs are. Register pokes stay in the
+//! firmware crate, since they are not meaningfully testable off-target.
 //!
 //! Nothing in here may depend on `embassy-*`, `cortex-m`, or any specific chip.
 //!
 //! The on-device interface is not here either. It is [`monopanel`], a crate
 //! with nothing of oxinode in it; what is here is what oxinode supplies to it
 //! -- its screens and their content, its actions, its editor -- and the
-//! SH1107 framebuffer it draws on. See `docs/phase-13-interface-crate.md`.
+//! SH1107 framebuffer it draws on. See `docs/architecture/interface.md`.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

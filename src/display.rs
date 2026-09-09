@@ -1,4 +1,4 @@
-//! The I²C link to the Super IO board's OLED (phase 7, step 1).
+//! The I²C link to the Super IO board's OLED.
 //!
 //! Three pins and a rail. `SDA` and `SCL` reach the panel through the Base
 //! Duo's castellations, and **P0.23 enables a 12 V boost converter** that the
@@ -6,17 +6,17 @@
 //! bus and shows nothing, which is the most confusing failure this board has to
 //! offer.
 //!
-//! # What can be proved at this step
+//! # What can be proved here
 //!
 //! Unlike the radio, this bus *does* reach copper, and unlike the radio the
 //! device at the far end has an address rather than a chip ID. So the evidence
-//! available here is better than phase 3's:
+//! available here is better than the radio's:
 //!
 //! * the peripheral's own `PSEL` registers say which pins it claimed —
 //!   [`check_pin_selection`], the same trick `radio` uses;
 //! * an address scan says what is actually out there, and how many of them.
 //!   Nothing about the display's *geometry* can be discovered this way; see
-//!   `docs/phase-7-display.md` for why that needs a person looking at it.
+//!   `docs/hardware/display.md` for why that needs a person looking at it.
 
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::interrupt::typelevel::Binding;

@@ -31,9 +31,9 @@ pub const STARTUP_WINDOW_US: u32 = 5_000;
 /// How long the LR1121 on this board actually takes from NRESET release to
 /// BUSY low.
 ///
-/// **Measured, not assumed, and not what the plan expected.** The phase-3 plan
-/// said "milliseconds", which is the figure the SX126x family trains you to
-/// expect; a 100 ms timeout built on that assumption failed on hardware. Eight
+/// **Measured, not assumed.** The SX126x family trains you to expect
+/// "milliseconds", and this part takes 191 ms; a 100 ms timeout built on that
+/// assumption failed on hardware. Eight
 /// consecutive resets came back at 191101, 191162, 191131, 191162, 191101,
 /// 191131, 191162 and 191131 µs — a spread of 61 µs, which is two ticks of the
 /// 32.768 kHz clock doing the measuring. So this is deterministic to the limit
@@ -67,7 +67,7 @@ const _: () = assert!(
 // The measurement is the part that came from hardware rather than from an
 // expectation, so it gets a guard of its own: a 100 ms timeout looked entirely
 // reasonable right up until the board disagreed, and the way this regresses is
-// someone "correcting" the constant back towards the plan's original
+// someone "correcting" the constant back towards the original assumption of
 // "milliseconds".
 const _: () = assert!(
     STARTUP_MEASURED_US > 100_000,
