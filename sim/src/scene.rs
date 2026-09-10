@@ -127,6 +127,7 @@ pub fn populated() -> State {
         },
         system: System {
             version: "0.0.0",
+            build: "0000000",
             serial: Some(*b"0123456789ABCDEF"),
             identity: Identity::Signed,
             free_ram: Some(126_976),
