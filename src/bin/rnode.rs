@@ -100,7 +100,7 @@ use oxinode::gps;
 use oxinode::modem::{CsmaReport, Modem, RxReport, TxOutcome, TxReport};
 use oxinode::nus;
 use oxinode::pad;
-use oxinode::store::Storage;
+use oxinode::store::{Flash, RecordFlash, Storage};
 use oxinode::{boot, bringup, radio, usb_log};
 use oxinode_core::ble as interop;
 use oxinode_core::edit::Editor;
@@ -222,7 +222,7 @@ const DEFAULT_VALID: ValidConfig = match ValidConfig::new(DEFAULT) {
 ///
 /// `rnodeconf` provisions a board with 155 single-byte writes six milliseconds
 /// apart. Committing each of them would mean 155 page erases — thirteen
-/// seconds of stalled CPU to absorb one second of commands — so the image is
+/// seconds of flash work to absorb one second of commands — so the image is
 /// held in RAM and written out once the writes stop.
 ///
 /// The cost is that this much of a provisioning run is lost if the board is
@@ -341,16 +341,6 @@ async fn main(_spawner: Spawner) {
     // charger rows and the title bar's percentage.
     let mut battery = Sense::new(p.SAADC, Irqs, p.P0_31, p.P1_02, p.P0_27);
 
-    // Read before anything else touches it. What comes back is either a record
-    // this firmware wrote, or the state of a board nobody has provisioned --
-    // there is no third answer; see `oxinode::store`.
-    let mut storage = Storage::new(p.NVMC);
-    let device = storage.load();
-    let mcu_id = board::device_id();
-    // The phones this board already knows, handed to the host stack at boot.
-    // Copied out because `device` moves into the modem loop.
-    let stored_bonds = device.bonds;
-
     let mut boost = Boost::new(p.P0_23);
     static TWIM_RAM: StaticCell<[u8; 256]> = StaticCell::new();
     let mut i2c = Some(display::new_i2c(
@@ -391,6 +381,24 @@ async fn main(_spawner: Spawner) {
     let stack_parts = ble::bring_up(mpsl_p, sdc_p, p.RNG, Irqs, ble::LfSource::Crystal);
     ble::stall::disarm();
     BLE_UP.store(stack_parts.is_some(), Ordering::Relaxed);
+
+    // The device record, read before anything else touches it. What comes
+    // back is either a record this firmware wrote, or the state of a board
+    // nobody has provisioned -- there is no third answer; see `oxinode::store`.
+    //
+    // Which way it is *written* depends on what just happened: with the
+    // controller up, through its flash scheduler, so that a provisioning run
+    // does not drop a connected phone; without it, through the NVMC directly,
+    // which stalls the CPU but has nothing left to stall.
+    let mut storage = Storage::new(match &stack_parts {
+        Some((mpsl, _)) => Flash::scheduled(mpsl, p.NVMC),
+        None => Flash::direct(p.NVMC),
+    });
+    let device = storage.load();
+    let mcu_id = board::device_id();
+    // The phones this board already knows, handed to the host stack at boot.
+    // Copied out because `device` moves into the modem loop.
+    let stored_bonds = device.bonds;
 
     // One pipe in each direction between the phone and the modem loop. See
     // the module docs: Bluetooth is a source and a sink of bytes and nothing
@@ -807,7 +815,7 @@ async fn run<'d, D, S, B>(
     ble_out: &Writer<'_, NoopRawMutex, BLE_OUT>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
-    storage: &mut Storage<'_>,
+    storage: &mut Storage<Flash<'_>>,
     device: DeviceStore,
     mcu_id: u64,
     mut panel: Option<&mut Panel<'_>>,
@@ -892,7 +900,7 @@ where
             // Anything unwritten goes to flash first. A reflash is exactly
             // when losing a provisioning would be least welcome, and the
             // record survives the flash itself -- see `oxinode::store`.
-            commit(storage, &protocol);
+            commit(storage, &protocol).await;
             boot::reboot_to_bootloader();
         }
 
@@ -944,7 +952,7 @@ where
                                     Timer::after(Duration::from_millis(200)).await;
                                 }
                             }
-                            commit(storage, &protocol);
+                            commit(storage, &protocol).await;
                             boot::reboot();
                         }
                         // Force the next pass to redraw rather than waiting
@@ -1113,10 +1121,10 @@ where
         }
 
         // A phone that has just paired goes into the record with everything
-        // else, on the same timer. The write is one page erase, about 85 ms
-        // of stalled CPU, inside a live connection: iOS's supervision timeout
-        // is measured in seconds, so the link survives it. What would not
-        // survive is a reset before it is written -- see `nus::take_new_bond`.
+        // else, on the same timer. The write goes through the controller's
+        // flash scheduler, so the connection that created the bond survives
+        // storing it. What would not survive is a reset before it is written
+        // -- see `nus::take_new_bond`.
         if let Some(bond) = nus::take_new_bond() {
             protocol.store_mut().add_bond(bond);
             dirty_since = Some(Instant::now());
@@ -1127,10 +1135,12 @@ where
         // Write the EEPROM out once it has stopped changing. Checked on every
         // iteration rather than on the housekeeping tick, because during a
         // provisioning run there are host bytes arriving and the tick never
-        // fires.
+        // fires. The write is awaited here, so bytes that arrive while it is
+        // in flight wait in the pipe rather than restarting the timer, and a
+        // second write cannot be queued before the first has landed.
         if let Some(since) = dirty_since {
             if since.elapsed() > PERSIST_IDLE {
-                commit(storage, &protocol);
+                commit(storage, &protocol).await;
                 dirty_since = None;
             }
         }
@@ -1430,7 +1440,7 @@ async fn serve_without_a_radio<'d, D>(
     ble_out: &Writer<'_, NoopRawMutex, BLE_OUT>,
     control: &ControlChanged<'d>,
     led: &mut Led<'_>,
-    storage: &mut Storage<'_>,
+    storage: &mut Storage<Flash<'_>>,
     device: DeviceStore,
     mcu_id: u64,
     mut panel: Option<&mut Panel<'_>>,
@@ -1457,7 +1467,7 @@ where
 
     loop {
         if usb_log::is_bootloader_touch_tx(tx, control) {
-            commit(storage, &protocol);
+            commit(storage, &protocol).await;
             boot::reboot_to_bootloader();
         }
         // Fast blink: alive, enumerated, no radio.
@@ -1494,7 +1504,7 @@ where
                                     Timer::after(Duration::from_millis(200)).await;
                                 }
                             }
-                            commit(storage, &protocol);
+                            commit(storage, &protocol).await;
                             boot::reboot();
                         }
                         // The display works whether or not the radio does, and
@@ -1514,7 +1524,7 @@ where
         }
         if let Some(since) = dirty_since {
             if since.elapsed() > PERSIST_IDLE {
-                commit(storage, &protocol);
+                commit(storage, &protocol).await;
                 dirty_since = None;
             }
         }
@@ -1726,7 +1736,7 @@ async fn perform(
     action: ui::Action,
     ui: &mut Ui,
     panel: Option<&mut Panel<'_>>,
-    storage: &mut Storage<'_>,
+    storage: &mut Storage<Flash<'_>>,
     protocol: &mut Protocol,
     host: Host,
 ) -> PanelChange {
@@ -1758,12 +1768,12 @@ async fn perform(
         // be least welcome.
         ui::Action::Reboot => {
             defmt::info!("ui: reboot");
-            commit(storage, protocol);
+            commit(storage, protocol).await;
             boot::reboot();
         }
         ui::Action::Bootloader => {
             defmt::info!("ui: bootloader");
-            commit(storage, protocol);
+            commit(storage, protocol).await;
             boot::reboot_to_bootloader();
         }
         // Nobody has the radio, or this would have been the notice above.
@@ -1959,8 +1969,13 @@ fn identity_of(protocol: &Protocol) -> Identity {
 /// unchanged. What matters is that the log says which of the two happened,
 /// because "the provisioning did not stick" and "the flash write failed" look
 /// identical from the other end of the serial port.
-fn commit(storage: &mut Storage<'_>, protocol: &Protocol) {
-    if let Err(e) = storage.save(protocol.store()) {
+///
+/// Awaited to completion wherever it is called, and never inside a `select`:
+/// with the controller up the write is scheduled around the radio, and the
+/// loop must not look at the record, queue a second write, or reboot until
+/// the first has landed.
+async fn commit<F: RecordFlash>(storage: &mut Storage<F>, protocol: &Protocol) {
+    if let Err(e) = storage.save(protocol.store()).await {
         defmt::error!("store: could not write the device record: {}", e);
     }
 }

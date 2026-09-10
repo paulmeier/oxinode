@@ -34,12 +34,6 @@ has to rediscover it.
   preamble remains for the receiver to sync. Two remedies (a longer preamble
   than the host's eight symbols, or sensing from inside continuous receive)
   are described on [On the air](../architecture/air.md).
-- **Flash writes stall the Bluetooth controller.** The device record is
-  written with the NVMC directly, and a page erase stalls the CPU for about
-  85 ms, which the link layer cannot hold a connection through. A
-  provisioning run with a phone connected drops the connection. The fix is
-  to write through the controller's own flash scheduler, which fits the
-  write into a timeslot.
 - **Contention-window bands and a noise-floor estimate**, the two refinements
   of the stock carrier-sense arrangement not implemented.
 - **`CMD_DISP_BLNK`, `CMD_DISP_ROT`, `CMD_DISP_RCND`, `CMD_BLINK`,

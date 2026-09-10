@@ -129,8 +129,26 @@ Bluetooth screen clears them. See [Bluetooth](bluetooth.md).
 
 ## Flash writes and the Bluetooth controller
 
-The record is written with the NVMC directly, and a page erase stalls the CPU
-for about 85 ms, which the Bluetooth controller cannot hold a connection
-through. A provisioning run with a phone connected will drop the connection.
-Moving the write onto the controller's own flash scheduler, which fits it into
-a timeslot, is an open item; see [Known limitations](../reference/limitations.md).
+Erasing a page of the nRF52840's flash stalls the CPU for about 85 ms, and the
+Bluetooth controller cannot hold a connection through that. So while the
+controller is up the record is not written with the NVMC directly: it goes
+through the controller's own flash scheduler (`nrf_mpsl::Flash`), which erases
+the page in 10 ms partial slices and writes a few words at a time, each inside
+a timeslot the controller fits between its radio events. A provisioning run,
+or a bond being stored, leaves a connected phone connected. The write takes
+longer end to end -- a few hundred milliseconds with a connection up -- and a
+timeslot the scheduler could not fit comes back as an error rather than a
+stall, which the firmware answers by starting the write over, up to four
+times.
+
+The two paths sit behind one trait in the firmware's `store` module. The
+record's layout and the decision *what* to write stay in `oxinode-core`, which
+is host-tested; only the last step differs. An image without a controller, or
+the product image on a boot where the controller failed to start, drives the
+NVMC directly, which stalls the CPU but has nothing left to stall. The boot log
+says which: `writes via mpsl` or `writes via nvmc`.
+
+The write is awaited to completion by the modem loop that owns the record, so
+bytes that arrive while it is in flight wait in the pipe rather than restart
+the 250 ms timer, and a reset requested by the host does not happen until the
+record has landed.

@@ -26,13 +26,14 @@
 //!    does, stops the clocks the link layer keeps its timing with.
 //! 4. **`CLOCK_POWER`.** See [`Vbus`].
 //!
-//! There is a fifth that this module cannot solve, and it is written down here
-//! because it is invisible from the outside: **`NVMC` stalls the CPU.** An
-//! erase of one flash page takes about 85 ms during which the core does not
-//! execute, and MPSL cannot keep a connection alive through that. Provisioning
-//! writes the device record with `NVMC` directly. Until that moves onto
-//! `nrf_mpsl::Flash` — which schedules the write inside a timeslot — a
-//! provisioning run while a phone is connected will drop the connection.
+//! There is a fifth, and it is invisible from the outside: **`NVMC` stalls
+//! the CPU.** An erase of one flash page takes about 85 ms during which the
+//! core does not execute, and MPSL cannot keep a connection alive through
+//! that. So the product image never drives the NVMC directly while the
+//! controller is up: the device record is written through `nrf_mpsl::Flash`,
+//! which erases in 10 ms slices and writes a few words at a time, each inside
+//! a timeslot the controller fits between its radio events. That is why
+//! [`bring_up`] starts MPSL with timeslot support; see `oxinode::store`.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -486,6 +487,9 @@ pub fn report_versions() {
     }
 }
 
+/// Timeslot sessions MPSL is given room for: one, for the flash scheduler.
+const TIMESLOT_SESSIONS: usize = 1;
+
 /// Start MPSL and the SoftDevice Controller, or say why not.
 ///
 /// Straight-line and synchronous: there is nothing to await, and nothing that
@@ -520,7 +524,16 @@ where
 {
     defmt::info!("mpsl: init on {}", source);
     static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
-    let mpsl = match MultiprotocolServiceLayer::new::<T, I>(mpsl_p, irqs, lfclk_config(source)) {
+    // With timeslot support, which is what lets the device record be written
+    // without stalling the link layer -- see `oxinode::store`. One session:
+    // the flash scheduler opens one per operation and there is one flash.
+    static SESSIONS: StaticCell<mpsl::SessionMem<TIMESLOT_SESSIONS>> = StaticCell::new();
+    let mpsl = match MultiprotocolServiceLayer::with_timeslots::<T, I, TIMESLOT_SESSIONS>(
+        mpsl_p,
+        irqs,
+        lfclk_config(source),
+        SESSIONS.init(mpsl::SessionMem::new()),
+    ) {
         Ok(mpsl) => MPSL.init(mpsl),
         Err(e) => {
             defmt::error!("mpsl: would not start: {}", e);
