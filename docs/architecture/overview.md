@@ -90,7 +90,9 @@ task is a place bytes or gestures come from or go to:
 Who gets a frame nobody asked for (a received packet, a modem error) is one
 rule: **a connected phone is the host.** Answers to commands always go back
 the way the command came; unsolicited frames go to the phone while there is
-one, and to USB otherwise.
+one, and to USB otherwise. The rule is one function in `oxinode-core`
+(`rnode::hosts`), asked by both paths a heard packet can come up: the idle
+receive, and the carrier-sense wait before a transmission.
 
 ## Boot
 

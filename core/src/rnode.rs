@@ -6,6 +6,7 @@
 //! * [`command`] — the command set, and which frames the host un-escapes.
 //! * [`protocol`] — the conversation: commands in, responses and actions out.
 //! * [`outbox`] — responses waiting for a transport, whole frames or nothing.
+//! * [`hosts`] — an outbox per transport, and which one a frame goes to.
 //!
 //! # Provenance
 //!
@@ -26,6 +27,7 @@ pub mod air;
 pub mod command;
 pub mod display;
 pub mod eeprom;
+pub mod hosts;
 pub mod kiss;
 pub mod outbox;
 pub mod protocol;

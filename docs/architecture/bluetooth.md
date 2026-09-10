@@ -148,6 +148,12 @@ interrupt.
 A connected phone is the host. Answers to commands go back the way the
 command came, so `rnodeconf` over USB works with a phone on the line;
 unsolicited frames go to the phone while there is one, and to USB otherwise.
+That second half is one function in `oxinode-core` (`rnode::hosts`), and
+both places a heard packet comes from consult it: the modem loop's receive
+while idle, and the carrier-sense wait before a transmission, which is spent
+in receive and hands up what it hears. Who asked for the transmission is not
+an input to it, so a phone gets the packet even when a USB host was
+transmitting at that moment.
 The modem loop never waits on the phone: its Bluetooth outbox drains with
 `try_write`, and a phone that has gone gets its frames dropped and counted
 rather than a modem that stops servicing the radio.
