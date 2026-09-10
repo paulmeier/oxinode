@@ -98,13 +98,13 @@ schematic and the variant disagree, the schematic wins.
 | GPS load switch (`GPS_EN`) | P1.01 | **active high**; gates the switched 3V3 rail the module lives on, 500 mA |
 | GPS UART | P0.20 / P0.19 | the module transmits on **P0.20** (nRF52840 `RXD`) and receives on P0.19; 9600 baud, 8N1 |
 | Battery sense | P0.31 (`AIN7`) | the cell through 806 kΩ / 1.5 MΩ, ratio 0.65048; SAADC at gain 1/6, 12-bit |
-| Charger status | P1.02 | BQ25185 `STAT`, open drain, **low while charging**; internal pull-up |
+| Charger status | P1.02 | BQ25185 `STAT2`, open drain, **low while charging**; 100 kΩ pull-up on the board plus the internal one; also drives the red LED |
+| Charger fault | P0.27 | BQ25185 `STAT1`, open drain, **low on a fault**; internal pull-up only |
 | SWDIO / SWDCLK | — | test pads TP1 / TP2, no header |
 
 Out of scope, recorded so nobody has to re-derive it: a second I²C bus on
 P0.04/P0.06 carrying the IMU, an RX8130CE RTC at `0x32` and the Qwiic/STEMMA
-QT connector (5.1 kΩ pull-ups on board), and the BQ25185 charger's fault
-output on P0.27.
+QT connector (5.1 kΩ pull-ups on board).
 
 Everything above the Base Duo itself (pad, buzzer, GPS, OLED, mode switch)
 lives on the Super IO and reaches it through 25 castellations carrying VBAT+,
@@ -183,8 +183,9 @@ explicit baud rate.
 SWDIO and SWDCLK come out to test pads TP1/TP2. If the no-probe constraint
 ever becomes expensive enough, it is solderable rather than impossible.
 
-**The red LED is the charger's.** It is wired to the BQ25185's status output,
-not to the MCU. A red glow during bring-up means charging, not a fault.
+**The red LED is the charger's.** It hangs off the BQ25185's `STAT2` output,
+the same net the MCU reads on P1.02, not off a GPIO. A red glow means
+charging, not a fault.
 
 ## Battery
 
@@ -200,8 +201,25 @@ reads high), which is why the voltage is shown beside it. Below 2.5 V at the
 cell the reading is reported as unknown rather than as a flat battery: with no
 cell fitted the pin reads near zero.
 
-The charger's `STAT` line on P1.02 is read with the chip's pull-up; low means
-charging.
+One conversion is 1.35 mV at the cell and wanders by a few counts, which near
+the top of the table is a percentage point, so the ADC averages sixteen
+conversions per sample and the core averages samples over a few seconds and
+holds the shown value until the average has moved ten millivolts: the screen
+shows one number, not two.
+
+The charger's two status lines are read together with the chip's pull-ups,
+because `STAT2` alone cannot tell charging from a latched-off fault. From the
+BQ25185's table: `STAT2` low is charging; `STAT1` low is a recoverable fault
+(input over-voltage, cell too hot or cold, chip too hot); both low is a fault
+the chip stays off on until the input is cycled (safety timer, cell
+over-current); both high is done, sleeping or disabled, which is *full*. That
+table is defined with an input present. With the cable out the chip is in
+battery-only mode, which the table does not cover, and on this board it holds
+`STAT2` low there, the "charging" row, so the pins alone say a board running
+on its cell is charging. The nRF52840's own USB regulator status decides
+first: no input is *unplugged* whatever the pins say. Every change is logged
+with the raw lines, so what the screen says can be checked against the cable
+and the red LED.
 
 ## Provenance
 

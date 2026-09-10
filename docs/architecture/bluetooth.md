@@ -152,9 +152,9 @@ The modem loop never waits on the phone: its Bluetooth outbox drains with
 `try_write`, and a phone that has gone gets its frames dropped and counted
 rather than a modem that stops servicing the radio.
 
-The title bar shows `BT` while advertising and `BT*` with a phone connected;
-the Bluetooth screen shows the name, the passkey during a pairing, and the
-bond count. *Forget Phones* clears the stored bonds and raises a signal the
+The Bluetooth screen shows the state (`absent`, `advertising`, `connected`),
+the name, the passkey during a pairing, and the bond count; nothing about
+Bluetooth is on the other screens' title bar. *Forget Phones* clears the stored bonds and raises a signal the
 Bluetooth task answers between connections by removing every bond the host
 stack holds; a phone connected at the time keeps its session and is forgotten
 when it goes.

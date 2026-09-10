@@ -42,10 +42,14 @@ if [[ "$*" == *"dfu serial"* ]]; then
     [[ -f "$done_file" ]] && n="$(cat "$done_file")"
     n=$((n + 1))
     echo "$n" > "$done_file"
+    # The real tool exits 0 either way: a failed transfer is reported only in
+    # its text, and success only by its last line. The stub does the same, so
+    # the script is tested against the tool it actually drives.
     if (( n <= fail )); then
-        echo "Target is not in DFU mode." >&2
-        exit 1
+        echo "Failed to upgrade target. Error is: Target is not in DFU mode."
+        exit 0
     fi
+    echo "Device programmed."
 fi
 exit 0
 """

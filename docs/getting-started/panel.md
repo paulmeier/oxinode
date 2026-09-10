@@ -19,17 +19,21 @@ do not repeat: an action chosen once is chosen once. A notice closes on any
 key.
 
 The bottom of every screen is a strip of five icons saying where you are; the
-top is a title bar with the screen's name, the battery percentage, and the
-Bluetooth state (`BT` advertising, `BT*` connected). A screen with more lines
+top is a title bar with the screen's name, the battery percentage on the left
+and the board's name on the right: the four hex digits that end the name it
+advertises, so two boards on a table can be told apart. A screen with more lines
 than fit shows a scrollbar. The panel goes to sleep after a minute without a
 gesture, and the next gesture wakes it (and is otherwise swallowed).
 
 ## The screens
 
-**Home.** Which host has the line (`USB`, `BT`, or `none`), whether anything
+**Home.** Which host has the line (`USB`, `Bluetooth`, or `none`), whether anything
 has been said in the last ten seconds, what the radio is doing, packets in and
-out, the last packet's RSSI and SNR, uptime, and the battery with the
-charger's state. Menu: *Sleep Screen*, *Redraw*.
+out, the last packet's RSSI and SNR, uptime, the battery, and what the charger
+is doing (`charging`, `full`, `unplugged`, `fault`, `latched off`). The
+battery reading is averaged over a few seconds and only moves when the cell
+has, so it does not flicker between two numbers. Menu: *Sleep Screen*,
+*Redraw*.
 
 **Radio.** The current configuration, which is exactly what a host reads
 back: frequency (and the frequency the chip is actually tuned to after the

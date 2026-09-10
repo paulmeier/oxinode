@@ -121,6 +121,21 @@ pub fn nfc_pins_are_gpio() -> bool {
 /// this word either; the log line is there to prove both, every boot.
 ///
 /// `None` when the field holds a reserved encoding.
+/// Whether there is power on the USB connector, from the chip's own USB
+/// regulator status. The Base Duo's solar input joins the same net through
+/// a diode, so this is "any input" as far as the charger is concerned.
+///
+/// A plain read of `POWER.USBREGSTATUS`: nothing has to own the peripheral
+/// for it, and the interrupt side of VBUS detection, which the USB stack
+/// does own, is untouched. Read once per redraw, for the charger's state.
+pub fn usb_power_present() -> bool {
+    const USBREGSTATUS: *const u32 = 0x4000_0438 as *const u32;
+    // SAFETY: a memory-mapped, read-only status register of the POWER
+    // peripheral, at the address the nRF52840 product specification gives.
+    let status = unsafe { core::ptr::read_volatile(USBREGSTATUS) };
+    status & 1 != 0
+}
+
 pub fn regulator_decivolts() -> Option<u8> {
     match embassy_nrf::pac::UICR.regout0().read().0 & 0b111 {
         0 => Some(18),

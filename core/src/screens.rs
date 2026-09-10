@@ -129,8 +129,8 @@ pub struct Home {
     pub uptime_s: Option<u32>,
     /// The cell, if there is one to read.
     pub battery: Option<battery::Reading>,
-    /// The charger's status line.
-    pub charging: bool,
+    /// What the charger says it is doing.
+    pub charger: battery::Charger,
 }
 
 /// What [`Screen::Radio`] knows: the configuration, and whether it took.
@@ -233,6 +233,10 @@ impl Default for System {
 /// Everything the five screens know between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct State {
+    /// The four hex digits that name the board: the suffix of the name it
+    /// advertises, which is how a phone lists it. Known from the first
+    /// moment, which is why it is not on the Bluetooth screen's `name`.
+    pub name: Option<[u8; 4]>,
     pub home: Home,
     pub radio: Radio,
     pub bluetooth: BluetoothScreen,
@@ -502,14 +506,7 @@ impl Home {
             }
         }
         out.row("Battery", v.as_str());
-        out.row(
-            "Charger",
-            if self.charging {
-                "charging"
-            } else {
-                "not charging"
-            },
-        );
+        out.row("Charger", self.charger.word());
     }
 }
 
@@ -818,17 +815,6 @@ impl Lock {
     }
 }
 
-/// What goes in the title bar's right corner: nothing without a stack, `BT`
-/// while advertising, `BT*` with a phone on the line -- as the status page
-/// had it.
-pub const fn badge(link: Link) -> &'static str {
-    match link {
-        Link::Absent => "",
-        Link::Advertising => "BT",
-        Link::Connected => "BT*",
-    }
-}
-
 /// Draw the pairing box over the content: a filled panel with the six digits
 /// knocked out of it, big enough to read across a table.
 ///
@@ -861,7 +847,10 @@ pub fn passkey_box(canvas: &mut impl Canvas, key: u32) {
 ///
 /// This is the one composition the firmware and the simulator share, on top
 /// of [`monopanel::page`]. The title bar's corners are the battery and the
-/// Bluetooth badge, which are the two things worth seeing on every screen.
+/// board's name, which are the two things worth seeing on every screen: the
+/// one says how long it will last, the other says which board this is when
+/// there are several on the table. What Bluetooth is doing is on the
+/// Bluetooth screen and nowhere else.
 /// Any canvas will do: the board's frame, or a bitmap of another size.
 pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
     let mut lines = Lines::new();
@@ -879,13 +868,11 @@ pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
     if let Some(cell) = state.home.battery {
         let _ = write!(left, "{}%", cell.percent);
     }
-    page(
-        canvas,
-        nav,
-        left.as_str(),
-        badge(state.bluetooth.link),
-        &strs[..lines.len()],
-    );
+    let name = match &state.name {
+        Some(name) => core::str::from_utf8(name).unwrap_or("?"),
+        None => "",
+    };
+    page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
     if let Some(key) = state.bluetooth.passkey {
         passkey_box(canvas, key);
     }
@@ -900,6 +887,7 @@ mod tests {
     /// A board mid-session: every field known, every option `Some`.
     fn populated() -> State {
         State {
+            name: Some(*b"7F23"),
             home: Home {
                 host: Host::Usb,
                 talking: true,
@@ -913,7 +901,7 @@ mod tests {
                     millivolts: 4_020,
                     percent: 91,
                 }),
-                charging: true,
+                charger: battery::Charger::Charging,
             },
             radio: Radio {
                 config: RadioConfig {
@@ -1211,7 +1199,7 @@ mod tests {
             ("snr", |s| s.home.last_snr_quarter_db = Some(-2)),
             ("uptime", |s| s.home.uptime_s = Some(90_000)),
             ("battery", |s| s.home.battery = None),
-            ("charging", |s| s.home.charging = false),
+            ("charger", |s| s.home.charger = battery::Charger::Full),
             ("frequency", |s| s.radio.config.frequency_hz = 916_000_000),
             ("bandwidth", |s| s.radio.config.bandwidth_hz = 250_000),
             ("sf", |s| s.radio.config.spreading_factor = 9),
@@ -1393,9 +1381,13 @@ mod tests {
         }
     }
 
-    /// The title bar carries the battery and the badge, and only when known.
+    /// The title bar carries the battery and the board's name, and only
+    /// when known. What Bluetooth is doing is not in it: that is the
+    /// Bluetooth screen's, and a badge that changed with every phone that
+    /// came and went was the one thing on the bar nobody needed on every
+    /// screen.
     #[test]
-    fn the_title_bar_corners_are_the_battery_and_the_badge() {
+    fn the_title_bar_corners_are_the_battery_and_the_name() {
         let mut bare = State::default();
         let mut with = populated();
         with.bluetooth.link = Link::Connected;
@@ -1404,7 +1396,7 @@ mod tests {
         monopanel::title_bar(&mut chrome_bare, "", Screen::Home.title(), "");
         let mut chrome_with = Frame::new();
         chrome_with.fill(false);
-        monopanel::title_bar(&mut chrome_with, "91%", Screen::Home.title(), "BT*");
+        monopanel::title_bar(&mut chrome_with, "91%", Screen::Home.title(), "7F23");
         let row = |f: &Frame| {
             (0..sh1107::WIDTH)
                 .map(|x| f.pixel(x, 4))
@@ -1412,7 +1404,15 @@ mod tests {
         };
         assert_eq!(row(&frame_of(&bare, Screen::Home)), row(&chrome_bare));
         assert_eq!(row(&frame_of(&with, Screen::Home)), row(&chrome_with));
-        bare.bluetooth.link = Link::Advertising;
+        for link in [Link::Absent, Link::Advertising, Link::Connected] {
+            bare.bluetooth.link = link;
+            assert_eq!(
+                row(&frame_of(&bare, Screen::Home)),
+                row(&chrome_bare),
+                "{link:?} reached the title bar"
+            );
+        }
+        bare.name = Some(*b"BEEF");
         assert_ne!(row(&frame_of(&bare, Screen::Home)), row(&chrome_bare));
     }
 
@@ -1659,7 +1659,13 @@ mod tests {
         let strs = lines.as_strs();
         let mut want_nav = ui::nav();
         let mut want = Frame::new();
-        page(&mut want, &mut want_nav, "91%", "BT", &strs[..lines.len()]);
+        page(
+            &mut want,
+            &mut want_nav,
+            "91%",
+            "7F23",
+            &strs[..lines.len()],
+        );
         assert_eq!(got.as_bytes(), want.as_bytes());
     }
 }
