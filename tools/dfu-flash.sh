@@ -131,7 +131,17 @@ run_dfu() {
         # open, so flashing needs no button press. See src/bin/usb_cdc.rs.
         args+=(--touch 1200)
     fi
-    "$nrfutil" "${args[@]}"
+    # The tool's exit status says nothing. A transfer that times out halfway
+    # through -- which leaves the board in its bootloader with the old
+    # application already erased -- is caught inside adafruit-nrfutil, printed
+    # with a traceback, and turned into a `return False` that its command-line
+    # layer ignores: exit 0. Taking that at its word once meant reporting a
+    # flash that had not happened and skipping the retry that would have
+    # finished it. The one reliable signal is the tool's own last line, so
+    # the output is watched for it, and shown as it goes.
+    local out
+    out="$("$nrfutil" "${args[@]}" 2>&1 | tee /dev/stderr)" || true
+    [[ "$out" == *"Device programmed."* ]]
 }
 
 # Leave the host's cached line settings at 115200 rather than at 1200.

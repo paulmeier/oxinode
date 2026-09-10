@@ -119,8 +119,8 @@ the board's log.
 USB keeps working while a phone is connected. Answers to commands go back the
 way the command came, so `rnodeconf` over USB works with a phone on the line;
 unsolicited frames, such as received packets, go to the phone while there is
-one and to USB otherwise. The panel's title bar shows `BT` while advertising
-and `BT*` with a phone connected.
+one and to USB otherwise. The Bluetooth screen on the panel shows whether the
+board is advertising or has a phone connected.
 
 To forget every bonded phone, use **Forget Phones** on the Bluetooth screen's
 menu. See [Bluetooth](../architecture/bluetooth.md) for how the stack is put

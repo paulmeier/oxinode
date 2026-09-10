@@ -337,10 +337,10 @@ async fn main(_spawner: Spawner) {
     );
     let gps_task = gps::serve(receiver, &mode_switch);
 
-    // The cell through its divider on P0.31, and the charger's
-    // status line. Read once per redraw, for the Home screen's battery row
-    // and the title bar's percentage.
-    let mut battery = Sense::new(p.SAADC, Irqs, p.P0_31, p.P1_02);
+    // The cell through its divider on P0.31, and the charger's two
+    // status lines. Read once per redraw, for the Home screen's battery and
+    // charger rows and the title bar's percentage.
+    let mut battery = Sense::new(p.SAADC, Irqs, p.P0_31, p.P1_02, p.P0_27);
 
     // Read before anything else touches it. What comes back is either a record
     // this firmware wrote, or the state of a board nobody has provisioned --
@@ -536,19 +536,19 @@ async fn main(_spawner: Spawner) {
         let count = battery.raw().await;
         match oxinode_core::battery::reading(count) {
             Some(cell) => defmt::info!(
-                "battery: count {=i16}, {=u32} mV, {=u8}%, charging={=bool}",
+                "battery: count {=i16}, {=u32} mV, {=u8}%",
                 count,
                 cell.millivolts,
                 cell.percent,
-                battery.is_charging()
             ),
             None => defmt::info!(
-                "battery: count {=i16}, {=u32} mV: no cell; charging={=bool}",
+                "battery: count {=i16}, {=u32} mV: no cell",
                 count,
                 oxinode_core::battery::cell_millivolts(count),
-                battery.is_charging()
             ),
         }
+        // Logs the charger's state, and again whenever it changes.
+        battery.charger();
 
         let mut dev = match bringup::bring_up(spi, reset, &mut irq).await {
             Ok(dev) => dev,
@@ -1101,7 +1101,7 @@ where
                         is_talking(last_host_frame),
                         last_signal,
                         battery.read().await,
-                        battery.is_charging(),
+                        battery.charger(),
                     );
                     screens::render(&mut ui.scratch, &mut ui.nav, &state);
                 }
@@ -1526,7 +1526,7 @@ where
                         is_talking(last_host_frame),
                         None,
                         battery.read().await,
-                        battery.is_charging(),
+                        battery.charger(),
                     );
                     screens::render(&mut ui.scratch, &mut ui.nav, &state);
                 }
@@ -1800,17 +1800,23 @@ async fn perform(
     }
 }
 
-/// What the screens know that never changes: the two names the board has.
+/// What the screens know that never changes: the two names the board has,
+/// and the four digits of the second that fit in a title bar.
 struct Facts {
     serial: [u8; 16],
     ble_name: [u8; interop::NAME_LEN],
+    tag: [u8; 4],
 }
 
 impl Facts {
     fn new(mcu_id: u64) -> Self {
+        let ble_name = interop::advertised_name(mcu_id);
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(&ble_name[interop::NAME_PREFIX.len()..]);
         Facts {
             serial: oxinode_core::serial::hex_u64(mcu_id),
-            ble_name: interop::advertised_name(mcu_id),
+            ble_name,
+            tag,
         }
     }
 
@@ -1827,11 +1833,12 @@ impl Facts {
         talking: bool,
         last_signal: Option<(i16, i8)>,
         battery: Option<oxinode_core::battery::Reading>,
-        charging: bool,
+        charger: oxinode_core::battery::Charger,
     ) -> screens::State {
         let (rx_count, tx_count) = protocol.counters();
         let link = bluetooth_state();
         screens::State {
+            name: Some(self.tag),
             home: screens::Home {
                 host,
                 talking,
@@ -1842,7 +1849,7 @@ impl Facts {
                 last_snr_quarter_db: last_signal.map(|(_, snr)| snr),
                 uptime_s: Some(Instant::now().as_secs().min(u32::MAX as u64) as u32),
                 battery,
-                charging,
+                charger,
             },
             radio: screens::Radio {
                 config: *protocol.config(),

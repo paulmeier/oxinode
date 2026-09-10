@@ -70,6 +70,7 @@ impl Fixture {
 /// default.
 pub fn populated() -> State {
     State {
+        name: Some(*b"7F23"),
         home: Home {
             host: Host::Usb,
             talking: true,
@@ -83,7 +84,7 @@ pub fn populated() -> State {
                 millivolts: 4_020,
                 percent: 91,
             }),
-            charging: true,
+            charger: battery::Charger::Charging,
         },
         radio: Radio {
             config: RadioConfig {

@@ -23,6 +23,29 @@
 //! With no cell fitted the divider is pulled to nothing and the pin reads near
 //! zero. That is not a flat battery, and [`reading`] says so by returning
 //! `None` rather than `0%`: the screen then shows a dash, which is the truth.
+//!
+//! # Why the screen does not follow every sample
+//!
+//! One 12-bit count is 1.35 mV at the cell, and the count wanders by a few
+//! either way between one conversion and the next. Near the top of the table
+//! a percentage point is four millivolts wide, so a reading shown straight
+//! from the ADC flickers between two numbers twice a second for as long as
+//! anyone watches it. [`Smoothed`] is the cure: an average that follows the
+//! cell over a few seconds, and a dead band so the number on the screen moves
+//! only when the cell has.
+//!
+//! # The charger
+//!
+//! The BQ25185 says what it is doing on two open-drain status pins, and it
+//! takes both to tell charging from a fault: one pin low is "charging", the
+//! other low is "fault", both low is a fault the chip has latched off on,
+//! both high is done or disabled. That table is defined with an input
+//! present. With nothing on the connector the chip is in battery-only mode,
+//! which the table does not cover, and on this board it holds the "charging"
+//! pin low there -- so read on their own the pins say a board on its cell is
+//! charging. The USB power sense settles it: no input, no charger, whatever
+//! the pins say. [`Charger::decode`] is that table, in one place, on the
+//! host.
 
 /// The divider's upper resistor, battery side, in ohms.
 pub const DIVIDER_TOP_OHMS: u32 = 806_000;
@@ -114,6 +137,138 @@ pub fn reading(count: i16) -> Option<Reading> {
     })
 }
 
+/// A reading the screen can be shown: averaged, and held until the cell has
+/// really moved.
+///
+/// Feed it every sample; read back what to display. The average is a
+/// first-order filter with a quarter of the gap closed per sample, which at
+/// two samples a second follows a change in about three seconds -- quick
+/// enough that plugging the charger in shows within a breath, slow enough that
+/// the conversion noise is gone. The displayed value then moves only when the
+/// average is [`Smoothed::DEAD_BAND_MV`] away from it, and the percentage is
+/// taken from the displayed voltage, so the two never disagree and neither
+/// flickers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Smoothed {
+    /// The running average, in sixteenths of a millivolt so the filter
+    /// cannot get stuck short of its target by integer truncation.
+    average: Option<i32>,
+    /// What the screen was last told.
+    shown: Option<Reading>,
+}
+
+impl Smoothed {
+    /// How far the average has to drift from the shown value before the
+    /// shown value follows it. Ten millivolts is one step of the hundredths
+    /// digit on the screen, so a value that is shown is the value that is
+    /// there, to the digit.
+    pub const DEAD_BAND_MV: u32 = 10;
+    const SCALE: i32 = 16;
+
+    pub const fn new() -> Self {
+        Self {
+            average: None,
+            shown: None,
+        }
+    }
+
+    /// Take one sample and return what to display.
+    ///
+    /// No cell resets the filter: the next cell to appear is shown at once,
+    /// not averaged in from zero.
+    pub fn update(&mut self, sample: Option<Reading>) -> Option<Reading> {
+        let Some(fresh) = sample else {
+            *self = Self::new();
+            return None;
+        };
+        let target = fresh.millivolts as i32 * Self::SCALE;
+        let average = match self.average {
+            None => target,
+            Some(avg) => avg + (target - avg) / 4,
+        };
+        self.average = Some(average);
+        let millivolts = (average / Self::SCALE) as u32;
+        let moved = self
+            .shown
+            .is_none_or(|shown| shown.millivolts.abs_diff(millivolts) >= Self::DEAD_BAND_MV);
+        if moved {
+            self.shown = Some(Reading {
+                millivolts,
+                percent: percent(millivolts),
+            });
+        }
+        self.shown
+    }
+
+    /// The last value shown, without taking a sample.
+    pub const fn shown(&self) -> Option<Reading> {
+        self.shown
+    }
+}
+
+/// What the charger is doing, from its two status pins and the USB power
+/// sense.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Charger {
+    /// No input power: the board is on its cell, and the status pins mean
+    /// nothing.
+    #[default]
+    Unplugged,
+    /// Charging, including the automatic top-up after a full cell has
+    /// drooped.
+    Charging,
+    /// Input power present and the charger idle: the cell is full, or the
+    /// charger has stopped for a reason it does not report as a fault --
+    /// an input too weak to charge from, or charging disabled.
+    Full,
+    /// A fault the chip will recover from on its own: input over-voltage,
+    /// the cell too hot or too cold, the chip too hot, a system short.
+    Fault,
+    /// A fault the chip has latched off on until the input is cycled: the
+    /// safety timer, a cell over-current, a shorted current-set pin.
+    LatchedOff,
+}
+
+impl Charger {
+    /// The BQ25185's status table, for the two open-drain pins read with
+    /// pull-ups: `stat1_low` and `stat2_low` are the pins pulled down by
+    /// the chip, `input` is whether there is power on USB.
+    ///
+    /// The table applies only with an input. Without one the chip is in
+    /// battery-only mode, the table says nothing, and on the bench the
+    /// board holds `STAT2` low there -- the "charging" row. So no input is
+    /// [`Unplugged`](Self::Unplugged) before the pins are looked at.
+    ///
+    /// | STAT1 | STAT2 | meaning, with input |
+    /// |---|---|---|
+    /// | high | high | done, sleeping or disabled: [`Full`](Self::Full) |
+    /// | high | low | [`Charging`](Self::Charging) |
+    /// | low | high | [`Fault`](Self::Fault), recoverable |
+    /// | low | low | [`LatchedOff`](Self::LatchedOff) |
+    pub const fn decode(stat1_low: bool, stat2_low: bool, input: bool) -> Self {
+        if !input {
+            return Charger::Unplugged;
+        }
+        match (stat1_low, stat2_low) {
+            (false, false) => Charger::Full,
+            (false, true) => Charger::Charging,
+            (true, false) => Charger::Fault,
+            (true, true) => Charger::LatchedOff,
+        }
+    }
+
+    /// The word on the screen.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Charger::Unplugged => "unplugged",
+            Charger::Charging => "charging",
+            Charger::Full => "full",
+            Charger::Fault => "fault",
+            Charger::LatchedOff => "latched off",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +334,75 @@ mod tests {
         let low = reading(2_300).expect("a low cell is still a cell");
         assert!(low.millivolts >= NO_CELL_BELOW_MV);
         assert!(low.percent < 20, "{low:?}");
+    }
+
+    /// A reading that wanders by a count or two is shown as one number.
+    #[test]
+    fn a_noisy_cell_is_shown_as_one_steady_number() {
+        let mut smooth = Smoothed::new();
+        let mut seen = std::collections::BTreeSet::new();
+        // 3.85 V at the pin, with the conversion wandering by two counts
+        // either way: 2 counts is about 2.7 mV at the cell.
+        for i in 0..200 {
+            let count = 2_849 + [0, 2, -1, 1, -2][i % 5];
+            let shown = smooth.update(reading(count)).expect("a cell");
+            seen.insert((shown.millivolts, shown.percent));
+        }
+        // The first sample is shown as it is; after that the average sits in
+        // the noise and the dead band holds the display still.
+        assert!(seen.len() <= 2, "the display wandered: {seen:?}");
+    }
+
+    /// A cell that really moves is followed, and the percentage with it.
+    #[test]
+    fn a_real_change_is_followed_within_a_few_samples() {
+        let mut smooth = Smoothed::new();
+        let full = (4_020.0 * 0.65048f64 * FULL_SCALE_COUNTS as f64 / FULL_SCALE_MV as f64) as i16;
+        let low = (3_700.0 * 0.65048f64 * FULL_SCALE_COUNTS as f64 / FULL_SCALE_MV as f64) as i16;
+        let first = smooth.update(reading(full)).unwrap();
+        assert!(first.percent >= 90, "{first:?}");
+        let mut shown = first;
+        // A quarter of the gap per sample: twenty samples, ten seconds on
+        // the board, closes a 320 mV step to a millivolt.
+        for _ in 0..20 {
+            shown = smooth.update(reading(low)).unwrap();
+        }
+        assert!(shown.millivolts.abs_diff(3_700) < 15, "{shown:?}");
+        assert!(shown.percent < 50, "{shown:?}");
+        assert_eq!(shown.percent, percent(shown.millivolts), "shown as a pair");
+    }
+
+    /// No cell clears the filter, and a cell that appears is shown at once.
+    #[test]
+    fn no_cell_resets_the_filter() {
+        let mut smooth = Smoothed::new();
+        smooth.update(reading(3_100));
+        assert_eq!(smooth.update(None), None);
+        assert_eq!(smooth.shown(), None);
+        let back = smooth.update(reading(2_300)).expect("a cell again");
+        assert!(
+            back.percent < 20,
+            "averaged in from the old full cell: {back:?}"
+        );
+    }
+
+    /// The charger's table, all eight rows. The four without an input are
+    /// one answer: a board on its cell showed the "charging" row on the
+    /// bench, which is what the table means by not covering that mode.
+    #[test]
+    fn the_charger_table_is_decoded() {
+        use Charger::*;
+        assert_eq!(decode(false, false, true), Full);
+        assert_eq!(decode(false, true, true), Charging);
+        assert_eq!(decode(true, false, true), Fault);
+        assert_eq!(decode(true, true, true), LatchedOff);
+        for stat1_low in [false, true] {
+            for stat2_low in [false, true] {
+                assert_eq!(decode(stat1_low, stat2_low, false), Unplugged);
+            }
+        }
+        fn decode(a: bool, b: bool, c: bool) -> Charger {
+            Charger::decode(a, b, c)
+        }
     }
 }
