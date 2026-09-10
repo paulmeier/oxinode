@@ -1017,15 +1017,11 @@ where
                     }
                 } else {
                     let mut modem = Modem::new(dev, irq);
-                    // A frame nobody asked for goes to whoever is the host
-                    // right now: the phone if there is one, USB otherwise.
-                    // The same question the transmit wait asks.
-                    let listener = hosts.listener(phone_connected());
                     match modem.receive(&mut rx_buf, Duration::from_millis(20)).await {
                         Ok(Some(report)) => {
                             led.off();
                             last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                            if heard(&mut air_in, &mut protocol, &report, &rx_buf, listener) {
+                            if heard(&mut air_in, &mut protocol, &report, &rx_buf, &mut hosts) {
                                 last_host_frame = Some(Instant::now());
                             }
                             led.on();
@@ -1033,7 +1029,13 @@ where
                         Ok(None) => {}
                         Err(e) => {
                             defmt::error!("rx: {}", e);
-                            protocol.report_error(error::MODEM_TIMEOUT, listener);
+                            // A frame nobody asked for goes to whoever is the
+                            // host right now: the phone if there is one, USB
+                            // otherwise. The same question `heard` asks.
+                            protocol.report_error(
+                                error::MODEM_TIMEOUT,
+                                hosts.listener(phone_connected()),
+                            );
                         }
                     }
                 }
@@ -1164,18 +1166,24 @@ where
 }
 
 /// A frame off the air: through the reassembler, and if it completes a
-/// packet, to the host with its signal. Says whether it did.
+/// packet, to whoever is the host right now -- the phone if there is one,
+/// USB otherwise -- with its signal. Says whether it did.
+///
+/// Both places a packet can come from end here: the idle receive and the
+/// transmit wait's hand-up. The log names the transport it went to, so a
+/// bench check with a phone connected can read the routing decision off
+/// the log port.
 ///
 /// The signal is per packet rather than per frame -- the mean of two for a
 /// packet that came as two -- and quarter-dB throughout: the chip reports
 /// it that way and the protocol carries it that way, so nothing is rounded
 /// in between.
-fn heard<S: Sink>(
+fn heard(
     air_in: &mut Reassembler,
     protocol: &mut Protocol,
     report: &RxReport,
     rx_buf: &[u8],
-    out: &mut S,
+    hosts: &mut Hosts<OUTBOX>,
 ) -> bool {
     let signal = air::Signal {
         rssi_dbm: report.rssi_dbm,
@@ -1202,9 +1210,14 @@ fn heard<S: Sink>(
     );
     match air_in.feed(&rx_buf[..report.len], signal, Instant::now().as_micros()) {
         Some(packet) => {
+            let phone = phone_connected();
             defmt::debug!(
-                "rx: {=usize} byte packet to the host, from {=str}",
+                "rx: {=usize} byte packet to {=str}, from {=str}",
                 packet.payload.len(),
+                match Transport::listener(phone) {
+                    Transport::Bluetooth => "the phone",
+                    Transport::Usb => "USB",
+                },
                 if air::is_split(header) {
                     "two frames joined"
                 } else {
@@ -1215,7 +1228,7 @@ fn heard<S: Sink>(
                 packet.signal.rssi_dbm,
                 packet.signal.snr_quarter_db,
                 packet.payload,
-                out,
+                hosts.listener(phone),
             );
             true
         }
@@ -1366,13 +1379,7 @@ async fn act<S, B>(
                             report.rssi_dbm
                         );
                         *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                        heard(
-                            air_in,
-                            protocol,
-                            &report,
-                            rx_buf,
-                            hosts.listener(phone_connected()),
-                        );
+                        heard(air_in, protocol, &report, rx_buf, hosts);
                     }
                     Err(e) => break Err(e),
                 }
