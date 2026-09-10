@@ -86,9 +86,6 @@ has to rediscover it.
 - **The LR1121 reports its last reset as `Analog`** after a pulse on NRESET.
 - **The receive window with the correction off dips at +220 and +240 kHz**
   inside a full passband, consistent with a fixed-frequency spur.
-- **DTR on the second CDC function** is seen by the firmware only around
-  enumeration, so the boot log has to be caught within about a second of the
-  device appearing. See [Debugging without a probe](../development/debugging.md).
 - **The panic handler reboots into the bootloader.** That is right for
   bench work and wrong for a fielded device, which should probably reset
   into its application and keep trying.

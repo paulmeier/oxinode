@@ -13,9 +13,8 @@ with two CDC-ACM serial ports:
 | first (`/dev/cu.usbmodemXXX1` on macOS) | the KISS-framed RNode protocol |
 | second (`/dev/cu.usbmodemXXX3`) | the firmware's `defmt` log |
 
-The order is fixed: the KISS port must be first because DTR is only visible on
-the first CDC function of a composite device, and the 1200-baud bootloader
-touch needs it.
+The order is fixed: the KISS port is first so that it is the lower-numbered
+tty, which is where `rnsd` and the flasher's 1200-baud touch look.
 
 ## `rnsd`
 
@@ -145,7 +144,6 @@ stty -f /dev/cu.usbmodemXXX3 115200
 defmt-print -e target/thumbv7em-none-eabihf/release/rnode < /dev/cu.usbmodemXXX3
 ```
 
-Always open the port at an explicit baud rate. See
-[Debugging without a probe](../development/debugging.md) for the boot-log
-recipe and why the port has to be opened within a second of the device
-appearing.
+Always open the port at an explicit baud rate. The log pump holds the boot
+lines until a terminal opens the port, so opening it late still shows boot
+from the top; see [Debugging without a probe](../development/debugging.md).

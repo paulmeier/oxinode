@@ -12,9 +12,8 @@
 //! SMA before pressing anything that keys the PA.
 //!
 //! Unlike `usb-cdc`, this image exposes a **single** CDC-ACM port, and it is a
-//! log port. That is not a simplification for its own sake: DTR is only visible
-//! on the first CDC function of a composite device, and this image needs DTR
-//! twice over —
+//! log port: a console on the log port is all a bring-up image needs, and the
+//! port's DTR serves twice over —
 //!
 //!   * to hold the bring-up sequence until a terminal is actually attached, so
 //!     that a one-shot startup log is not written into a port with no reader,

@@ -117,10 +117,9 @@ async fn main(_spawner: Spawner) {
 
     // Ships log bytes to the second serial port. This image logs continuously,
     // so it drains from the moment the endpoint is live rather than waiting for
-    // DTR -- which it could not see anyway on a second CDC function. Output
-    // produced before a terminal attaches is written into a port with no reader
-    // and dropped by the host; the heartbeat below is what makes that
-    // survivable.
+    // DTR. Output produced before a terminal attaches is written into a port
+    // with no reader and dropped by the host; the heartbeat below is what makes
+    // that survivable.
     let logs = usb_log::pump(&mut log_tx, || true);
 
     let echo = async {

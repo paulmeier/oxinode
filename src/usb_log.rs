@@ -8,6 +8,7 @@ use embassy_futures::select::{select, Either};
 use embassy_time::{with_timeout, Duration, Timer};
 use embassy_usb::class::cdc_acm::{ControlChanged, Receiver, Sender};
 use embassy_usb::driver::Driver;
+use oxinode_core::usb::DrainGate;
 
 /// Full-speed bulk endpoints are 64 bytes; anything larger is silently clamped.
 pub const MAX_PACKET_SIZE: u16 = 64;
@@ -31,14 +32,25 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
 /// * an image whose interesting output is a one-shot startup sequence has to
 ///   wait, and should pass something like `|| control.dtr()`.
 ///
-/// DTR is only usable on the *first* CDC function in a composite device; on the
-/// second it never goes true. That is a constraint on the layout, not a choice.
+/// DTR works on every CDC function of a composite device, the second included.
+/// It looked otherwise for a while, and the reason is the second gate.
+///
+/// # The settle after `ready`
+///
+/// The host raises DTR inside `open(2)`, and the program that opened the port
+/// then configures it and flushes its input queue before it reads. Anything
+/// sent in between is thrown away -- and a ring holding the whole of boot goes
+/// out within a millisecond of DTR. So the pump holds for
+/// [`OPEN_SETTLE_MS`](oxinode_core::usb::OPEN_SETTLE_MS) after `ready` turns
+/// true before it drains, and starts that wait again whenever `ready` drops.
+/// The rule is [`DrainGate`], tested on the host; see it for the measurements.
 pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() -> bool) -> ! {
     let mut buf = [0u8; MAX_PACKET_SIZE as usize];
     loop {
         tx.wait_connection().await;
+        let mut gate = DrainGate::new();
         loop {
-            if !ready() {
+            if !gate.poll(ready(), uptime_ms()) {
                 Timer::after(Duration::from_millis(20)).await;
                 continue;
             }

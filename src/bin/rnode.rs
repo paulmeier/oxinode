@@ -3,11 +3,10 @@
 //! Two CDC-ACM ports and a Bluetooth peripheral. The USB
 //! **first** port carries the KISS stream and is the one
 //! `rnsd` is pointed at; the **second** carries the defmt log. That order is
-//! the contract with the host — it decides which tty gets the lower number —
-//! and it is also forced by DTR, which is only visible on the first CDC
-//! function of a composite device. The KISS port needs DTR for the 1200-baud
-//! bootloader touch, so it has to be first, and the log port therefore cannot
-//! have it.
+//! the contract with the host: it decides which tty gets the lower number,
+//! which is the one `rnsd` opens and the one the flasher's 1200-baud touch
+//! lands on. Each port sees its own DTR. The KISS port's is the touch; the
+//! log port's gates the log pump, see `oxinode::usb_log`.
 //!
 //! # Bluetooth is a second pipe
 //!
@@ -370,7 +369,10 @@ async fn main(_spawner: Spawner) {
     // can be attached to it, so the lines that say what the hardware is --
     // `UICR.NFCPINS`, the mode switch, the panel address -- were gone every
     // time. The ring holds 4 KB, which is the whole of boot; with nobody ever
-    // listening it simply fills and drops the oldest, as it always did.
+    // listening it simply fills and drops the oldest, as it always did. The
+    // pump also holds for a moment after DTR rises, because the host raises it
+    // inside `open(2)` and the terminal flushes its input right after -- a
+    // log sent into that gap is a log thrown away. See `usb_log::pump`.
     let pump = usb_log::pump(&mut log_tx, || log_control.dtr());
 
     // The Bluetooth controller, unconditionally: the product image does not
