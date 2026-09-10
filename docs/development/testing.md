@@ -85,8 +85,34 @@ commanded frequency), so a change that touches hardware should be checked by
 reading the log rather than by watching an LED. See
 [Debugging without a probe](debugging.md).
 
-A useful exchange to reproduce a stock-format packet path end to end: two
-boards on the product image, a Python script speaking KISS on both first
-ports (the same detect, five setters and power-on that `rnsd` sends), a
-packet of random bytes one way, and a wait for `CMD_READY` on the sender and
-`CMD_DATA` on the receiver. Sizes from 100 to 508 bytes exercise the split.
+## The exchange with another RNode
+
+What a host test cannot tell you is whether another RNode reads this board's
+frames the way this board reads its own. `tools/air_exchange.py` runs the
+exchange that settles it, with both boards on one host:
+
+```bash
+python3.11 tools/air_exchange.py --a /dev/cu.usbmodem101 --b /dev/cu.usbmodem3101
+```
+
+Each side is a Reticulum instance of its own with one `RNodeInterface`, so
+what goes on the air is what `rnsd` sends. A 200-byte packet goes each way,
+then a 400-byte packet each way, so the split at 254 and the reassembly are
+exercised in both directions; the sender and the receiver compare hashes, and
+every oxinode's log is captured for the whole run. The product image logs
+every frame it hears with its header byte, sequence nibble and split flag,
+every join, and every transmission with the header it went under, so a
+disagreement shows as the frame it happened on:
+
+```
+rx: 255 bytes, header 0x11 (seq 1, split true), rssi -63 dBm, snr 16 dB
+rx: 255 bytes, half of a split packet; holding it
+rx: 147 bytes, header 0x11 (seq 1, split true), rssi -62 dBm, snr 18 dB
+rx: 400 byte packet to the host, from two frames joined
+```
+
+Between two oxinodes all four exchanges pass. Against a stock RNode running
+the reference firmware the exchange has not been run, and that is the one
+that matters; see [Known limitations](../reference/limitations.md). The
+runner needs no change for it: one `--b` is a stock RNode's port and
+`--b-log none`, since a stock RNode has no log port.
