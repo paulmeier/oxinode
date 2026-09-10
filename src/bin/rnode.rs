@@ -110,6 +110,7 @@ use oxinode_core::rnode::air::{self, Reassembler, Sequence, Split};
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::eeprom;
+use oxinode_core::rnode::hosts::{Hosts, Transport};
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::outbox::Outbox;
 use oxinode_core::rnode::protocol::{Action, PanelChange, Protocol, Sink};
@@ -189,12 +190,12 @@ const _: () = assert!(BLE_OUT >= OUTBOX);
 /// board restarts itself. See `oxinode::ble::stall`.
 const STALL_AFTER_MS: u32 = 2_000;
 
-/// Which transport a command arrived on, for the one action that has to flush
-/// before it acts.
-#[derive(Clone, Copy)]
-enum Via {
-    Usb,
-    Ble,
+/// Whether a phone is on the line, as the routing rule wants it. The one
+/// place `BLE_CONNECTED` is read for routing, so that both paths a heard
+/// packet can come up -- the idle receive and the transmit wait -- ask the
+/// same question; see `oxinode_core::rnode::hosts`.
+fn phone_connected() -> bool {
+    BLE_CONNECTED.load(Ordering::Relaxed)
 }
 
 /// Same prototyping VID as the other images, with its own PID.
@@ -833,11 +834,11 @@ where
 {
     let mut protocol = Protocol::with_storage(device, mcu_id);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
-    let mut outbox = Outbox::<OUTBOX>::new();
-    // The phone's own decoder and outbox: a frame in progress on one
-    // transport is never spliced with the other's.
+    // The phone's own decoder, and an outbox per transport, so a frame in
+    // progress on one is never spliced with the other's. Which outbox a
+    // frame goes to is `Hosts`' decision, not this loop's.
     let mut ble_decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
-    let mut ble_outbox = Outbox::<OUTBOX>::new();
+    let mut hosts = Hosts::<OUTBOX>::new();
     let mut ble_buf = [0u8; 256];
     let mut usb_buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut rx_buf = [0u8; kiss::HW_MTU];
@@ -882,7 +883,8 @@ where
             resume,
             &mut applied,
             &mut receiving,
-            &mut outbox,
+            &mut hosts,
+            Transport::Usb,
             &mut rx_buf,
             &mut last_signal,
             &mut air_in,
@@ -924,10 +926,10 @@ where
         // and the outbox differ, so that answers go back the way the command
         // came. `Reset` is the one action that has to flush before it acts,
         // and it flushes the transport that asked.
-        let (bytes, dec, out, via) = match &event {
-            Either3::First(n) => (&usb_buf[..*n], &mut decoder, &mut outbox, Via::Usb),
-            Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, &mut ble_outbox, Via::Ble),
-            Either3::Third(_) => (&usb_buf[..0], &mut decoder, &mut outbox, Via::Usb),
+        let (bytes, dec, via) = match &event {
+            Either3::First(n) => (&usb_buf[..*n], &mut decoder, Transport::Usb),
+            Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, Transport::Bluetooth),
+            Either3::Third(_) => (&usb_buf[..0], &mut decoder, Transport::Usb),
         };
         for &byte in bytes {
             match dec.feed(byte) {
@@ -938,7 +940,7 @@ where
                 kiss::Step::Frame => {
                     last_host_frame = Some(Instant::now());
                     let command = command::decode(dec.command(), dec.payload());
-                    match protocol.handle(command, out) {
+                    match protocol.handle(command, hosts.outbox(via)) {
                         // Not a radio action, and not "write it out now"
                         // either: the timer restarts on every write, so a
                         // burst of them costs one erase.
@@ -949,9 +951,9 @@ where
                         Action::Reset => {
                             defmt::info!("reset requested by the host");
                             match via {
-                                Via::Usb => flush(out, tx).await,
-                                Via::Ble => {
-                                    push_to_ble(out, ble_out);
+                                Transport::Usb => flush(hosts.outbox(via), tx).await,
+                                Transport::Bluetooth => {
+                                    push_to_ble(hosts.outbox(via), ble_out);
                                     // Give the pump a moment to notify it.
                                     Timer::after(Duration::from_millis(200)).await;
                                 }
@@ -967,7 +969,7 @@ where
                         Action::ReportDisplay => {
                             let mut image = [0u8; rnode_display::DISP_LEN];
                             rnode_display::read_display(&ui.live, &mut image);
-                            out.frame(command::cmd::DISP_READ, &image);
+                            hosts.outbox(via).frame(command::cmd::DISP_READ, &image);
                         }
                         action => {
                             act(
@@ -977,7 +979,8 @@ where
                                 action,
                                 &mut applied,
                                 &mut receiving,
-                                out,
+                                &mut hosts,
+                                via,
                                 &mut rx_buf,
                                 &mut last_signal,
                                 &mut air_in,
@@ -1016,11 +1019,8 @@ where
                     let mut modem = Modem::new(dev, irq);
                     // A frame nobody asked for goes to whoever is the host
                     // right now: the phone if there is one, USB otherwise.
-                    let listener = if BLE_CONNECTED.load(Ordering::Relaxed) {
-                        &mut ble_outbox
-                    } else {
-                        &mut outbox
-                    };
+                    // The same question the transmit wait asks.
+                    let listener = hosts.listener(phone_connected());
                     match modem.receive(&mut rx_buf, Duration::from_millis(20)).await {
                         Ok(Some(report)) => {
                             led.off();
@@ -1082,7 +1082,8 @@ where
                     change.radio,
                     &mut applied,
                     &mut receiving,
-                    &mut outbox,
+                    &mut hosts,
+                    Transport::Usb,
                     &mut rx_buf,
                     &mut last_signal,
                     &mut air_in,
@@ -1149,8 +1150,8 @@ where
             }
         }
 
-        flush(&mut outbox, tx).await;
-        push_to_ble(&mut ble_outbox, ble_out);
+        flush(hosts.outbox(Transport::Usb), tx).await;
+        push_to_ble(hosts.outbox(Transport::Bluetooth), ble_out);
 
         // Belt and braces. Every path above is *supposed* to await something
         // that can actually pend, but a loop that can complete an iteration
@@ -1162,10 +1163,6 @@ where
     }
 }
 
-/// Carry out whatever the protocol decided.
-///
-/// The last two arguments are for a transmission: the wait for a clear
-/// channel is spent listening, and what it hears has to go somewhere.
 /// A frame off the air: through the reassembler, and if it completes a
 /// packet, to the host with its signal. Says whether it did.
 ///
@@ -1232,6 +1229,13 @@ fn heard<S: Sink>(
     }
 }
 
+/// Carry out whatever the protocol decided.
+///
+/// `via` is the transport the command came on, and its answers -- an error,
+/// the acknowledgement of a transmission -- go back that way. A transmission's
+/// wait for a clear channel is spent listening, and a packet heard during it
+/// is nobody's answer: it goes wherever a packet heard while idle goes, which
+/// `hosts` decides from whether a phone is connected and nothing else.
 #[allow(clippy::too_many_arguments)]
 async fn act<S, B>(
     dev: &mut lr11xx::Lr11xx<S, B>,
@@ -1240,7 +1244,8 @@ async fn act<S, B>(
     action: Action<'_>,
     applied: &mut Option<ValidConfig>,
     receiving: &mut bool,
-    outbox: &mut Outbox<OUTBOX>,
+    hosts: &mut Hosts<OUTBOX>,
+    via: Transport,
     rx_buf: &mut [u8],
     last_signal: &mut Option<(i16, i8)>,
     air_in: &mut Reassembler,
@@ -1279,14 +1284,14 @@ async fn act<S, B>(
             let mut modem = Modem::new(dev, irq);
             if let Err(e) = modem.apply(&valid).await {
                 defmt::error!("apply failed: {}", e);
-                protocol.report_error(error::INITRADIO, outbox);
+                protocol.report_error(error::INITRADIO, hosts.outbox(via));
                 *applied = None;
                 *receiving = false;
                 return;
             }
             if let Err(e) = modem.start_rx(&valid).await {
                 defmt::error!("start_rx failed: {}", e);
-                protocol.report_error(error::INITRADIO, outbox);
+                protocol.report_error(error::INITRADIO, hosts.outbox(via));
                 *receiving = false;
                 return;
             }
@@ -1342,8 +1347,9 @@ async fn act<S, B>(
                 return;
             };
             // The wait for a clear channel is spent listening, and a packet
-            // heard during it goes to the host that asked for this
-            // transmission -- the same way its answers do. Then the
+            // heard during it goes to whoever is the host right now -- the
+            // same place as a packet heard while idle, and not necessarily
+            // the host that asked for this transmission. Then the
             // transmission is tried again, with the wait so far remembered.
             let mut backoff = Backoff::new(&valid, n as u8, Instant::now().as_ticks());
             let sent = loop {
@@ -1360,7 +1366,13 @@ async fn act<S, B>(
                             report.rssi_dbm
                         );
                         *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                        heard(air_in, protocol, &report, rx_buf, outbox);
+                        heard(
+                            air_in,
+                            protocol,
+                            &report,
+                            rx_buf,
+                            hosts.listener(phone_connected()),
+                        );
                     }
                     Err(e) => break Err(e),
                 }
@@ -1409,11 +1421,11 @@ async fn act<S, B>(
                     // be rather than after the restart. A modem that never
                     // sends CMD_READY works perfectly until somebody turns
                     // flow control on, and then stops after one packet.
-                    protocol.transmitted(outbox);
+                    protocol.transmitted(hosts.outbox(via));
                 }
                 Err(e) => {
                     defmt::error!("tx failed: {}", e);
-                    protocol.report_error(error::TXFAILED, outbox);
+                    protocol.report_error(error::TXFAILED, hosts.outbox(via));
                 }
             }
             // Transmitting leaves the chip in standby, so receive has to be
@@ -1456,9 +1468,8 @@ where
 {
     let mut protocol = Protocol::with_storage(device, mcu_id);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
-    let mut outbox = Outbox::<OUTBOX>::new();
     let mut ble_decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
-    let mut ble_outbox = Outbox::<OUTBOX>::new();
+    let mut hosts = Hosts::<OUTBOX>::new();
     let mut buf = [0u8; usb_log::MAX_PACKET_SIZE as usize];
     let mut ble_buf = [0u8; 256];
     let mut dirty_since: Option<Instant> = None;
@@ -1482,16 +1493,17 @@ where
             Timer::after(Duration::from_millis(100)),
         )
         .await;
-        let (bytes, dec, out, via) = match &event {
-            Either3::First(n) => (&buf[..*n], &mut decoder, &mut outbox, Via::Usb),
-            Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, &mut ble_outbox, Via::Ble),
-            Either3::Third(()) => (&buf[..0], &mut decoder, &mut outbox, Via::Usb),
+        let (bytes, dec, via) = match &event {
+            Either3::First(n) => (&buf[..*n], &mut decoder, Transport::Usb),
+            Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, Transport::Bluetooth),
+            Either3::Third(()) => (&buf[..0], &mut decoder, Transport::Usb),
         };
         {
             for &byte in bytes {
                 if dec.feed(byte) == kiss::Step::Frame {
                     last_host_frame = Some(Instant::now());
                     let command = command::decode(dec.command(), dec.payload());
+                    let out = hosts.outbox(via);
                     match protocol.handle(command, out) {
                         Action::None => {}
                         // Provisioning has nothing to do with the radio, and
@@ -1502,8 +1514,8 @@ where
                         Action::Persist => dirty_since = Some(Instant::now()),
                         Action::Reset => {
                             match via {
-                                Via::Usb => flush(out, tx).await,
-                                Via::Ble => {
+                                Transport::Usb => flush(out, tx).await,
+                                Transport::Bluetooth => {
                                     push_to_ble(out, ble_out);
                                     Timer::after(Duration::from_millis(200)).await;
                                 }
@@ -1582,8 +1594,8 @@ where
         }
         led.off();
         Timer::after(Duration::from_millis(100)).await;
-        flush(&mut outbox, tx).await;
-        push_to_ble(&mut ble_outbox, ble_out);
+        flush(hosts.outbox(Transport::Usb), tx).await;
+        push_to_ble(hosts.outbox(Transport::Bluetooth), ble_out);
     }
 }
 

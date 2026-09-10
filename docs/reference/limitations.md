@@ -49,9 +49,6 @@ has to rediscover it.
   editor's reason is off the bottom. The right fix is content that fits.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
-- **A heard packet's routing** while a phone is connected and a USB host is
-  transmitting at the same moment goes to the USB host, where the main loop
-  would have chosen the phone.
 - **The QSPI flash** is not driven.
 - **The 2.4 GHz path** is not driven.
 
