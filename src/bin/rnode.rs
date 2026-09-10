@@ -474,8 +474,12 @@ async fn main(_spawner: Spawner) {
     };
 
     let modem = async {
+        // Version and commit first, so a log attached to an issue says what
+        // was running before it says what happened.
         defmt::info!(
-            "oxinode RNode: serial {=str}, image at {=u32:#x}",
+            "oxinode RNode {=str} ({=str}): serial {=str}, image at {=u32:#x}",
+            env!("CARGO_PKG_VERSION"),
+            env!("OXINODE_BUILD"),
             serial,
             boot::APP_FLASH_ORIGIN
         );
@@ -1919,6 +1923,7 @@ impl Facts {
             position: gps::position(),
             system: screens::System {
                 version: env!("CARGO_PKG_VERSION"),
+                build: env!("OXINODE_BUILD"),
                 serial: Some(self.serial),
                 identity: identity_of(protocol),
                 free_ram: board::free_ram_bytes(),
