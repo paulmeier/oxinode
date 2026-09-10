@@ -43,6 +43,12 @@ defmt-print -e target/thumbv7em-none-eabihf/release/rnode < /dev/cu.usbmodemXXX3
 Closing the port, or dropping DTR on an open one, holds the log again; the
 next open or raise delivers what was held.
 
+The first line of the product image's log names the version and the commit
+it was built from (`oxinode RNode 0.1.0 (a98dcf6)`, with `-dirty` after the
+hash if the tree had uncommitted changes), so a log attached to an issue says
+what was running before it says what happened. The same two are on the
+panel's System screen.
+
 It did not always work like that, and the reason is worth knowing because it
 is the host's doing rather than the firmware's. The host's serial driver
 raises DTR inside `open(2)`, before the program that opened the port has

@@ -52,9 +52,10 @@ satellites used and in view, the age of the last fix, UTC time and date,
 latitude, longitude and altitude. While the receiver is off the screen says
 what turns it on. Menu: *GPS On/Off*.
 
-**System.** oxinode's version and the RNode protocol version it speaks, the
-device serial, the identity (`none`, `bad checksum`, `unsigned`, `signed`),
-and free RAM. Menu: *Reboot*, *Bootloader*.
+**System.** oxinode's version, the commit it was built from (a short hash,
+`-dirty` if the tree had uncommitted changes), the RNode protocol version it
+speaks, the device serial, the identity (`none`, `bad checksum`, `unsigned`,
+`signed`), and free RAM. Menu: *Reboot*, *Bootloader*.
 
 Every field that can be unknown shows a dash. A board that has heard nothing
 shows `RSSI -`, not `RSSI 0 dBm`; one with no cell shows `Battery -`; the

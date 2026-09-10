@@ -211,6 +211,11 @@ impl Identity {
 pub struct System {
     /// oxinode's own version, from its manifest.
     pub version: &'static str,
+    /// The commit the image was built from: a short hash, `-dirty` if the
+    /// tree had uncommitted changes, `unknown` outside a checkout. The
+    /// version says which release a board is near; this says which build
+    /// it is running.
+    pub build: &'static str,
     /// The device serial, as the host names the port: sixteen hex digits of
     /// the chip's factory ID.
     pub serial: Option<[u8; 16]>,
@@ -223,6 +228,7 @@ impl Default for System {
     fn default() -> Self {
         System {
             version: "-",
+            build: "-",
             serial: None,
             identity: Identity::None,
             free_ram: None,
@@ -695,6 +701,7 @@ impl Position {
 impl System {
     pub fn lines(&self, out: &mut Lines) {
         out.row("oxinode", self.version);
+        out.row("build", self.build);
         let mut v = Text::<LINE_CHARS>::new();
         let _ = write!(v, "{FW_VERSION_MAJOR}.{FW_VERSION_MINOR}");
         out.row("RNode", v.as_str());
@@ -924,6 +931,7 @@ mod tests {
             position: fixed(),
             system: System {
                 version: "0.0.0",
+                build: "0000000",
                 serial: Some(*b"0123456789ABCDEF"),
                 identity: Identity::Signed,
                 free_ram: Some(123_456),
@@ -1241,8 +1249,9 @@ mod tests {
             assert_ne!(all(&changed), reference, "changing {name} changed no line");
         }
         // And the rest, which change the picture rather than a line.
-        let system: [Mutation; 4] = [
+        let system: [Mutation; 5] = [
             ("version", |s| s.system.version = "9.9.9"),
+            ("build", |s| s.system.build = "fffffff-dirty"),
             ("serial", |s| s.system.serial = None),
             ("identity", |s| s.system.identity = Identity::Unsigned),
             ("ram", |s| s.system.free_ram = Some(1)),
