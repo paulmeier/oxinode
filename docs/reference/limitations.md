@@ -9,8 +9,12 @@ has to rediscover it.
 - **Against a stock RNode over the air.** Every frame carries the stock air
   header, packets split at 254 and reassemble by the stock receiver's rules,
   and two oxinodes exchange every size up to 508 bytes. The exchange with a
-  real stock RNode has not been run. The test that settles it: `rnsd` on
-  each, a 400-byte packet each way, and the two logs.
+  real stock RNode has not been run. The test that settles it is
+  `tools/air_exchange.py`: Reticulum on each, a packet under 254 bytes and a
+  400-byte packet each way, and every log kept. It passes between two
+  oxinodes; it needs a stock RNode on the bench for the run that counts,
+  and a Base Duo cannot be one, since the reference firmware does not drive
+  the LR1121.
 - **Through `rnsd` with a resource transfer.** The split has been exercised
   by a KISS script that sends what `RNodeInterface` sends; a link with a
   resource transfer between two Reticulum instances on two boards would carry

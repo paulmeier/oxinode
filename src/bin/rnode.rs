@@ -1170,8 +1170,36 @@ fn heard<S: Sink>(
         rssi_dbm: report.rssi_dbm,
         snr_quarter_db: report.snr_quarter_db,
     };
+    // Every frame's header goes in the log as it came off the air, so an
+    // exchange with another RNode can be read frame by frame: the byte, the
+    // nibble the reassembler joins on, and whether the flag was set.
+    let Some(&header) = rx_buf[..report.len].first() else {
+        defmt::debug!(
+            "rx: an empty frame, rssi {=i16} dBm; nothing to read",
+            report.rssi_dbm
+        );
+        return false;
+    };
+    defmt::debug!(
+        "rx: {=usize} bytes, header {=u8:#x} (seq {=u8}, split {=bool}), rssi {=i16} dBm, snr {=i16} dB",
+        report.len,
+        header,
+        air::sequence_of(header),
+        air::is_split(header),
+        report.rssi_dbm,
+        report.snr_db
+    );
     match air_in.feed(&rx_buf[..report.len], signal, Instant::now().as_micros()) {
         Some(packet) => {
+            defmt::debug!(
+                "rx: {=usize} byte packet to the host, from {=str}",
+                packet.payload.len(),
+                if air::is_split(header) {
+                    "two frames joined"
+                } else {
+                    "one frame"
+                }
+            );
             protocol.received(
                 packet.signal.rssi_dbm,
                 packet.signal.snr_quarter_db,
@@ -1346,9 +1374,11 @@ async fn act<S, B>(
             match sent {
                 Ok(report) => {
                     defmt::debug!(
-                        "tx: {=usize} bytes in {=usize} frames, {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
+                        "tx: {=usize} bytes in {=usize} frames under header {=u8:#x} (seq {=u8}), {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
                         payload.len(),
                         split.frames(),
+                        split.header(),
+                        air::sequence_of(split.header()),
                         report.elapsed_us,
                         report.csma.senses,
                         report.csma.busy,

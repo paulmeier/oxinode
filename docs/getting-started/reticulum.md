@@ -130,8 +130,8 @@ together.
 Every LoRa frame carries the stock RNode's one-byte air header, and packets
 over 254 bytes go as two frames, so two oxinodes carry full-MTU Reticulum
 packets between them and the frame layout is a stock RNode's. The exchange
-against a real stock RNode has not yet been run; see
-[Known limitations](../reference/limitations.md).
+against a real stock RNode has not yet been run; `tools/air_exchange.py` is
+the test, and [Known limitations](../reference/limitations.md) has the state.
 
 ## Reading the log
 
