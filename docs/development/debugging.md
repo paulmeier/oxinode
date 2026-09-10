@@ -31,27 +31,31 @@ the port would replay it and reboot the board into its bootloader.
 
 ### Getting the boot log
 
-The product image's log pump waits for DTR on the log port and holds 4 KB of
-ring buffer, the whole of boot. But DTR on the *second* CDC function is seen
-by the firmware only around enumeration, so the port has to be opened within
-the first second or so of the device appearing. The recipe that works: reset
-the board over the KISS port, then open the log port the instant it comes
-back.
+Open the port. The product image's log pump waits for DTR on the log port and
+holds 4 KB of ring buffer, which is the whole of boot, so a terminal opened
+at any time afterwards gets the boot lines from the top and everything since:
 
-```python
-# Decode afterwards with:
-#   defmt-print -e target/thumbv7em-none-eabihf/release/rnode < boot.bin
-import os, serial, time
-LOG, KISS = "/dev/cu.usbmodemXXX3", "/dev/cu.usbmodemXXX1"
-k = serial.Serial(KISS, 115200); k.write(b"\xc0\x55\xf8\xc0"); k.close()   # CMD_RESET
-while os.path.exists(LOG): time.sleep(0.02)
-while True:
-    try: s = serial.Serial(LOG, 115200, timeout=0.2); break
-    except Exception: time.sleep(0.02)
-end = time.time() + 8
-with open("boot.bin", "wb") as f:
-    while time.time() < end: f.write(s.read(4096))
+```bash
+stty -f /dev/cu.usbmodemXXX3 115200
+defmt-print -e target/thumbv7em-none-eabihf/release/rnode < /dev/cu.usbmodemXXX3
 ```
+
+Closing the port, or dropping DTR on an open one, holds the log again; the
+next open or raise delivers what was held.
+
+It did not always work like that, and the reason is worth knowing because it
+is the host's doing rather than the firmware's. The host's serial driver
+raises DTR inside `open(2)`, before the program that opened the port has
+configured it, and that program then flushes its input queue before its
+first read -- pyserial, `screen`, `picocom` and `minicom` all do. Anything
+the board sends between the open and the flush is discarded, and a ring
+holding the whole of boot goes out within a millisecond of DTR. So the pump
+holds for a quarter of a second after DTR rises before it drains
+(`OPEN_SETTLE_MS` in `oxinode_core::usb`), longer than any open sequence and
+shorter than a person notices. Before that hold existed the boot log was lost
+on about one open in five, and every time on a slow host -- which looked
+exactly like DTR not working on the second CDC function. It works, and it
+always did; it was being honoured a few milliseconds too promptly.
 
 The first lines of a boot say what the hardware is: the `UICR.NFCPINS` and
 `REGOUT0` words, the mode switch's position, the device record's state, and

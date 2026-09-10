@@ -139,9 +139,10 @@ again. That is why the panel may not change the radio underneath a host; see
 ## The image
 
 `rnode` puts the KISS stream on the first CDC port and the log on the second.
-That order decides which tty gets the lower number, and DTR is only visible on
-the first CDC function, which is where the 1200-baud bootloader touch has to
-land. The transmit path signals `CMD_READY` after every packet, which is what
+That order decides which tty gets the lower number, which is the port `rnsd`
+opens and the one the 1200-baud bootloader touch lands on. Each port sees its
+own DTR: the KISS port's is the touch, the log port's gates the log pump so
+that a terminal opened late still gets the boot log. The transmit path signals `CMD_READY` after every packet, which is what
 releases a host running with flow control.
 
 Two things in the modem loop exist because of failures that are easy to
