@@ -137,7 +137,7 @@ Three commands report success and do nothing if issued in the wrong mode:
 
 | | value |
 |---|---|
-| Band | 902–928 MHz (US915) on the SMA, in every image; 2400–2483.5 MHz on the u.FL, in the `radio` image only — see [The 2.4 GHz path](#the-24-ghz-path) |
+| Band | 902–928 MHz (US915) on the SMA, or 2400–2483.5 MHz on the u.FL; the frequency decides which, in every image — see [The 2.4 GHz path](#the-24-ghz-path) |
 | Maximum power | **20 dBm** sub-GHz, **11 dBm** at 2.4 GHz (the module's ratings, 20 and 11.5, rounded down, below the chip's 22/13) |
 | Spreading factor | 5–12 at the chip; 7–12 representable on the RNode protocol |
 | Bandwidth | the chip's set for the band: 62.5/125/250/500 kHz sub-GHz, 203.125/406.25/812.5 kHz at 2.4 GHz. Refused for the six of the ten RNode bandwidths it does not have, and refused as *the other band's* for the right set on the wrong band |
@@ -223,14 +223,44 @@ number. Every one of those rules has a test.
 modulation word is packed in core from the tested codes and handed to the
 crate as a raw value, the same way the RF switch and PA words already are.
 
-**Which images drive it.** The bench image, on purpose, and the product image,
-not yet. Validation takes a `Bands`: the `radio` image asks for both and its
-`H` key loads `BENCH_2G4` (2478 MHz, 812.5 kHz, SF8, CR 4/5, 11 dBm,
-uncorrected); the product image asks for the sub-GHz band alone, so a host
-setting 2.4 GHz on it is told what it would be told for 868 MHz. Extending the
-product is [#43](https://github.com/paulmeier/oxinode/issues/43), and it is
-more than changing what it asks for: the panel's frequency editor, bandwidth
-steps and power steps are all sub-GHz.
+**Which images drive it.** All of them, through the one gate: `ValidConfig::new`
+validates for both bands, and the band a configuration is on is the band its
+frequency is in. The `radio` image's `H` key loads `BENCH_2G4` (2478 MHz,
+812.5 kHz, SF8, CR 4/5, 11 dBm, uncorrected) as a bench convenience; the
+product has no preset, because a host sets the five values itself.
+
+**From a host.** The interface configuration is the ordinary one with the
+other band's numbers:
+
+```ini
+  frequency = 2478000000
+  bandwidth = 812500
+  txpower = 11
+  spreadingfactor = 8
+  codingrate = 5
+```
+
+`rnsd` sets the frequency first, and until the bandwidth follows the board
+holds 2478 MHz with the 125 kHz it had: switched on in that state it stays
+off and the log says *bandwidth belongs to the other band*, which is the
+nearer mistake, since the frequency is fine. The same the other way down. A
+bandwidth the chip has on neither path is *not one the chip has on either
+band*, and a frequency in neither band is *outside 902-928 and 2400-2483.5
+MHz*. Power is judged against the band's rating: 14 dBm, the sub-GHz default,
+is refused at 2478 MHz as *above the module's 11 dBm rating at 2.4 GHz*.
+`CMD_CONF_SAVE` stores the configuration as it stores any other -- the
+frequency fits the EEPROM's four bytes -- and a board in TNC mode comes back
+on the 2.4 GHz path after a reboot. **Put the antenna on the u.FL** before the
+interface comes up; the SMA is not on this path.
+
+**From the panel.** The Radio screen's first row is the band, `sub-GHz` or
+`2.4 GHz`, since that is what says which connector the antenna belongs on.
+The frequency editor has four megahertz digits, `MMMM.kkk`, so 2478 MHz is
+typed where it is and a sub-GHz frequency shows a blank for its thousands
+digit; the bandwidth stepper lists the 2.4 GHz three between the sub-GHz
+values, each refused as the other band's until the frequency is there; the
+power stepper runs from the high-frequency PA's −18 dBm to 22 dBm. Every
+refusal fits under the editor. See [The panel](../getting-started/panel.md).
 
 2478 MHz rather than the middle of the band because the middle of this band
 is somebody's Wi-Fi: it sits above channel 11's top edge, under the band's,
@@ -274,6 +304,40 @@ airtime at 812.5 kHz — the same constant the sub-GHz rows in
 power is bounded at the module's rating by construction: the die is
 commanded at 11 dBm on a PA whose ceiling is 13.
 
+**And on the product image, through Reticulum.** The same two boards, the
+`rnode` image on each, `tools/air_exchange.py --frequency 2478000000
+--bandwidth 812500 --txpower 11`: a Reticulum instance per board brought its
+interface up on the first try, and every exchange delivered its bytes, the
+400-byte ones split at 254 and rejoined:
+
+```text
+ #  direction  bytes    rssi    snr  result
+ 1  A -> B       200     -56   12.8  ok
+ 2  B -> A       200     -57   12.2  ok
+ 3  A -> B       400     -54   12.2  ok
+ 4  B -> A       400     -57   12.0  ok
+```
+
+```text
+config: 2478000000 Hz (2478181637 Hz commanded), SF8 BW812500 CR4/5, 11 dBm
+tx: 200 bytes in 1 frames under header 0xb0 (seq 11), 87341 us, after 335 senses (331 busy) and 2004000 us waiting
+rx: 255 bytes, header 0x11 (seq 1, split true), rssi -57 dBm, snr 12 dB
+rx: 147 bytes, header 0x11 (seq 1, split true), rssi -57 dBm, snr 12 dB
+```
+
+The stored configuration survives a reboot too: `rnodeconf --tnc` with those
+values, a `CMD_RESET`, and the boot log reads
+
+```text
+store: loaded from 0xea000, provisioned=true, configured=true, writes via mpsl
+tnc: resuming the stored configuration
+config: 2478000000 Hz (2478181637 Hz commanded), SF8 BW812500 CR4/5, 11 dBm
+```
+
+The `tx:` line is the cost of [#47](https://github.com/paulmeier/oxinode/issues/47)
+in one number: 331 of 335 senses busy, the whole two-second budget spent, and
+the packet sent regardless. It arrived, this time.
+
 **What the exchange also found.** Only 3 of 6 frames were heard, and not
 because of the air: every 2.4 GHz transmission spent its whole carrier-sense
 budget and went forced, about 9 s after it was asked for, while the same
@@ -286,10 +350,11 @@ tx: csma 4 senses, 0 busy, waited 73728 us, forced false          (915 MHz)
 
 Channel activity detection at 812.5 kHz reads a desk with no LoRa on it as
 busy 99% of the time — Wi-Fi and Bluetooth, most likely, against thresholds
-chosen for a quiet sub-GHz band. Until that is understood the product cannot
-go on this band, because a budget spent is a packet sent into whatever was
-there. That is [#47](https://github.com/paulmeier/oxinode/issues/47), and it
-blocks [#43](https://github.com/paulmeier/oxinode/issues/43).
+chosen for a quiet sub-GHz band. The product accepts the band regardless, and
+so a product board on 2.4 GHz pays this on every packet: the whole
+carrier-sense budget, then a transmission into whatever was there. That is
+[#47](https://github.com/paulmeier/oxinode/issues/47), open, and it is why
+the band is usable and not yet good.
 
 **What has not been checked.** That the path is *right*, as opposed to
 alive: the RSSI calibration table the chip boots with is the sub-GHz one, so
@@ -319,12 +384,14 @@ test packets, receive sweeps and a radio reboot. See
 
 !!! danger "Before transmitting"
     Attach an antenna to the connector of the band you are on: the SMA for
-    sub-GHz, the u.FL for the `H` preset. The sub-GHz antenna is not on the
-    2.4 GHz path and the log says so when that preset is loaded. Transmitting
-    into an open port can damage the PA. Start at the lowest usable power and
-    stay within the module's 20 dBm sub-GHz and 11 dBm at 2.4 GHz. Every
-    carrier stops itself after ten seconds: an unmodulated carrier is a bench
-    diagnostic, not a mode that satisfies FCC Part 15.247 in 902–928 MHz.
+    sub-GHz, the u.FL for anything at 2.4 GHz, whether from the `H` preset
+    here or from a host's configuration on the product image. The sub-GHz
+    antenna is not on the 2.4 GHz path and the log says so when that band is
+    configured. Transmitting into an open port can damage the PA. Start at
+    the lowest usable power and stay within the module's 20 dBm sub-GHz and
+    11 dBm at 2.4 GHz. Every carrier stops itself after ten seconds: an
+    unmodulated carrier is a bench diagnostic, not a mode that satisfies FCC
+    Part 15.247 in 902–928 MHz.
 
 ## Open observations
 

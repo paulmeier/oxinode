@@ -45,7 +45,7 @@ use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::modem::{Modem, TxOutcome};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::config::{self, Bands, RadioConfig, ValidConfig};
+use oxinode_core::lr1121::config::{self, RadioConfig, ValidConfig};
 use oxinode_core::lr1121::csma::Backoff;
 use oxinode_core::lr1121::{irq as irq_bits, lora, pa, reference, rf_switch, tcxo, ResetVerdict};
 use oxinode_core::meshtastic;
@@ -1535,10 +1535,10 @@ const FREQUENCY_STEP_HZ: u32 = 100_000;
 
 /// Validate a configuration, logging why not.
 ///
-/// For both bands: this is the bench, and the bench is where the 2.4 GHz path
-/// gets driven. The product image validates for the sub-GHz path alone.
+/// The same gate as the product's, which is both bands: `ValidConfig::new`
+/// judges the bandwidth and the power against the band the frequency is in.
 fn validate(config: &RadioConfig) -> Option<ValidConfig> {
-    match ValidConfig::new_in(*config, Bands::ALL) {
+    match ValidConfig::new(*config) {
         Ok(valid) => Some(valid),
         Err(e) => {
             defmt::error!("config: refused -- {=str}", e.message());

@@ -50,17 +50,20 @@ has to rediscover it.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
-- **The 2.4 GHz path** is driven by the `radio` image and not by the product.
-  Core validates either band; the product image asks for the sub-GHz one,
-  so a host setting 2.4 GHz is told *frequency is outside the 902-928 MHz
-  band*. See [The radio](../hardware/radio.md#the-24-ghz-path). The product
-  work is [#43](https://github.com/paulmeier/oxinode/issues/43), the
-  measurements the bench exchange did not make are
-  [#44](https://github.com/paulmeier/oxinode/issues/44), what to tell
+- **The 2.4 GHz path is accepted and held, and not yet good.** The product
+  image validates for both bands, the panel shows the band and edits a
+  2.4 GHz frequency in place, and a stored 2.4 GHz configuration comes back
+  after a reboot. What stands between that and a usable link is carrier
+  sense: channel activity detection at 812.5 kHz reads a quiet desk as busy
+  on nearly every sense, so every transmission waits out its whole budget
+  and then goes anyway, and a two-board exchange loses frames to the wait.
+  That is [#47](https://github.com/paulmeier/oxinode/issues/47). The
+  measurements the bench exchange did not make (RSSI calibration, receive
+  boost, image calibration, a measured power) are
+  [#44](https://github.com/paulmeier/oxinode/issues/44), and what to tell
   `rnodeconf` about a board with two bands is
-  [#45](https://github.com/paulmeier/oxinode/issues/45), and carrier sense
-  reading a quiet 2.4 GHz channel as busy — which blocks the product work —
-  is [#47](https://github.com/paulmeier/oxinode/issues/47).
+  [#45](https://github.com/paulmeier/oxinode/issues/45). See
+  [The radio](../hardware/radio.md#the-24-ghz-path).
 
 ## Interoperability quirks
 

@@ -153,8 +153,8 @@ pub fn cases() -> Vec<Case> {
             size: square,
         });
         // Every refusal a stepper or the digits can reach, from the fixture:
-        // the first digit down takes 915 MHz to 815; two down from 125 kHz
-        // is 41.7 kHz; four up from 17 dBm is 21 dBm.
+        // the first digit down takes 915 MHz to 9915, in neither band; two
+        // down from 125 kHz is 41.7 kHz; four up from 17 dBm is 21 dBm.
         let refuse = match field {
             Field::Frequency => Some("down select"),
             Field::Bandwidth => Some("down*2 select"),
@@ -203,6 +203,20 @@ pub fn cases() -> Vec<Case> {
         name: "radio-locked-toggle".to_string(),
         script: format!("{radio} select down*{toggle} select"),
         state: scene::phone(),
+        size: square,
+    });
+    // The other band: the Radio screen naming it, and the frequency editor
+    // open on four megahertz digits with the cursor on the first of them.
+    cases.push(Case {
+        name: "radio-2g4".to_string(),
+        script: radio.clone(),
+        state: scene::high_frequency(),
+        size: square,
+    });
+    cases.push(Case {
+        name: "radio-edit-frequency-2g4".to_string(),
+        script: format!("{radio} select down*{} select", item_of(Field::Frequency)),
+        state: scene::high_frequency(),
         size: square,
     });
 
@@ -380,8 +394,9 @@ mod tests {
         // and refused, then five editors, three refusals, the cursor, the
         // screen after an edit, and two notices. Then every screen, three
         // menu windows, a scroll, an editor, a notice and a pairing on the
-        // second panel. Then the receiver searching.
-        let square = 2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1;
+        // second panel. Then the receiver searching, and the other band's
+        // screen and editor.
+        let square = 2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2;
         let wide = Screen::COUNT + 3 + 1 + 1 + 1 + 1;
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
@@ -390,6 +405,8 @@ mod tests {
         }
         assert!(names.contains("radio-edit-tx-power-refused"));
         assert!(names.contains("radio-locked-edit"));
+        assert!(names.contains("radio-2g4"));
+        assert!(names.contains("radio-edit-frequency-2g4"));
         for screen in Screen::ALL {
             let title = slug(screen.title());
             assert!(names.contains(title.as_str()), "{screen:?}");
@@ -462,6 +479,19 @@ mod tests {
                 assert!(!scene.nav.is_editing(), "{}", case.name);
             }
         }
+        // The other band's editor opens on the other band's frequency, with
+        // all four megahertz digits, and the screen behind it says the band.
+        let hf = cases()
+            .into_iter()
+            .find(|c| c.name == "radio-edit-frequency-2g4")
+            .unwrap();
+        let scene = hf.play();
+        let editor = scene.nav.editor().unwrap();
+        assert_eq!(editor.candidate(), 2_478_000_000);
+        assert_eq!(editor.digits(), &[2, 4, 7, 8, 0, 0, 0]);
+        let mut lines = oxinode_core::screens::Lines::new();
+        scene.state.lines(Screen::Radio, &mut lines);
+        assert!(lines.get(0).unwrap().ends_with("2.4 GHz"));
         // The screen after an edit shows the edited value, not the old one.
         let after = cases()
             .into_iter()

@@ -78,7 +78,7 @@ exchange, and `<name>.defmt.log` per oxinode.
 | `--a-log`, `--b-log` | a log port, or `none`; on macOS an oxinode's is derived from its KISS port (`...1` to `...3`) |
 | `--elf` | the ELF the oxinodes were built from (default the release `rnode`) |
 | `--sizes` | sizes on the air, comma separated (default `200,400`) |
-| `--frequency`, `--bandwidth`, `--txpower`, `--spreadingfactor`, `--codingrate` | the radio configuration, given to both |
+| `--frequency`, `--bandwidth`, `--txpower`, `--spreadingfactor`, `--codingrate` | the radio configuration, given to both; `--frequency 2478000000 --bandwidth 812500 --txpower 11` is the 2.4 GHz path, with both antennas on the u.FL |
 | `--timeout` | seconds to wait for an RNode to come up, or a packet to arrive (default 30) |
 | `--out` | where the logs go |
 

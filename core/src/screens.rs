@@ -36,7 +36,7 @@ use monopanel::{font, page, Canvas, Layout};
 
 use crate::battery;
 use crate::ble::NAME_LEN;
-use crate::edit::{Editor, Field, Lock, FREQ_DIGITS};
+use crate::edit::{Editor, Field, Lock, FREQ_POINT};
 use crate::gps;
 use crate::lr1121::config::{ConfigError, RadioConfig};
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
@@ -375,7 +375,7 @@ pub fn wrap(text: &str, width: usize) -> impl Iterator<Item = &str> {
     })
 }
 
-/// A frequency to the kilohertz: `915.000 MHz`.
+/// A frequency to the kilohertz: `915.000 MHz`, `2478.000 MHz`.
 fn megahertz(out: &mut Text<LINE_CHARS>, hz: u32) {
     let _ = write!(
         out,
@@ -383,6 +383,25 @@ fn megahertz(out: &mut Text<LINE_CHARS>, hz: u32) {
         hz / 1_000_000,
         (hz % 1_000_000) / 1_000
     );
+}
+
+/// A bandwidth in kilohertz, to as many places as it needs and no more:
+/// `125.0 kHz`, `62.5 kHz`, `31.25 kHz`, `203.125 kHz`.
+///
+/// The 2.4 GHz bandwidths are 1625 kHz over a power of two, and a screen
+/// that rounded 203.125 to 203.1 would name a bandwidth the chip does not
+/// have -- the same mistake the docs warn a host against. One place stays
+/// the floor, because `125.0` is what every picture of the screen has shown.
+fn kilohertz(out: &mut Text<LINE_CHARS>, hz: u32) {
+    let whole = hz / 1_000;
+    let frac = hz % 1_000;
+    let _ = if frac % 100 == 0 {
+        write!(out, "{whole}.{} kHz", frac / 100)
+    } else if frac % 10 == 0 {
+        write!(out, "{whole}.{:02} kHz", frac / 10)
+    } else {
+        write!(out, "{whole}.{frac:03} kHz")
+    };
 }
 
 /// Seconds since boot as something readable.
@@ -520,6 +539,18 @@ impl Radio {
     pub fn lines(&self, out: &mut Lines) {
         let c = &self.config;
         let mut v = Text::<LINE_CHARS>::new();
+        // The band first, because a configuration has one before it has
+        // anything else: it says which connector the antenna belongs on, and
+        // which set the bandwidth and the power are judged against. A dash
+        // for a frequency in neither, which is a configuration a host can
+        // leave and the radio refuses.
+        out.row(
+            "Band",
+            match c.band() {
+                Some(band) => band.name(),
+                None => "-",
+            },
+        );
         megahertz(&mut v, c.frequency_hz);
         out.row("Freq", v.as_str());
         // What the chip is actually told, which differs by the reference
@@ -529,12 +560,7 @@ impl Radio {
         megahertz(&mut v, c.commanded_frequency_hz());
         out.row("Tuned", v.as_str());
         v.clear();
-        let _ = write!(
-            v,
-            "{}.{} kHz",
-            c.bandwidth_hz / 1_000,
-            (c.bandwidth_hz % 1_000) / 100
-        );
+        kilohertz(&mut v, c.bandwidth_hz);
         out.row("BW", v.as_str());
         v.clear();
         let _ = write!(v, "{}", c.spreading_factor);
@@ -729,12 +755,27 @@ impl System {
 
 /// One field's value in the words the Radio screen uses for it, so the
 /// editor and the screen never disagree about how a number reads.
-fn field_value(out: &mut Text<LINE_CHARS>, field: Field, value: i32) {
+///
+/// The frequency is the one exception, and only in width: the editor's
+/// digits are fixed columns with a cursor under one of them, so the
+/// megahertz are padded to [`FREQ_POINT`] places and a sub-GHz frequency
+/// shows a blank where its thousands digit would be. The words are the
+/// screen's; ` 915.000 MHz` reads as `915.000 MHz` does.
+fn field_value(out: &mut Text<LINE_CHARS>, field: Field, value: i64) {
     match field {
-        Field::Frequency => megahertz(out, value as u32),
-        Field::Bandwidth => {
-            let _ = write!(out, "{}.{} kHz", value / 1_000, (value % 1_000) / 100);
+        Field::Frequency => {
+            // The candidate can exceed what a `u32` holds -- see
+            // `Field::setting` -- and the digits shown are the digits typed.
+            let khz = value / 1_000;
+            let _ = write!(
+                out,
+                "{:>width$}.{:03} MHz",
+                khz / 1_000,
+                khz % 1_000,
+                width = FREQ_POINT
+            );
         }
+        Field::Bandwidth => kilohertz(out, value as u32),
         Field::SpreadingFactor => {
             let _ = write!(out, "{value}");
         }
@@ -788,11 +829,13 @@ impl Editor {
             out.line("");
             out.line("Up/Down: change");
         } else {
-            // `MMM.kkk`: the cursor's column skips the point. An underscore
+            // `MMMM.kkk`: the cursor's column skips the point. An underscore
             // rather than a caret, because the font has one and not the
-            // other, and an underline under a digit reads as a cursor.
+            // other, and an underline under a digit reads as a cursor -- and
+            // under the blank a sub-GHz frequency has for its thousands
+            // digit, it reads as the place where one could go.
             let at = self.cursor();
-            let col = EDIT_VALUE_COL + at + usize::from(at >= FREQ_DIGITS / 2);
+            let col = EDIT_VALUE_COL + at + usize::from(at >= FREQ_POINT);
             line.clear();
             let _ = write!(line, "{:>width$}", "_", width = col + 1);
             out.line(line.as_str());
@@ -1279,6 +1322,66 @@ mod tests {
         }
     }
 
+    /// **The Radio screen says which band it is on.** The band decides the
+    /// connector and the tables, so it is the first row; a frequency in
+    /// neither band is a dash, not a guess.
+    #[test]
+    fn the_radio_screen_names_the_band() {
+        let first = |state: &State| lines_of(state, Screen::Radio)[0].clone();
+        assert!(first(&populated()).starts_with("Band"));
+        assert!(first(&populated()).ends_with("sub-GHz"));
+        assert!(first(&State::default()).ends_with("sub-GHz"));
+
+        let mut hf = populated();
+        hf.radio.config = crate::lr1121::config::BENCH_2G4;
+        let lines = lines_of(&hf, Screen::Radio);
+        assert!(lines[0].ends_with("2.4 GHz"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Freq") && l.ends_with("2478.000 MHz")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("BW") && l.ends_with("812.5 kHz")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Power") && l.ends_with("11 dBm")),
+            "{lines:?}"
+        );
+        let mut out = Lines::new();
+        hf.radio.lines(&mut out);
+        assert!(!out.overflowed(), "a 2.4 GHz row was cut");
+
+        let mut nowhere = populated();
+        nowhere.radio.config.frequency_hz = 1_500_000_000;
+        assert!(first(&nowhere).ends_with('-'));
+    }
+
+    /// The 2.4 GHz bandwidths are shown exactly, and the sub-GHz ones as
+    /// they always were.
+    #[test]
+    fn bandwidths_are_shown_to_the_places_they_need() {
+        let fmt = |hz| {
+            let mut t = Text::<LINE_CHARS>::new();
+            kilohertz(&mut t, hz);
+            t.as_str().to_string()
+        };
+        assert_eq!(fmt(125_000), "125.0 kHz");
+        assert_eq!(fmt(62_500), "62.5 kHz");
+        assert_eq!(fmt(41_700), "41.7 kHz");
+        assert_eq!(fmt(31_250), "31.25 kHz");
+        assert_eq!(fmt(203_125), "203.125 kHz");
+        assert_eq!(fmt(406_250), "406.25 kHz");
+        assert_eq!(fmt(812_500), "812.5 kHz");
+        assert_eq!(fmt(7_800), "7.8 kHz");
+    }
+
     /// A refused configuration says why, in words that fit.
     #[test]
     fn a_refusal_carries_its_reason() {
@@ -1490,26 +1593,38 @@ mod tests {
             .collect()
     }
 
-    /// Every editor, fresh and refused, fits the panel in width and height.
-    /// It cannot scroll, so a line past the eleventh would be invisible.
+    /// Every editor, fresh and refused, fits the panel in width and height,
+    /// on either band. It cannot scroll, so a line past the eleventh would
+    /// be invisible.
     #[test]
     fn every_editor_fits_without_scrolling() {
         let width = LAYOUT.line_width();
-        for field in Field::ALL {
-            let mut e = Editor::open(field, populated().radio.config);
-            for pass in ["fresh", "refused"] {
-                if pass == "refused" {
+        let configs = [populated().radio.config, crate::lr1121::config::BENCH_2G4];
+        for (config, field) in configs.iter().flat_map(|c| Field::ALL.map(|f| (*c, f))) {
+            let mut e = Editor::open(field, config);
+            for pass in ["fresh", "refused up", "refused down"] {
+                match pass {
                     // Drive every field to a refusal it can reach; two of
                     // them cannot, and stay legal.
-                    for _ in 0..12 {
-                        e.up();
+                    "refused up" => {
+                        for _ in 0..12 {
+                            e.up();
+                        }
+                        e.confirm();
                     }
-                    e.confirm();
+                    "refused down" => {
+                        for _ in 0..50 {
+                            e.down();
+                        }
+                        e.confirm();
+                    }
+                    _ => {}
                 }
                 let lines = editor_lines(&e);
                 assert!(
                     lines.len() <= LAYOUT.visible_lines(),
-                    "{field:?} {pass}: {} lines",
+                    "{field:?} {pass} on {} Hz: {} lines: {lines:?}",
+                    config.frequency_hz,
                     lines.len()
                 );
                 let mut out = Lines::new();
@@ -1522,6 +1637,22 @@ mod tests {
                     );
                 }
             }
+        }
+        // Every refusal's reason fits under an editor: the eight lines the
+        // editor needs leave three for the reason.
+        for reason in [
+            ConfigError::FrequencyOutOfBand,
+            ConfigError::UnsupportedBandwidth,
+            ConfigError::BandwidthNotInBand,
+            ConfigError::SpreadingFactorOutOfRange,
+            ConfigError::CodingRateOutOfRange,
+            ConfigError::PowerUnreachable,
+            ConfigError::PowerAboveModuleRating,
+            ConfigError::PowerAbove2G4Rating,
+            ConfigError::PreambleTooShort,
+        ] {
+            let lines = wrap(reason.message(), LINE_CHARS).count();
+            assert!(lines <= 3, "{reason:?} wraps to {lines} lines");
         }
         // And the notices.
         for lock in [Lock::Usb, Lock::Bluetooth] {
@@ -1548,10 +1679,12 @@ mod tests {
         assert!(radio.iter().any(|l| l.ends_with("17 dBm")));
 
         let mut e = Editor::open(Field::Bandwidth, populated().radio.config);
-        e.up();
+        e.up(); // the other band's 203.125 kHz sits between 125 and 250
         let lines = editor_lines(&e);
         assert_eq!(lines[0], "Was   125.0 kHz");
-        assert_eq!(lines[1], "Now   250.0 kHz");
+        assert_eq!(lines[1], "Now   203.125 kHz");
+        e.up();
+        assert_eq!(editor_lines(&e)[1], "Now   250.0 kHz");
         let e = Editor::open(Field::CodingRate, populated().radio.config);
         assert_eq!(editor_lines(&e)[1], "Now   4/5");
         let e = Editor::open(Field::SpreadingFactor, populated().radio.config);
@@ -1559,29 +1692,49 @@ mod tests {
     }
 
     /// The frequency editor's cursor sits under the digit it edits, on both
-    /// sides of the decimal point.
+    /// sides of the decimal point -- and on both bands, where the value is a
+    /// digit wider. A sub-GHz frequency's thousands digit is a blank, and
+    /// the cursor sits under the blank.
     #[test]
     fn the_cursor_is_under_the_digit_it_edits() {
-        let mut e = Editor::open(Field::Frequency, populated().radio.config);
-        for expect in 0..crate::edit::FREQ_DIGITS {
-            let lines = editor_lines(&e);
-            assert_eq!(lines[1], "Now   915.000 MHz");
-            let caret = lines[2].find('_').expect("a cursor line");
-            let digit = lines[1].as_bytes()[caret];
-            assert!(
-                digit.is_ascii_digit(),
-                "cursor {expect} is under `{}`",
-                digit as char
-            );
-            // The k-th digit of the value, skipping the point.
-            let digits: Vec<usize> = lines[1]
+        use crate::edit::FREQ_DIGITS;
+        let cases = [
+            (populated().radio.config, "Now    915.000 MHz", " 915.000"),
+            (
+                crate::lr1121::config::BENCH_2G4,
+                "Now   2478.000 MHz",
+                "2478.000",
+            ),
+        ];
+        for (config, now, value) in cases {
+            let mut e = Editor::open(Field::Frequency, config);
+            // Where each of the seven digits is on the line: after the
+            // label, skipping the point.
+            let columns: Vec<usize> = value
                 .char_indices()
-                .filter(|(_, c)| c.is_ascii_digit())
-                .map(|(i, _)| i)
+                .filter(|(_, c)| *c != '.')
+                .map(|(i, _)| EDIT_VALUE_COL + i)
                 .collect();
-            assert_eq!(caret, digits[expect], "cursor {expect}");
-            e.right();
+            assert_eq!(columns.len(), FREQ_DIGITS);
+            for (expect, &column) in columns.iter().enumerate() {
+                let lines = editor_lines(&e);
+                assert_eq!(lines[1], now);
+                let caret = lines[2].find('_').expect("a cursor line");
+                assert_eq!(caret, column, "cursor {expect} on {now}");
+                let under = lines[1].as_bytes()[caret];
+                assert!(
+                    under.is_ascii_digit() || (expect == 0 && under == b' '),
+                    "cursor {expect} is under `{}`",
+                    under as char
+                );
+                e.right();
+            }
         }
+        // Editing the blank fills it: the leading zero was always there.
+        let mut e = Editor::open(Field::Frequency, populated().radio.config);
+        e.up();
+        assert_eq!(editor_lines(&e)[1], "Now   1915.000 MHz");
+        assert_eq!(editor_lines(&e)[0], "Was    915.000 MHz");
     }
 
     /// A refused value says so, with the same reason the host path gives.

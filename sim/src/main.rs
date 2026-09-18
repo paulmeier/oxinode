@@ -45,8 +45,9 @@ usage: oxinode-sim <command> [options]
 A script is key names separated by spaces: left right up down select back,
 with word*N for repeats and # for comments. --state is the fixture the
 screens draw from: `populated` (the default) is a board mid-session with a
-host on the line, `empty` one that knows nothing yet, and `standalone` a TNC
-with no host attached -- the one whose settings the panel may change.
+host on the line, `empty` one that knows nothing yet, `standalone` a TNC
+with no host attached -- the one whose settings the panel may change -- and
+`2g4` that TNC on the other band, at 2478 MHz.
 --panel is the size to draw on: 128x128 (the default, the board's own) or
 any other, such as 128x64; the golden set is held at both of those.
 ";
@@ -124,7 +125,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--state" => {
                 let v = value("--state")?;
                 state = Fixture::named(&v).ok_or_else(|| {
-                    format!("--state: `{v}` is not `empty`, `populated` or `standalone`")
+                    format!("--state: `{v}` is not `empty`, `populated`, `standalone` or `2g4`")
                 })?;
             }
             "--panel" => {
