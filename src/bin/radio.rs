@@ -1118,6 +1118,16 @@ async fn tx_packet<S, B>(
                 report.airtime_us,
                 report.pending
             );
+            // The wait for a clear channel, so a transmission that took
+            // seconds to go says whether it was the air or the radio. On
+            // 2.4 GHz the air is somebody's Wi-Fi.
+            defmt::info!(
+                "tx: csma {=u32} senses, {=u32} busy, waited {=u32} us, forced {=bool}",
+                report.csma.senses,
+                report.csma.busy,
+                report.csma.waited_us,
+                report.csma.forced
+            );
             // Five percent of the airtime, plus a millisecond for the SetTx
             // transaction, the PLL lock and the PA ramp.
             let slack = report.airtime_us / 20 + 1_000;

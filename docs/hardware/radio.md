@@ -257,17 +257,46 @@ RAK4631 models by their sub-GHz range only. Model `0xff` has no entry, so
 host about a board with two bands is
 [#45](https://github.com/paulmeier/oxinode/issues/45).
 
-**What has been checked on a board, and what has not.** The path's silicon
-facts above are the datasheet's and the crate's; the switch and PA words are
-built and tested in core. Checking the path on the bench is a `radio` image
-on each of two boards, `H` on both, `y` on one and `p` on the other, and
-then the other way round; the result is recorded on
-[#35](https://github.com/paulmeier/oxinode/issues/35). What that exchange
-does not establish is that the path is *right*: the RSSI calibration table
-the chip boots with is the sub-GHz one, the receive-boost setting is a
-sub-GHz setting, and the RTL-SDR that measured everything on this page stops
-at 1.7 GHz, so nothing has measured what leaves the u.FL. That is
-[#44](https://github.com/paulmeier/oxinode/issues/44).
+**What has been checked on a board.** The path works. Two Base Duos on a
+desk, the `radio` image on each, `H` on both, `y` on one and `p` on the
+other and then the other way round, with nothing on either u.FL:
+
+```text
+rx: PACKET 1: 15 bytes, RSSI -72 dBm, SNR 12 dB      (board D330…, hearing 65C1…)
+rx: PACKET 1: 15 bytes, RSSI -54 dBm, SNR 13 dB      (board 65C1…, hearing D330…)
+rx: PACKET 2: 15 bytes, RSSI -43 dBm, SNR 13 dB
+tx: interrupt after 14739 us against 14253 us of computed airtime
+```
+
+Both directions, the payload intact, and `TxDone` 486 µs over the computed
+airtime at 812.5 kHz — the same constant the sub-GHz rows in
+[Airtime](#airtime) show, so the airtime formula holds on this band too. The
+power is bounded at the module's rating by construction: the die is
+commanded at 11 dBm on a PA whose ceiling is 13.
+
+**What the exchange also found.** Only 3 of 6 frames were heard, and not
+because of the air: every 2.4 GHz transmission spent its whole carrier-sense
+budget and went forced, about 9 s after it was asked for, while the same
+board on 915 MHz a minute later cleared in a few senses:
+
+```text
+tx: csma 335 senses, 331 busy, waited 2004000 us, forced true    (2478 MHz)
+tx: csma 4 senses, 0 busy, waited 73728 us, forced false          (915 MHz)
+```
+
+Channel activity detection at 812.5 kHz reads a desk with no LoRa on it as
+busy 99% of the time — Wi-Fi and Bluetooth, most likely, against thresholds
+chosen for a quiet sub-GHz band. Until that is understood the product cannot
+go on this band, because a budget spent is a packet sent into whatever was
+there. That is [#47](https://github.com/paulmeier/oxinode/issues/47), and it
+blocks [#43](https://github.com/paulmeier/oxinode/issues/43).
+
+**What has not been checked.** That the path is *right*, as opposed to
+alive: the RSSI calibration table the chip boots with is the sub-GHz one, so
+the RSSI figures above are comparisons rather than measurements; the
+receive-boost setting is a sub-GHz setting; and the RTL-SDR that measured
+everything on this page stops at 1.7 GHz, so nothing has measured what
+leaves the u.FL. That is [#44](https://github.com/paulmeier/oxinode/issues/44).
 
 ## Airtime
 

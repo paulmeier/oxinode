@@ -56,9 +56,11 @@ has to rediscover it.
   band*. See [The radio](../hardware/radio.md#the-24-ghz-path). The product
   work is [#43](https://github.com/paulmeier/oxinode/issues/43), the
   measurements the bench exchange did not make are
-  [#44](https://github.com/paulmeier/oxinode/issues/44), and what to tell
+  [#44](https://github.com/paulmeier/oxinode/issues/44), what to tell
   `rnodeconf` about a board with two bands is
-  [#45](https://github.com/paulmeier/oxinode/issues/45).
+  [#45](https://github.com/paulmeier/oxinode/issues/45), and carrier sense
+  reading a quiet 2.4 GHz channel as busy — which blocks the product work —
+  is [#47](https://github.com/paulmeier/oxinode/issues/47).
 
 ## Interoperability quirks
 
