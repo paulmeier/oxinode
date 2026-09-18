@@ -50,7 +50,15 @@ has to rediscover it.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
-- **The 2.4 GHz path** is not driven.
+- **The 2.4 GHz path** is driven by the `radio` image and not by the product.
+  Core validates either band; the product image asks for the sub-GHz one,
+  so a host setting 2.4 GHz is told *frequency is outside the 902-928 MHz
+  band*. See [The radio](../hardware/radio.md#the-24-ghz-path). The product
+  work is [#43](https://github.com/paulmeier/oxinode/issues/43), the
+  measurements the bench exchange did not make are
+  [#44](https://github.com/paulmeier/oxinode/issues/44), and what to tell
+  `rnodeconf` about a board with two bands is
+  [#45](https://github.com/paulmeier/oxinode/issues/45).
 
 ## Interoperability quirks
 

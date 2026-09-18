@@ -43,10 +43,10 @@ the bench:
 | `1` `2` `3` | Continuous carrier at −17, 0 and +14 dBm |
 | `0` | Stop transmitting |
 | `S` `W` `C` `P` | Cycle spreading factor, bandwidth, coding rate, power |
-| `[` `]` | Step the frequency down or up by 100 kHz, saturating at the band edges |
+| `[` `]` | Step the frequency down or up by 100 kHz, saturating at the edges of the band it is in |
 | `R` | Toggle the correction for the module's 73 ppm reference error |
 | `N` | Switch sync word between `0x12` (RNode) and `0x2b` (Meshtastic) |
-| `M` `D` | Load the Meshtastic LongFast preset, or the default |
+| `M` `H` `D` | Load the Meshtastic LongFast preset, the 2.4 GHz bench preset, or the default |
 | `A` | Apply the current configuration without transmitting |
 | `p` | Send one LoRa packet with the current configuration |
 | `y` `z` `E` | Listen; sweep the frequency coarsely; sweep the receive window's edge |

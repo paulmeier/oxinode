@@ -137,10 +137,10 @@ Three commands report success and do nothing if issued in the wrong mode:
 
 | | value |
 |---|---|
-| Band | 902–928 MHz (US915) sub-GHz; the 2.4 GHz path is not driven |
-| Maximum power | **20 dBm** sub-GHz, 11.5 dBm at 2.4 GHz (the module's rating, below the chip's 22/13) |
+| Band | 902–928 MHz (US915) on the SMA, in every image; 2400–2483.5 MHz on the u.FL, in the `radio` image only — see [The 2.4 GHz path](#the-24-ghz-path) |
+| Maximum power | **20 dBm** sub-GHz, **11 dBm** at 2.4 GHz (the module's ratings, 20 and 11.5, rounded down, below the chip's 22/13) |
 | Spreading factor | 5–12 at the chip; 7–12 representable on the RNode protocol |
-| Bandwidth | the chip's set, refused for the six of the ten RNode bandwidths it does not have |
+| Bandwidth | the chip's set for the band: 62.5/125/250/500 kHz sub-GHz, 203.125/406.25/812.5 kHz at 2.4 GHz. Refused for the six of the ten RNode bandwidths it does not have, and refused as *the other band's* for the right set on the wrong band |
 | Coding rate | 4/5 to 4/8; the host's 5–8 is translated to the chip's 1–4 |
 | Sync word | `0x12` (private) by default; `0x34` would announce LoRaWAN, and `0x2b` is Meshtastic's |
 
@@ -191,6 +191,84 @@ above the **wanted** one, and Reticulum rejects a frequency that comes back
 more than 100 Hz from what it set. The protocol reports the wanted frequency;
 the Radio screen shows both.
 
+## The 2.4 GHz path
+
+The LR1121 has a second front end: a high-frequency transceiver for
+2400–2500 MHz with its own PA, its own bandwidths and its own pin, which the
+module brings to a u.FL connector next to the sub-GHz SMA and rates at
+11.5 dBm. It does not go through the RF switch (the `TX high frequency` row
+of the table above is the same as standby for that reason), and it is
+different silicon from the sub-GHz path in every respect that the firmware
+has to know about:
+
+| | sub-GHz | 2.4 GHz |
+|---|---|---|
+| Band, as validated | 902–928 MHz | 2400–2483.5 MHz (the regulatory edge, not the chip's 2500) |
+| PA | low-power (`PaSel` 0) to 14 dBm, high-power (`PaSel` 1) above | high-frequency (`PaSel` 2), internal regulator only, −18 to +13 dBm at the die |
+| Module rating | 20 dBm | 11.5 dBm; the firmware holds 11 |
+| Bandwidths (chip codes) | 62.5 / 125 / 250 / 500 kHz (`0x03`–`0x06`) | 203.125 / 406.25 / 812.5 kHz (`0x0D`–`0x0F`) |
+| Image calibration | `CalibImage` on the band | none: the command's two one-byte arguments are in 4 MHz steps and cannot name 2.4 GHz, and `lr11xx` documents it as acting on the sub-GHz input |
+| Connector | SMA | u.FL |
+
+So a configuration has a band before it has anything else, and
+`oxinode_core::lr1121::config` decides it from the frequency and judges the
+bandwidth and the power against that band's tables. A 125 kHz bandwidth at
+2478 MHz is refused as *bandwidth belongs to the other band* rather than as
+unsupported, because the chip does have it, just not there; 14 dBm at
+2478 MHz is refused as above the module's 11 dBm rating at 2.4 GHz, a
+different message from the sub-GHz 20 dBm one because it is a different
+number. Every one of those rules has a test.
+
+`lr11xx`'s `LoRaBandwidth` has no variant for the three 2.4 GHz codes, so the
+modulation word is packed in core from the tested codes and handed to the
+crate as a raw value, the same way the RF switch and PA words already are.
+
+**Which images drive it.** The bench image, on purpose, and the product image,
+not yet. Validation takes a `Bands`: the `radio` image asks for both and its
+`H` key loads `BENCH_2G4` (2478 MHz, 812.5 kHz, SF8, CR 4/5, 11 dBm,
+uncorrected); the product image asks for the sub-GHz band alone, so a host
+setting 2.4 GHz on it is told what it would be told for 868 MHz. Extending the
+product is [#43](https://github.com/paulmeier/oxinode/issues/43), and it is
+more than changing what it asks for: the panel's frequency editor, bandwidth
+steps and power steps are all sub-GHz.
+
+2478 MHz rather than the middle of the band because the middle of this band
+is somebody's Wi-Fi: it sits above channel 11's top edge, under the band's,
+and 2 MHz clear of Bluetooth's advertising channel 39 at 2480, with room for
+the widest LoRa bandwidth. Uncorrected because the only radio that answers
+on 2.4 GHz is another Base Duo carrying the same 73 ppm error — which is
+181 kHz up here, still inside an 812.5 kHz channel either way.
+
+**Whether a host can ask for it** — question 2 of
+[#35](https://github.com/paulmeier/oxinode/issues/35) — has a plain answer
+from the Reticulum source (RNS 1.5.0). `RNodeInterface` validates the
+frequency against 137 MHz–3 GHz, the bandwidth against 7.8 kHz–1.625 MHz,
+the power against 0–37 dBm and the spreading factor against 5–12, sends the
+frequency as four bytes, and compares what the radio reports against what it
+set to within 100 Hz. Nothing in it knows what a band is. So `frequency =
+2478000000`, `bandwidth = 812500`, `txpower = 11` is an ordinary interface
+configuration, and the firmware's own validation is the only thing standing
+between it and the air. `rnodeconf` is the one place a band is named, and it
+names it from its own table keyed on the model byte, for `-i` and for
+choosing a firmware file; that table has one 2.4 GHz entry (`0xAC`, a T3S3
+with an SX1280 and a PA, 2.4–2.5 GHz, 20 dBm) and lists the dual-radio
+RAK4631 models by their sub-GHz range only. Model `0xff` has no entry, so
+`rnodeconf -i` says the band is unknown, which is not wrong. What to tell the
+host about a board with two bands is
+[#45](https://github.com/paulmeier/oxinode/issues/45).
+
+**What has been checked on a board, and what has not.** The path's silicon
+facts above are the datasheet's and the crate's; the switch and PA words are
+built and tested in core. Checking the path on the bench is a `radio` image
+on each of two boards, `H` on both, `y` on one and `p` on the other, and
+then the other way round; the result is recorded on
+[#35](https://github.com/paulmeier/oxinode/issues/35). What that exchange
+does not establish is that the path is *right*: the RSSI calibration table
+the chip boots with is the sub-GHz one, the receive-boost setting is a
+sub-GHz setting, and the RTL-SDR that measured everything on this page stops
+at 1.7 GHz, so nothing has measured what leaves the u.FL. That is
+[#44](https://github.com/paulmeier/oxinode/issues/44).
+
 ## Airtime
 
 Airtime is computed from Semtech's formula in `oxinode_core::lr1121::lora`,
@@ -211,11 +289,13 @@ test packets, receive sweeps and a radio reboot. See
 [Firmware images](../architecture/images.md) for the key table.
 
 !!! danger "Before transmitting"
-    Attach an antenna to the sub-GHz SMA, not the 2.4 GHz u.FL. Transmitting
+    Attach an antenna to the connector of the band you are on: the SMA for
+    sub-GHz, the u.FL for the `H` preset. The sub-GHz antenna is not on the
+    2.4 GHz path and the log says so when that preset is loaded. Transmitting
     into an open port can damage the PA. Start at the lowest usable power and
-    stay within the module's 20 dBm. Every carrier stops itself after ten
-    seconds: an unmodulated carrier is a bench diagnostic, not a mode that
-    satisfies FCC Part 15.247 in 902–928 MHz.
+    stay within the module's 20 dBm sub-GHz and 11 dBm at 2.4 GHz. Every
+    carrier stops itself after ten seconds: an unmodulated carrier is a bench
+    diagnostic, not a mode that satisfies FCC Part 15.247 in 902–928 MHz.
 
 ## Open observations
 
