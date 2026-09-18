@@ -26,6 +26,15 @@ pub const BANDWIDTHS: [(u8, u32); 4] = [
     (0x06, 500_000),
 ];
 
+/// The chip's LoRa bandwidths on the 2.4 GHz path, as `(code, hertz)`.
+///
+/// A different set from [`BANDWIDTHS`], not a superset: the sub-GHz codes are
+/// refused by the chip above 2.4 GHz and these three are refused below it. The
+/// odd hertz values are exact — each is 1625 kHz divided by a power of two,
+/// which is the same 812.5 kHz that an SX1280 calls 800 — so a host that
+/// rounds them to 200/400/800 kHz has named a bandwidth this chip does not have.
+pub const BANDWIDTHS_2G4: [(u8, u32); 3] = [(0x0D, 203_125), (0x0E, 406_250), (0x0F, 812_500)];
+
 /// Coding-rate code for 4/5, the shortest.
 pub const CR_4_5: u8 = 0x01;
 

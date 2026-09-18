@@ -98,6 +98,81 @@ pub const MODULE_MAX_SUB_GHZ_DBM: i8 = 20;
 /// 11.5 dBm rounded down, against the LR1121's headline 13 dBm.
 pub const MODULE_MAX_2G4_DBM: i8 = 11;
 
+/// Lowest output power the high-frequency PA accepts, in dBm.
+pub const HF_MIN_DBM: i8 = -18;
+/// Highest output power the high-frequency PA accepts, in dBm — the *die's*
+/// number. [`MODULE_MAX_2G4_DBM`] is lower and is the one that binds.
+pub const HF_MAX_DBM: i8 = 13;
+
+/// The high-frequency PA: the 2.4 GHz path.
+///
+/// `PaSel` 2 is the third PA, on its own output pin, and the reason the RF
+/// switch table has a row for it. It runs from the internal regulator only —
+/// there is no VBAT option for it, which is why [`requires_vbat_supply`] is not
+/// consulted when this word is chosen. The duty cycle and size are the
+/// datasheet's values for the full 13 dBm.
+pub const HIGH_FREQUENCY: PaConfigWord = PaConfigWord {
+    pa_sel: 2,
+    reg_pa_supply: 0,
+    duty_cycle: 0x04,
+    hp_sel: 0x00,
+};
+
+/// Which of the LR1121's two front ends a frequency belongs to.
+///
+/// They are different silicon with different PAs, different bandwidths and a
+/// different connector, and nothing configured for one applies to the other.
+/// A configuration therefore has a band before it has anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// The sub-GHz path: the SMA connector, the switch, the low- and
+    /// high-power PAs. Everything this project has measured.
+    SubGhz,
+    /// The 2.4 GHz path: the u.FL connector, no switch, the high-frequency PA.
+    HighFrequency,
+}
+
+impl Band {
+    /// A short name for a log line.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SubGhz => "sub-GHz",
+            Self::HighFrequency => "2.4 GHz",
+        }
+    }
+}
+
+/// Whether the high-frequency PA can produce this output power.
+pub const fn high_frequency_pa_accepts(dbm: i8) -> bool {
+    dbm >= HF_MIN_DBM && dbm <= HF_MAX_DBM
+}
+
+/// What the module is rated for on a band, in dBm.
+pub const fn module_max_dbm(band: Band) -> i8 {
+    match band {
+        Band::SubGhz => MODULE_MAX_SUB_GHZ_DBM,
+        Band::HighFrequency => MODULE_MAX_2G4_DBM,
+    }
+}
+
+/// Which PA to use for an output power on a band, or `None` if none reaches
+/// it.
+///
+/// On the sub-GHz path this is [`pa_config_for`]. On the 2.4 GHz path there is
+/// only one PA and no preference to have.
+pub const fn pa_config_in(band: Band, dbm: i8) -> Option<PaConfigWord> {
+    match band {
+        Band::SubGhz => pa_config_for(dbm),
+        Band::HighFrequency => {
+            if high_frequency_pa_accepts(dbm) {
+                Some(HIGH_FREQUENCY)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Whether the low-power PA can produce this output power.
 pub const fn low_power_pa_accepts(dbm: i8) -> bool {
     dbm >= LP_MIN_DBM && dbm <= LP_MAX_DBM
@@ -219,6 +294,40 @@ pub const fn is_in_us915(hz: u32) -> bool {
     hz >= US915_MIN_HZ && hz <= US915_MAX_HZ
 }
 
+/// The 2.4 GHz ISM band, in hertz.
+///
+/// The regulatory band and not the module's: the LR1121 tunes to 2500 MHz
+/// and FCC Part 15.247 stops at 2483.5. Nothing above that edge is a
+/// configuration this firmware will hold.
+pub const ISM_2G4_MIN_HZ: u32 = 2_400_000_000;
+/// See [`ISM_2G4_MIN_HZ`].
+pub const ISM_2G4_MAX_HZ: u32 = 2_483_500_000;
+
+/// Frequency for a 2.4 GHz bench exchange.
+///
+/// Not the middle of the band, for once, because the middle of this band is
+/// somebody's Wi-Fi. 2478 MHz sits above channel 11's top edge (2473 MHz),
+/// below the band's, and 2 MHz clear of Bluetooth's advertising channel 39 at
+/// 2480 — a spot the widest LoRa bandwidth (812.5 kHz) fits into without
+/// sharing it with anything on an ordinary bench.
+pub const CW_TEST_2G4_HZ: u32 = 2_478_000_000;
+
+/// Whether a frequency is inside the 2.4 GHz ISM band.
+pub const fn is_in_2g4(hz: u32) -> bool {
+    hz >= ISM_2G4_MIN_HZ && hz <= ISM_2G4_MAX_HZ
+}
+
+/// Which band a frequency is in, or `None` if it is in neither.
+pub const fn band_of(hz: u32) -> Option<Band> {
+    if is_in_us915(hz) {
+        Some(Band::SubGhz)
+    } else if is_in_2g4(hz) {
+        Some(Band::HighFrequency)
+    } else {
+        None
+    }
+}
+
 /// How long a continuous-wave burst may last, in milliseconds.
 ///
 /// A bare carrier is a bench diagnostic, not a mode that satisfies FCC Part
@@ -312,6 +421,35 @@ const _: () = assert!(MODULE_MAX_SUB_GHZ_DBM <= HP_MAX_DBM);
 // The overlap is real and the preference resolves it. If these two ever stop
 // overlapping, `pa_config_for` has a gap in the middle of its range.
 const _: () = assert!(HP_MIN_DBM < LP_MAX_DBM);
+// The 2.4 GHz band: edges in, a hertz outside out, and nothing sub-GHz in it.
+const _: () = assert!(is_in_2g4(ISM_2G4_MIN_HZ) && is_in_2g4(ISM_2G4_MAX_HZ));
+const _: () = assert!(!is_in_2g4(ISM_2G4_MIN_HZ - 1) && !is_in_2g4(ISM_2G4_MAX_HZ + 1));
+const _: () = assert!(!is_in_2g4(CW_TEST_HZ) && !is_in_us915(CW_TEST_2G4_HZ));
+const _: () = assert!(is_in_2g4(CW_TEST_2G4_HZ));
+// The band's top edge is the regulatory one, inside what the chip tunes to.
+const _: () = assert!(ISM_2G4_MAX_HZ < 2_500_000_000);
+// The bench frequency leaves half the widest 2.4 GHz bandwidth of room below
+// the band edge and below Bluetooth's channel 39, or "clear of both" is false.
+const _: () = assert!(CW_TEST_2G4_HZ + 406_250 < ISM_2G4_MAX_HZ);
+const _: () = assert!(CW_TEST_2G4_HZ + 406_250 < 2_480_000_000);
+// The two bands do not touch, so `band_of` has no ambiguous answer.
+const _: () = assert!(US915_MAX_HZ < ISM_2G4_MIN_HZ);
+// The module's 2.4 GHz rating is inside the high-frequency PA's range, or the
+// clamp is clamping to something the PA cannot produce.
+const _: () = assert!(high_frequency_pa_accepts(MODULE_MAX_2G4_DBM));
+const _: () = assert!(MODULE_MAX_2G4_DBM <= HF_MAX_DBM);
+const _: () = assert!(
+    high_frequency_pa_accepts(HF_MIN_DBM) && high_frequency_pa_accepts(HF_MAX_DBM),
+    "the range must include its own endpoints"
+);
+const _: () = assert!(
+    !high_frequency_pa_accepts(HF_MIN_DBM - 1) && !high_frequency_pa_accepts(HF_MAX_DBM + 1)
+);
+// The high-frequency PA is the third PA select, not a flag on the other two.
+const _: () =
+    assert!(HIGH_FREQUENCY.pa_sel == 2 && LOW_POWER.pa_sel == 0 && HIGH_POWER.pa_sel == 1);
+// ...and it has no VBAT option, so the word must never ask for one.
+const _: () = assert!(HIGH_FREQUENCY.reg_pa_supply == 0);
 
 #[cfg(test)]
 mod tests {
@@ -377,6 +515,58 @@ mod tests {
     fn the_diagnostic_constant_is_not_the_configurable_one() {
         assert_eq!(high_power(0), HIGH_POWER);
         assert_ne!(high_power(MODULE_MAX_SUB_GHZ_DBM), HIGH_POWER);
+    }
+
+    /// The 2.4 GHz path has one PA, so the band decides the word and the
+    /// power only decides whether there is one. Nothing is clamped: 12 dBm
+    /// is inside the die's range and outside the module's, and it is the
+    /// configuration layer's job to say so, not this one's job to round.
+    #[test]
+    fn the_high_frequency_band_selects_the_third_pa_throughout_its_range() {
+        for dbm in HF_MIN_DBM..=HF_MAX_DBM {
+            assert_eq!(
+                pa_config_in(Band::HighFrequency, dbm),
+                Some(HIGH_FREQUENCY),
+                "{dbm} dBm"
+            );
+        }
+        assert_eq!(pa_config_in(Band::HighFrequency, HF_MIN_DBM - 1), None);
+        assert_eq!(pa_config_in(Band::HighFrequency, HF_MAX_DBM + 1), None);
+        assert_eq!(HIGH_FREQUENCY.to_raw(), 0x0200_0400);
+    }
+
+    /// On the sub-GHz band the band-aware selector is exactly the old one.
+    #[test]
+    fn the_sub_ghz_band_keeps_the_measured_preference() {
+        for dbm in (LP_MIN_DBM - 2)..=(HP_MAX_DBM + 2) {
+            assert_eq!(
+                pa_config_in(Band::SubGhz, dbm),
+                pa_config_for(dbm),
+                "{dbm} dBm"
+            );
+        }
+    }
+
+    /// Every hertz is in one band, the other, or neither -- never both.
+    #[test]
+    fn a_frequency_has_at_most_one_band() {
+        assert_eq!(band_of(CW_TEST_HZ), Some(Band::SubGhz));
+        assert_eq!(band_of(CW_TEST_2G4_HZ), Some(Band::HighFrequency));
+        assert_eq!(band_of(US915_MAX_HZ), Some(Band::SubGhz));
+        assert_eq!(band_of(ISM_2G4_MIN_HZ), Some(Band::HighFrequency));
+        for hz in [
+            0,
+            868_000_000,
+            US915_MAX_HZ + 1,
+            ISM_2G4_MIN_HZ - 1,
+            ISM_2G4_MAX_HZ + 1,
+            2_500_000_000,
+            u32::MAX,
+        ] {
+            assert_eq!(band_of(hz), None, "{hz} Hz");
+        }
+        assert_eq!(module_max_dbm(Band::SubGhz), MODULE_MAX_SUB_GHZ_DBM);
+        assert_eq!(module_max_dbm(Band::HighFrequency), MODULE_MAX_2G4_DBM);
     }
 
     /// The bug this module exists to route around: in `lr11xx`, selecting the

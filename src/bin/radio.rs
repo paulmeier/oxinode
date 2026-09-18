@@ -45,7 +45,7 @@ use lr11xx::Lr11xx;
 use oxinode::board::{self, Led};
 use oxinode::modem::{Modem, TxOutcome};
 use oxinode::{boot, radio, usb_log};
-use oxinode_core::lr1121::config::{self, RadioConfig, ValidConfig};
+use oxinode_core::lr1121::config::{self, Bands, RadioConfig, ValidConfig};
 use oxinode_core::lr1121::csma::Backoff;
 use oxinode_core::lr1121::{irq as irq_bits, lora, pa, reference, rf_switch, tcxo, ResetVerdict};
 use oxinode_core::meshtastic;
@@ -478,7 +478,7 @@ where
         pa::CW_SWEEP_HZ[1]
     );
     defmt::info!(
-        "console config: S = spreading factor, W = bandwidth, C = coding rate, P = power, [ / ] = frequency -/+ 100 kHz, R = reference correction, N = sync word, M = Meshtastic LongFast preset, D = oxinode default, A = apply, ? = show"
+        "console config: S = spreading factor, W = bandwidth, C = coding rate, P = power, [ / ] = frequency -/+ 100 kHz, R = reference correction, N = sync word, M = Meshtastic LongFast preset, H = 2.4 GHz bench preset, D = oxinode default, A = apply, ? = show"
     );
     defmt::info!(
         "console radio: p = send a packet, y = listen 20 s (h/i = -60/+60 kHz), z = coarse frequency sweep, E = fine sweep of the window's upper edge"
@@ -637,7 +637,8 @@ where
                         // The configuration editor. Each key cycles one
                         // parameter and prints the result; nothing reaches the
                         // chip until a transmit, a receive, or `A`.
-                        b'S' | b'W' | b'C' | b'P' | b'[' | b']' | b'R' | b'N' | b'M' | b'D' => {
+                        b'S' | b'W' | b'C' | b'P' | b'[' | b']' | b'R' | b'N' | b'M' | b'H'
+                        | b'D' => {
                             edit_config(&mut cfg, byte);
                             match validate(&cfg) {
                                 Some(valid) => log_config(&valid),
@@ -1117,6 +1118,16 @@ async fn tx_packet<S, B>(
                 report.airtime_us,
                 report.pending
             );
+            // The wait for a clear channel, so a transmission that took
+            // seconds to go says whether it was the air or the radio. On
+            // 2.4 GHz the air is somebody's Wi-Fi.
+            defmt::info!(
+                "tx: csma {=u32} senses, {=u32} busy, waited {=u32} us, forced {=bool}",
+                report.csma.senses,
+                report.csma.busy,
+                report.csma.waited_us,
+                report.csma.forced
+            );
             // Five percent of the airtime, plus a millisecond for the SetTx
             // transaction, the PLL lock and the PA ramp.
             let slack = report.airtime_us / 20 + 1_000;
@@ -1423,12 +1434,19 @@ fn edit_config(config: &mut RadioConfig, key: u8) {
                 config.spreading_factor + 1
             };
         }
+        // Cycles the bandwidths of the band the frequency is in, because the
+        // other band's are refused and a key that only ever produced refusals
+        // would be a key that does nothing.
         b'W' => {
-            let next = lora::BANDWIDTHS
+            let table: &[(u8, u32)] = match config.band() {
+                Some(pa::Band::HighFrequency) => &lora::BANDWIDTHS_2G4,
+                _ => &lora::BANDWIDTHS,
+            };
+            let next = table
                 .iter()
                 .position(|(_, hz)| *hz == config.bandwidth_hz)
-                .map_or(0, |i| (i + 1) % lora::BANDWIDTHS.len());
-            config.bandwidth_hz = lora::BANDWIDTHS[next].1;
+                .map_or(0, |i| (i + 1) % table.len());
+            config.bandwidth_hz = table[next].1;
         }
         b'C' => {
             config.coding_rate = if config.coding_rate >= config::CR_MAX {
@@ -1444,19 +1462,26 @@ fn edit_config(config: &mut RadioConfig, key: u8) {
                 .map_or(0, |i| (i + 1) % POWER_LADDER.len());
             config.tx_power_dbm = POWER_LADDER[next];
         }
-        // Saturating at the band edges rather than wrapping. A frequency key
-        // held down should stop at 928 MHz, not reappear at 902.
-        b'[' => {
-            config.frequency_hz = config
-                .frequency_hz
-                .saturating_sub(FREQUENCY_STEP_HZ)
-                .max(pa::US915_MIN_HZ);
-        }
-        b']' => {
-            config.frequency_hz = config
-                .frequency_hz
-                .saturating_add(FREQUENCY_STEP_HZ)
-                .min(pa::US915_MAX_HZ);
+        // Saturating at the edges of the band the frequency is in rather than
+        // wrapping. A frequency key held down should stop at 928 MHz, not
+        // reappear at 902 -- and stop at 2483.5 MHz, not be dragged down to
+        // 928 from 2.4 GHz by a clamp that only knew one band.
+        b'[' | b']' => {
+            let (low, high) = match config.band() {
+                Some(pa::Band::HighFrequency) => (pa::ISM_2G4_MIN_HZ, pa::ISM_2G4_MAX_HZ),
+                _ => (pa::US915_MIN_HZ, pa::US915_MAX_HZ),
+            };
+            config.frequency_hz = if key == b'[' {
+                config
+                    .frequency_hz
+                    .saturating_sub(FREQUENCY_STEP_HZ)
+                    .max(low)
+            } else {
+                config
+                    .frequency_hz
+                    .saturating_add(FREQUENCY_STEP_HZ)
+                    .min(high)
+            };
         }
         b'R' => config.correct_reference = !config.correct_reference,
         // Two sync words, because there are two kinds of neighbour worth
@@ -1487,6 +1512,10 @@ fn edit_config(config: &mut RadioConfig, key: u8) {
                 ..config::DEFAULT
             };
         }
+        // The other front end, in one key. Everything about it is in
+        // `oxinode_core::lr1121::config::BENCH_2G4`, including why it is
+        // uncorrected and why it is not in the middle of the band.
+        b'H' => *config = config::BENCH_2G4,
         b'D' => *config = config::DEFAULT,
         _ => {}
     }
@@ -1505,8 +1534,11 @@ const POWER_LADDER: [i8; 7] = [pa::LP_MIN_DBM, -10, 0, 7, pa::LP_MAX_DBM, 17, 20
 const FREQUENCY_STEP_HZ: u32 = 100_000;
 
 /// Validate a configuration, logging why not.
+///
+/// For both bands: this is the bench, and the bench is where the 2.4 GHz path
+/// gets driven. The product image validates for the sub-GHz path alone.
 fn validate(config: &RadioConfig) -> Option<ValidConfig> {
-    match ValidConfig::new(*config) {
+    match ValidConfig::new_in(*config, Bands::ALL) {
         Ok(valid) => Some(valid),
         Err(e) => {
             defmt::error!("config: refused -- {=str}", e.message());
@@ -1523,7 +1555,8 @@ fn validate(config: &RadioConfig) -> Option<ValidConfig> {
 /// would make that distinction invisible again.
 fn log_config(config: &ValidConfig) {
     defmt::info!(
-        "config: {=u32} Hz wanted, {=u32} Hz commanded ({=str}), SF{=u8} BW{=u32} CR4/{=u8}, {=i8} dBm",
+        "config: {=str} band, {=u32} Hz wanted, {=u32} Hz commanded ({=str}), SF{=u8} BW{=u32} CR4/{=u8}, {=i8} dBm",
+        config.band().name(),
         config.frequency_hz,
         config.commanded_frequency_hz(),
         if config.correct_reference {
@@ -1554,10 +1587,14 @@ fn log_config(config: &ValidConfig) {
             "config: an RNode host could not ask for this; SF must be 7-12 and power >= 0"
         );
     }
-    if config.pa_config().pa_sel != 0 {
-        defmt::warn!(
+    match config.pa_config().pa_sel {
+        0 => {}
+        1 => defmt::warn!(
             "config: {=i8} dBm selects the HIGH-POWER PA, which nothing on this board has ever measured. Only the low-power PA has ever been measured on this board. Attach an antenna and expect a number you have not seen before",
             config.tx_power_dbm
-        );
+        ),
+        _ => defmt::warn!(
+            "config: the 2.4 GHz path uses the HIGH-FREQUENCY PA on the u.FL connector, not the SMA. The sub-GHz antenna is not on this path; put one on the u.FL before transmitting"
+        ),
     }
 }

@@ -26,8 +26,8 @@
 
 use embassy_time::{with_timeout, Duration, Instant};
 use lr11xx::ops::{
-    CadExit, CadParams, CodingRate, Interrupt, LoRaBandwidth, LoRaModulation, LoRaPacket, PaConfig,
-    PacketType, RampTime, SpreadingFactor, TxParams,
+    CadExit, CadParams, Interrupt, LoRaModulation, LoRaPacket, PaConfig, PacketType, RampTime,
+    TxParams,
 };
 use lr11xx::Lr11xx;
 use oxinode_core::lr1121::config::{ValidConfig, MAX_PAYLOAD};
@@ -712,18 +712,18 @@ where
 
 /// The modulation word for a configuration.
 ///
-/// The codes come from `oxinode-core`, where they are tested; the matches here
-/// only turn them into the crate's enums. Both are total over the range
-/// `ValidConfig` guarantees, and the fallbacks below are unreachable rather
-/// than merely unlikely — see the assertions in
-/// `oxinode_core::lr1121::config`.
+/// The modulation word, packed in `oxinode-core` where the packing is tested.
+///
+/// Packed there rather than assembled through `LoRaModulation`'s builder
+/// because the builder's bandwidth enum stops at the sub-GHz set: it has no
+/// variant for the three 2.4 GHz codes (`0x0D`–`0x0F`), so a configuration on
+/// that band could not be expressed through it at all. The coding-rate code
+/// is the short-interleaver one — `oxinode-core` translates the host's 4/5–4/8
+/// into 1–4 rather than passing the number through, because the crate also
+/// defines 5–7 for the long interleaver at the same rates, which no ordinary
+/// LoRa receiver is using.
 fn modulation(config: &ValidConfig) -> LoRaModulation {
-    LoRaModulation::builder()
-        .with_sf(spreading_factor(config.spreading_factor))
-        .with_bwl(bandwidth(config.bandwidth_code()))
-        .with_cr(coding_rate(config.coding_rate_code()))
-        .with_low_data_rate_optimize(config.low_data_rate_optimize())
-        .build()
+    LoRaModulation::new_with_raw_value(config.modulation_word())
 }
 
 /// The packet word for a configuration at a given payload length.
@@ -740,41 +740,4 @@ fn packet(config: &ValidConfig, payload_len: u8) -> LoRaPacket {
         .with_crc(config.crc)
         .with_invert_iq(config.invert_iq)
         .build()
-}
-
-fn spreading_factor(sf: u8) -> SpreadingFactor {
-    match sf {
-        5 => SpreadingFactor::SF5,
-        6 => SpreadingFactor::SF6,
-        7 => SpreadingFactor::SF7,
-        8 => SpreadingFactor::SF8,
-        9 => SpreadingFactor::SF9,
-        10 => SpreadingFactor::SF10,
-        11 => SpreadingFactor::SF11,
-        _ => SpreadingFactor::SF12,
-    }
-}
-
-fn bandwidth(code: u8) -> LoRaBandwidth {
-    match code {
-        0x03 => LoRaBandwidth::KHz62,
-        0x04 => LoRaBandwidth::KHz125,
-        0x05 => LoRaBandwidth::KHz250,
-        _ => LoRaBandwidth::KHz500,
-    }
-}
-
-/// Short interleaver only.
-///
-/// The crate also defines codes 5–7 for the long interleaver at the same rates,
-/// which is why `oxinode-core` translates 4/5–4/8 into 1–4 instead of passing
-/// the host's number through: `CodingRate::Long45` is a perfectly valid setting
-/// that no ordinary LoRa receiver is using.
-fn coding_rate(code: u8) -> CodingRate {
-    match code {
-        0x01 => CodingRate::Short45,
-        0x02 => CodingRate::Short46,
-        0x03 => CodingRate::Short47,
-        _ => CodingRate::Short48,
-    }
 }
