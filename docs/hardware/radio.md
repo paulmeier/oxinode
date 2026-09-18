@@ -207,7 +207,9 @@ has to know about:
 | PA | low-power (`PaSel` 0) to 14 dBm, high-power (`PaSel` 1) above | high-frequency (`PaSel` 2), internal regulator only, −18 to +13 dBm at the die |
 | Module rating | 20 dBm | 11.5 dBm; the firmware holds 11 |
 | Bandwidths (chip codes) | 62.5 / 125 / 250 / 500 kHz (`0x03`–`0x06`) | 203.125 / 406.25 / 812.5 kHz (`0x0D`–`0x0F`) |
-| Image calibration | `CalibImage` on the band | none: the command's two one-byte arguments are in 4 MHz steps and cannot name 2.4 GHz, and `lr11xx` documents it as acting on the sub-GHz input |
+| Image calibration | the one inside `Calibrate(ALL)`, which the chip performs for 902–928 MHz | none, and none exists: `CalibImage` acts on the sub-GHz input by the user manual's own description — see [Calibration and gain](#calibration-and-gain-on-the-24-ghz-path) |
+| RSSI calibration | the manual's 600 MHz–2 GHz table, sent with every configuration | the manual's above-2 GHz table, sent with every configuration; both are Semtech's evaluation board's values, not this module's |
+| Receive boost | on | on: the command knows no band, and the 2.4 GHz gain table has boosted steps of its own |
 | Connector | SMA | u.FL |
 
 So a configuration has a band before it has anything else, and
@@ -356,12 +358,123 @@ carrier-sense budget, then a transmission into whatever was there. That is
 [#47](https://github.com/paulmeier/oxinode/issues/47), open, and it is why
 the band is usable and not yet good.
 
-**What has not been checked.** That the path is *right*, as opposed to
-alive: the RSSI calibration table the chip boots with is the sub-GHz one, so
-the RSSI figures above are comparisons rather than measurements; the
-receive-boost setting is a sub-GHz setting; and the RTL-SDR that measured
-everything on this page stops at 1.7 GHz, so nothing has measured what
-leaves the u.FL. That is [#44](https://github.com/paulmeier/oxinode/issues/44).
+### Calibration and gain on the 2.4 GHz path
+
+Every number the bring-up sequence trusts was measured on the sub-GHz path,
+and the RTL-SDR on the bench stops at 1.7 GHz. What follows is what the
+LR1121 user manual (UM.LR1121.W.APP rev 1.2) settles about the other front
+end, what the firmware does about it, and what is still a measurement owed.
+The open items are [#44](https://github.com/paulmeier/oxinode/issues/44).
+
+**Image calibration: none, and none exists.** §2.1.3.1 says `CalibImage`
+"launches an image calibration for the given range of frequencies Freq1 and
+Freq2 on the RFI_N/P_LF sub-GHz path", and the radio block diagram in §7.1
+shows why the sentence is complete: there are two receive paths, the sub-GHz
+LNA on the differential `RFI_P/N_LF` pins that the calibration names, and a
+separate HF LNA behind a balun on `RFIO_HF`, which no calibration command
+names. The argument encoding agrees — two bytes in 4 MHz steps reach 1020 MHz
+and no further, and Semtech's own driver helper divides a 16-bit megahertz
+value into that byte without a range check — but the encoding was only ever
+the hint. The firmware's "skip it on that band" is therefore not a gap; there
+is nothing to skip. For the sub-GHz path the same section carries a fact that
+matters on this board: the power-on image calibration, which is what
+`Calibrate(ALL)`'s image bit repeats, *fails when a TCXO is fitted* because
+the reference is not running yet. That is one more reason the bring-up
+sequence redoes `Calibrate(ALL)` after `SetTcxoMode`, and why a board that
+skipped that step would receive 915 MHz with degraded image rejection and no
+error to say so.
+
+**RSSI calibration: the band's table, with every configuration.** §7.2.15
+says the chip boots "calibrated for the 868–915 MHz band on the LR1121 EVK",
+and that an uncalibrated table is not a cosmetic wrong number: the AGC picks
+its gain step from the same estimate, so on the wrong table LoRa "can result
+in a missed detection (packet loss) or decreased resistance to
+interference". Table 7-21 gives three tables — below 600 MHz, 600 MHz to
+2 GHz, above 2 GHz — and Semtech's reference firmware (`SWSD003`) sends the
+one the frequency falls in on every radio initialisation. So does oxinode,
+now: `Modem::apply` sends `SetRssiCalibration` right after `SetRfFrequency`
+with the table for the band the frequency is in, for both bands, because the
+setting persists until reboot and a modem that has been on 2.4 GHz would
+otherwise carry that table back down to 915 MHz. The tables and their
+eleven-byte wire layout are `oxinode_core::lr1121::rssi`, tested byte for
+byte against Table 7-19, and packed there rather than through `lr11xx`
+because the crate's bitfield for this command transposes four of the gain
+fields and truncates a fifth. Two honest caveats. The tables are Semtech's
+evaluation board's, not this module's: the manual's procedure for a board of
+one's own is a generator into the connector at one power per gain step, which
+needs a 2.4 GHz signal source the bench does not have. And the above-2 GHz
+table's offset is 2030 in a field the manual calls 12-bit signed half-dB —
+over a thousand decibels read literally, −9 dB read modulo 256 — so what it
+does to a reported RSSI was measured rather than derived: the same two
+boards on the same desk, nothing on either u.FL, the `radio` image from
+before this change and after, each board listening while the other sent
+its test packet, at the module's 11 dBm and at the PA's −17 dBm floor.
+
+| 2478 MHz, 812.5 kHz, SF8 | before (boot table) | after (above-2 GHz table) |
+|---|---|---|
+| 11 dBm, D330… hearing 65C1… | −70 / −69 dBm, SNR 12 | −60 dBm, SNR 12 |
+| 11 dBm, 65C1… hearing D330… | −69 dBm, SNR 12 | −60 dBm, SNR 13 |
+| −17 dBm, D330… hearing 65C1… | −95 dBm, SNR 11 | −87 / −86 dBm, SNR 12 |
+| −17 dBm, 65C1… hearing D330… | −94 / −93 dBm, SNR 12–13 | −84 / −88 dBm, SNR 12 |
+| 915 MHz, 125 kHz, 14 dBm, both ways | −57 / −55 dBm, SNR 15–17 | −58 / −54 dBm, SNR 15–18 |
+
+The 2.4 GHz table reads **9 dB stronger** than the sub-GHz one it replaces,
+at both power levels, so the modulo-256 reading of the offset is the one the
+chip does. Every 2.4 GHz RSSI reported before this change — the ones quoted
+above on this page and in [#35](https://github.com/paulmeier/oxinode/issues/35)
+— is about 9 dB pessimistic. The 915 MHz row did not move, which is what the
+manual's "calibrated for 868–915 MHz by default" predicts for a table that
+is now sent explicitly. Whether the new numbers are *right* for this module
+is the generator measurement still owed; what is settled is that the two
+front ends no longer share a table that belongs to one of them.
+
+**Receive boost stays on.** §7.2.12 describes `SetRxBoosted` as "~2dB
+increased sensitivity, at the expense of a ~2mA higher current consumption"
+with no reference to a band, and the RSSI calibration procedure in §7.2.15
+says in passing that "for the 2G4 path, the max gain is 16 — 17–20 can be
+ignored": the boosted LNA steps (`g13hp1`–`g13hp7`, gains 14–20) exist on
+the 2.4 GHz path up to the third of them. So the setting means something
+there, if less than on the sub-GHz path, and the product leaves it on. The
+`radio` image's `B` key turns it off for the next listen, and the run above
+did that at both power levels. At 11 dBm nothing moves: the SNR is pinned at
+the 12–13 dB a SF8 demodulator reports for any strong packet. At −17 dBm,
+where the packets sit near −87 dBm, turning the boost off cost 1–2 dB of SNR
+on one board (12 → 10–11) and 2–8 dB on the other (12 → 10 and 4, the 4
+against an RSSI 11 dB lower than its neighbour, so most likely a Wi-Fi burst
+inside the packet rather than the boost). Two packets per setting is a small
+sample; it agrees with the manual's ~2 dB and with the boost doing
+something on this path, and that is what it was for. Boost stays on.
+
+**Power at the u.FL, and the reference error up here: not measured.** The
+die is commanded at 11 dBm on a PA whose ceiling is 13, the module is rated
+11.5, and nothing on the bench tunes above 1.7 GHz. A power meter, or an SDR
+that reaches 2.5 GHz (a HackRF One, a LimeSDR, a tinySA Ultra as a spectrum
+analyser), answers both questions in one sitting: the power leaving the
+connector at 11 dBm commanded, and whether the 73 ppm reference error
+scales to the 181 kHz it should at 2478 MHz.
+
+**An exchange at each bandwidth: run on the desk, not yet across a room.**
+`tools/air_exchange.py --frequency 2478000000 --txpower 11` at each of the
+three bandwidths, the `rnode` image with the table above on both boards, a
+Reticulum instance per board, nothing on either u.FL. Every exchange
+delivered its bytes, the 400-byte ones split at 254 and rejoined:
+
+| bandwidth | A → B 200 | B → A 200 | A → B 400 | B → A 400 | carrier sense before each frame |
+|---|---|---|---|---|---|
+| 203.125 kHz | −55 dBm, 12.8 | −64 dBm, 12.2 | −64 dBm, 12.8 | −64 dBm, 11.8 | 2–34 senses, 0–5 busy, cleared |
+| 406.25 kHz | −65 dBm, 12.8 | −69 dBm, 12.5 | −72 dBm, 13.0 | −73 dBm, 11.8 | 7–56 senses, 1–7 busy, cleared |
+| 812.5 kHz | −71 dBm, 12.8 | −71 dBm, 12.0 | −71 dBm, 12.8 | −71 dBm, 11.8 | 335 senses, 331–334 busy, forced |
+
+RSSI and SNR are what the receiving side's Reticulum reported. The last
+column is the finding for
+[#47](https://github.com/paulmeier/oxinode/issues/47): the always-busy
+channel is a property of the 812.5 kHz setting alone. At 203.125 and
+406.25 kHz the same desk clears in a few senses, as 915 MHz does, and a
+packet goes when it is asked to; at 812.5 kHz every frame waits out the
+whole two-second budget and goes forced. Until #47 is settled, the two
+narrower bandwidths are the usable ones. The run that remains is the same
+three exchanges with a 2.4 GHz antenna on each u.FL and the boards a room
+apart, which says whether the path is usable rather than merely alive.
 
 ## Airtime
 

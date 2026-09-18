@@ -48,6 +48,7 @@ the bench:
 | `N` | Switch sync word between `0x12` (RNode) and `0x2b` (Meshtastic) |
 | `M` `H` `D` | Load the Meshtastic LongFast preset, the 2.4 GHz bench preset, or the default |
 | `A` | Apply the current configuration without transmitting |
+| `B` | Toggle receive boost, on by default; takes effect at the next apply, transmit or listen |
 | `p` | Send one LoRa packet with the current configuration |
 | `y` `z` `E` | Listen; sweep the frequency coarsely; sweep the receive window's edge |
 | `t` `?` | Die temperature and supply; chip status and configuration |
