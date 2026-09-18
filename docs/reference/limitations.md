@@ -57,12 +57,16 @@ has to rediscover it.
   sense: channel activity detection at 812.5 kHz reads a quiet desk as busy
   on nearly every sense, so every transmission waits out its whole budget
   and then goes anyway, and a two-board exchange loses frames to the wait.
-  That is [#47](https://github.com/paulmeier/oxinode/issues/47). The RSSI
-  calibration table for the band is now sent with every configuration, and
+  That is [#47](https://github.com/paulmeier/oxinode/issues/47), and it is
+  specific to 812.5 kHz: at 203.125 and 406.25 kHz the same desk clears in
+  a few senses and every exchange goes when asked. The RSSI calibration
+  table for the band is now sent with every configuration (the 2.4 GHz
+  table reads 9 dB stronger than the sub-GHz one the chip boots with), and
   image calibration is settled from the datasheet (the 2.4 GHz receiver has
   none to do); the measurements still owed — the power at the u.FL and the
   reference error at 2478 MHz, which need an instrument that tunes there,
-  and an exchange across a room at each of the three bandwidths — are
+  and the three-bandwidth exchange across a room with antennas on the
+  u.FLs — are
   [#44](https://github.com/paulmeier/oxinode/issues/44), and what to tell
   `rnodeconf` about a board with two bands is
   [#45](https://github.com/paulmeier/oxinode/issues/45). See
