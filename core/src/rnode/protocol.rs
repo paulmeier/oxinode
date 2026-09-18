@@ -23,8 +23,10 @@
 //! # Invalid configurations
 //!
 //! A host is free to ask for a configuration this board cannot do — 868 MHz on
-//! a US antenna, or 22 dBm on a module rated for 20. Nothing here clamps: a
-//! clamp is a lie the host cannot detect.
+//! a US antenna, 22 dBm on a module rated for 20, or 125 kHz at 2478 MHz,
+//! which is the state every host passes through on its way to the 2.4 GHz
+//! path because it sets the frequency before the bandwidth. Nothing here
+//! clamps: a clamp is a lie the host cannot detect.
 //!
 //! Instead the setter stores and echoes what was asked, and the radio simply
 //! does not come on. The host then finds a radio-state mismatch and reports
@@ -207,10 +209,12 @@ impl Protocol {
     /// asks for and the only reason to store a configuration at all.
     ///
     /// The stored values are put through the same validation as anything a
-    /// host sends, and for the same reason: they were written by a tool that
-    /// does not know what this radio can do. A configuration that does not
-    /// validate leaves the radio off, with [`Protocol::last_error`] saying why,
-    /// exactly as an impossible request from a host would.
+    /// host sends -- both bands, see [`ValidConfig::new`] -- and for the same
+    /// reason: they were written by a tool that does not know what this
+    /// radio can do. A configuration that does not validate leaves the radio
+    /// off, with [`Protocol::last_error`] saying why, exactly as an
+    /// impossible request from a host would. A stored 2.4 GHz configuration
+    /// therefore comes back on the 2.4 GHz path, as it was saved.
     ///
     /// A host that connects afterwards and configures the device overrides
     /// this, which is right: it is the same set of fields.
@@ -949,6 +953,137 @@ mod tests {
         assert_eq!(find(cmd::SF), vec![sf], "spreading factor mismatch");
         assert_eq!(find(cmd::RADIO_STATE), vec![0x01], "radio state mismatch");
         assert!(p.radio_is_on());
+    }
+
+    /// **The same startup on the other band.** `rnsd` with `frequency =
+    /// 2478000000`, `bandwidth = 812500`, `txpower = 11` sets the five values
+    /// in the same order and gets the same echoes back; the radio comes on,
+    /// on the 2.4 GHz path, and what the modem is handed is a configuration
+    /// with that band's PA and bandwidth code.
+    #[test]
+    fn a_reticulum_host_would_bring_this_interface_online_at_2_4_ghz() {
+        use crate::lr1121::pa;
+        let mut p = Protocol::new();
+        converse(&mut p, &detect_bytes());
+        let (hz, bw, dbm, sf, cr) = (2_478_000_000u32, 812_500u32, 11u8, 8u8, 5u8);
+        let replies = read_back(&converse(&mut p, &init_radio_bytes(hz, bw, dbm, sf, cr)).0);
+        let find = |c: u8| {
+            replies
+                .iter()
+                .rev()
+                .find(|(k, _)| *k == c)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("no {c:#04x} reply"))
+        };
+        let r_frequency = u32::from_be_bytes(find(cmd::FREQUENCY).try_into().unwrap());
+        let r_bandwidth = u32::from_be_bytes(find(cmd::BANDWIDTH).try_into().unwrap());
+        assert!(hz.abs_diff(r_frequency) <= 100, "frequency mismatch");
+        assert_eq!(bw, r_bandwidth, "bandwidth mismatch");
+        assert_eq!(find(cmd::TXPOWER), vec![dbm], "TX power mismatch");
+        assert_eq!(find(cmd::SF), vec![sf], "spreading factor mismatch");
+        assert_eq!(find(cmd::RADIO_STATE), vec![0x01], "radio state mismatch");
+        assert!(p.radio_is_on());
+        assert_eq!(p.last_error(), None);
+        let valid = p.valid_config().expect("on, so valid");
+        assert_eq!(valid.band(), pa::Band::HighFrequency);
+        assert_eq!(valid.bandwidth_code(), 0x0F);
+        assert_eq!(valid.pa_config(), pa::HIGH_FREQUENCY);
+        // Uncorrected is the bench's choice, not the host's: a host that
+        // set nothing about the reference gets the default, which is to
+        // correct, and the correction is still invisible to it.
+        assert!(valid.correct_reference);
+        assert!(valid.commanded_frequency_hz() > hz);
+    }
+
+    /// **A host moving between bands one field at a time.** The frequency
+    /// goes first, so for a moment the configuration is 2478 MHz with the
+    /// 125 kHz it had; switched on then, the radio stays off and the log
+    /// says the bandwidth belongs to the other band -- the nearer mistake,
+    /// since the frequency is fine. When the bandwidth and the power follow,
+    /// it comes on, with no power cycle.
+    #[test]
+    fn a_host_changing_band_is_refused_on_the_bandwidth_until_it_follows() {
+        let mut p = Protocol::new();
+        let mut out = Frames::default();
+        p.handle(Command::SetFrequency(2_478_000_000), &mut out);
+        assert_eq!(
+            p.handle(Command::SetRadioState(RadioState::On), &mut out),
+            Action::Standby
+        );
+        assert_eq!(p.last_error(), Some(ConfigError::BandwidthNotInBand));
+        assert_eq!(p.config().frequency_hz, 2_478_000_000, "kept, not clamped");
+
+        p.handle(Command::SetBandwidth(812_500), &mut out);
+        assert_eq!(
+            p.handle(Command::SetRadioState(RadioState::On), &mut out),
+            Action::Standby
+        );
+        assert_eq!(
+            p.last_error(),
+            Some(ConfigError::PowerAbove2G4Rating),
+            "14 dBm is the sub-GHz default and above the 2.4 GHz rating"
+        );
+
+        p.handle(Command::SetTxPower(11), &mut out);
+        assert_eq!(
+            p.handle(Command::SetRadioState(RadioState::On), &mut out),
+            Action::Reconfigure
+        );
+        assert!(p.radio_is_on());
+        assert_eq!(p.last_error(), None);
+
+        // And back down: 812.5 kHz at 915 MHz is the mirror image.
+        p.handle(Command::SetFrequency(915_000_000), &mut out);
+        assert_eq!(
+            p.handle(Command::SetRadioState(RadioState::On), &mut out),
+            Action::Standby
+        );
+        assert_eq!(p.last_error(), Some(ConfigError::BandwidthNotInBand));
+        p.handle(Command::SetBandwidth(125_000), &mut out);
+        assert_eq!(
+            p.handle(Command::SetRadioState(RadioState::On), &mut out),
+            Action::Reconfigure
+        );
+    }
+
+    /// **A stored 2.4 GHz configuration comes back after a reboot.** Saved
+    /// through `CMD_CONF_SAVE`, decoded from the record, resumed at the next
+    /// boot with the radio on and every value intact: the frequency fits the
+    /// four bytes the EEPROM keeps for it.
+    #[test]
+    fn a_saved_2_4_ghz_configuration_comes_back_at_the_next_boot() {
+        use crate::lr1121::pa;
+        let mut p = Protocol::new();
+        let mut sink = Frames::default();
+        p.handle(Command::SetFrequency(2_478_000_000), &mut sink);
+        p.handle(Command::SetBandwidth(812_500), &mut sink);
+        p.handle(Command::SetTxPower(11), &mut sink);
+        p.handle(Command::SetSpreadingFactor(8), &mut sink);
+        p.handle(Command::SetCodingRate(5), &mut sink);
+        assert_eq!(p.handle(Command::SaveConfig, &mut sink), Action::Persist);
+
+        let record = p.store().encode();
+        let restored = DeviceStore::decode(&record).expect("a valid record");
+        let mut next = Protocol::with_storage(restored, 0);
+        assert_eq!(next.resume_stored_config(), Action::Reconfigure);
+        assert!(next.radio_is_on());
+        assert_eq!(next.last_error(), None);
+        assert_eq!(next.config().frequency_hz, 2_478_000_000);
+        assert_eq!(next.config().bandwidth_hz, 812_500);
+        assert_eq!(next.config().tx_power_dbm, 11);
+        assert_eq!(next.config().spreading_factor, 8);
+        assert_eq!(next.config().coding_rate, 5);
+        assert_eq!(next.valid_config().unwrap().band(), pa::Band::HighFrequency);
+
+        // A panel edit in TNC mode on that band is stored too, and the
+        // frequency editor's widest value round-trips through the record.
+        let change = next.set_from_panel(Setting::Frequency(2_483_500_000));
+        assert!(change.persist);
+        assert_eq!(change.radio, Action::Reconfigure);
+        let again = DeviceStore::decode(&next.store().encode()).unwrap();
+        let mut third = Protocol::with_storage(again, 0);
+        assert_eq!(third.resume_stored_config(), Action::Reconfigure);
+        assert_eq!(third.config().frequency_hz, 2_483_500_000);
     }
 
     /// The 73 ppm correction must not reach the host. It is 67 kHz at 915 MHz

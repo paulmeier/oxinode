@@ -114,15 +114,19 @@ screen, editor and notice asserts it was not.
 **The editor** (`core/src/edit.rs`): an `Editor` opens on a copy of the whole
 configuration and a field. Four fields are steppers over a fixed set,
 saturating at the ends; a value not in the set (a bandwidth a host set) steps
-onto the set in the direction pressed. Frequency is a digit editor, six
-digits, with whatever the original had below a kilohertz kept unseen.
-Confirming puts the candidate into the copy and asks `ValidConfig::new`, the
-same function that decides whether a host's configuration may reach the chip;
-a candidate that fails stays in the editor with the reason under it. The sets
-are deliberately wider than what the radio accepts (power runs to 22 dBm,
-bandwidth lists the ten LoRa bandwidths a host offers) so the refusal path is
-reachable and tested. Cancel hands out nothing: the editor holds a copy and
-confirm is the only thing that hands a value out.
+onto the set in the direction pressed. Frequency is a digit editor, seven
+digits of kilohertz with four before the point, with whatever the original
+had below a kilohertz kept unseen; the candidate is 64 bits wide because
+seven digits reach past a `u32` of hertz, and a value past it saturates to
+one in neither band rather than wrapping into one. Confirming puts the
+candidate into the copy and asks `ValidConfig::new`, the same function that
+decides whether a host's configuration may reach the chip, for both bands; a
+candidate that fails stays in the editor with the reason under it. The sets
+are deliberately wider than what the radio accepts on either band (power runs
+from −18 to 22 dBm, bandwidth lists the ten LoRa bandwidths a host offers and
+the three of the 2.4 GHz path) so the refusal path is reachable and tested.
+Cancel hands out nothing: the editor holds a copy and confirm is the only
+thing that hands a value out.
 
 **The protocol's side** (`Protocol::set_from_panel` and friends): the host's
 setter without the reply. The setting lands unvalidated, as a host's does, and

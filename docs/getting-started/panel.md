@@ -35,13 +35,15 @@ battery reading is averaged over a few seconds and only moves when the cell
 has, so it does not flicker between two numbers. Menu: *Sleep Screen*,
 *Redraw*.
 
-**Radio.** The current configuration, which is exactly what a host reads
-back: frequency (and the frequency the chip is actually tuned to after the
-reference correction), bandwidth, spreading factor, coding rate, power, the
-bitrate they come to, preamble, sync word, CRC, header mode, IQ. Then what the
-radio is *doing* with it: `off`, `receiving`, `refused` with the reason,
-`failed`, or `no radio`. Menu: *Frequency*, *Bandwidth*, *Spread Factor*,
-*Coding Rate*, *TX Power*, *Radio On/Off*, *Save Config*, *Reset Config*.
+**Radio.** The band first (`sub-GHz` on the SMA or `2.4 GHz` on the u.FL,
+decided by the frequency; a dash for a frequency in neither), then the
+current configuration, which is exactly what a host reads back: frequency
+(and the frequency the chip is actually tuned to after the reference
+correction), bandwidth, spreading factor, coding rate, power, the bitrate
+they come to, preamble, sync word, CRC, header mode, IQ. Then what the radio
+is *doing* with it: `off`, `receiving`, `refused` with the reason, `failed`,
+or `no radio`. Menu: *Frequency*, *Bandwidth*, *Spread Factor*, *Coding
+Rate*, *TX Power*, *Radio On/Off*, *Save Config*, *Reset Config*.
 
 **Bluetooth.** Absent, advertising or connected; the advertised name; the
 passkey while a pairing is in progress; how many phones are bonded, out of
@@ -66,14 +68,25 @@ Position screen never shows `0.000000` as a claim to be in the Gulf of Guinea.
 The first five items of the Radio menu open an editor over the screen.
 Bandwidth, spreading factor, coding rate and power are steppers: up and down
 move through a fixed set, saturating at the ends. Frequency is a digit editor,
-`MMM.kkk`, with left and right moving a cursor under one digit and up and down
-changing it.
+`MMMM.kkk`, with left and right moving a cursor under one digit and up and
+down changing it. Four megahertz digits, because 2478 MHz needs them; a
+sub-GHz frequency shows a blank where its thousands digit would be, and the
+cursor can sit there.
 
 Confirming runs the candidate through the same validation a host's
 configuration gets. A value the radio cannot do is **refused, not clamped**:
 the editor stays open with the reason under the value, and nothing is applied.
 Cancel leaves the previous value in place; nothing is applied until it is
 confirmed.
+
+The sets are wider than either band, on purpose. The bandwidth stepper holds
+the ten LoRa bandwidths a host can name and the three the 2.4 GHz path has
+(203.125, 406.25 and 812.5 kHz) in one ascending list, and the power stepper
+runs from −18 to 22 dBm. Moving the board to the other band is the frequency
+first, then the bandwidth: with 2478 MHz confirmed, 125 kHz is refused as
+*bandwidth belongs to the other band* until 812.5 kHz is chosen, and 14 dBm
+as above the module's 11 dBm rating there. The Radio screen's first row says
+which band the board is on, which is which connector the antenna belongs on.
 
 ```mermaid
 sequenceDiagram

@@ -43,14 +43,22 @@ radio on, reads them back, and reports the interface up:
 
 Two things to know when choosing parameters:
 
-- **Power is refused, not clamped.** The module is rated for 20 dBm sub-GHz.
-  Ask for more and the radio stays off, Reticulum notices the mismatch, and it
-  prints *make sure that your hardware actually supports the parameters
-  specified in the configuration*. The specific reason goes to the log port.
+- **Power is refused, not clamped.** The module is rated for 20 dBm sub-GHz
+  and 11 dBm at 2.4 GHz. Ask for more and the radio stays off, Reticulum
+  notices the mismatch, and it prints *make sure that your hardware actually
+  supports the parameters specified in the configuration*. The specific
+  reason goes to the log port.
 - **The frequency you get is the frequency you asked for.** The chip is
   commanded 73 ppm higher to cancel the module's reference error, and the
   protocol reports the wanted frequency back, which is what Reticulum
   compares. See [The radio](../hardware/radio.md).
+- **The frequency decides the band.** 902–928 MHz is the SMA connector with
+  the bandwidths 62.5 to 500 kHz; 2400–2483.5 MHz is the u.FL with 203.125,
+  406.25 or 812.5 kHz and 11 dBm at most. `frequency = 2478000000`,
+  `bandwidth = 812500`, `txpower = 11` brings the interface up on the 2.4 GHz
+  path, with the antenna on the u.FL. Carrier sense on that band is not yet
+  right ([#47](https://github.com/paulmeier/oxinode/issues/47)); see
+  [Known limitations](../reference/limitations.md).
 
 ## `rnodeconf`
 
@@ -70,8 +78,8 @@ board `0x32`). That is the honest answer and the safe one: `rnodeconf --update`
 refuses to offer firmware for it rather than offering to flash a RAK4631 image
 onto an LR1121. It also means `rnodeconf -i` prints the band and power from its
 own table for model `0xff` (100 to 1100 MHz, 14 dBm) rather than from the
-device; the firmware is what enforces the module's real 902 to 928 MHz and
-20 dBm.
+device; the firmware is what enforces the module's real bands, 902 to 928 MHz
+at 20 dBm and 2400 to 2483.5 MHz at 11 dBm.
 
 Provisioning survives a reflash. The EEPROM image, the signature, the stored
 configuration and the Bluetooth bonds live in a device record in the 40 KB of

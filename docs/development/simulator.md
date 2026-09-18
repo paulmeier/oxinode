@@ -56,13 +56,14 @@ sim tty
 ## What the screens draw from
 
 The screens draw from a `State`, the same plain values the board copies out
-of its modem loop, and the simulator has three fixtures for it:
+of its modem loop, and the simulator has four fixtures for it:
 
 | `--state` | What it is |
 |---|---|
 | `populated` (default) | a board mid-session with every field known and a host on USB |
 | `empty` | a board that knows nothing yet, so every screen shows how it says so |
 | `standalone` | a TNC with no host attached, which is the one whose settings the panel may change |
+| `2g4` | that TNC on the other band: 2478 MHz, 812.5 kHz, 11 dBm on the u.FL |
 
 The populated Radio screen is longer than the panel, which is what exercises
 scrolling and the scrollbar:

@@ -21,9 +21,18 @@
 //! The sets a stepper walks are therefore deliberately wider than what the
 //! radio accepts. Power runs to 22 dBm because that is what an RNode host can
 //! ask for and the refusal has to be reachable to be honest; bandwidth lists
-//! the ten LoRa bandwidths a host offers, six of which this chip does not have.
-//! A stepper that only ever produced legal values would never show the refusal
-//! path, and the first time it mattered would be a value nobody had tested.
+//! the ten LoRa bandwidths a host offers and the three the 2.4 GHz path has,
+//! six of which this chip does not have at all and the rest of which it has
+//! on one band or the other. A stepper that only ever produced legal values
+//! would never show the refusal path, and the first time it mattered would be
+//! a value nobody had tested.
+//!
+//! One set serves both bands, on purpose. The band is decided by the
+//! frequency, and a person moving the board from 915 MHz to 2478 MHz edits
+//! the frequency first and then the bandwidth -- the same order a host sets
+//! them in, through the same mixed state, refused for the same reason until
+//! the bandwidth follows. A stepper that hid the other band's values would
+//! have to guess which band the person was on their way to.
 //!
 //! # Cancel restores
 //!
@@ -93,24 +102,36 @@ impl Field {
     }
 
     /// The value this field has in a configuration, as the editor carries it.
-    pub const fn value_in(self, config: &RadioConfig) -> i32 {
+    ///
+    /// Wide, because a 2.4 GHz frequency in hertz does not fit a signed
+    /// 32-bit value, and the editor's arithmetic must not wrap it.
+    pub const fn value_in(self, config: &RadioConfig) -> i64 {
         match self {
-            Field::Frequency => config.frequency_hz as i32,
-            Field::Bandwidth => config.bandwidth_hz as i32,
-            Field::SpreadingFactor => config.spreading_factor as i32,
-            Field::CodingRate => config.coding_rate as i32,
-            Field::TxPower => config.tx_power_dbm as i32,
+            Field::Frequency => config.frequency_hz as i64,
+            Field::Bandwidth => config.bandwidth_hz as i64,
+            Field::SpreadingFactor => config.spreading_factor as i64,
+            Field::CodingRate => config.coding_rate as i64,
+            Field::TxPower => config.tx_power_dbm as i64,
         }
     }
 
     /// A value of this field as a [`Setting`].
     ///
-    /// The narrowing casts are safe by construction: a stepper only produces
-    /// members of its set, and the digit editor only produces nine digits of
-    /// hertz, which is under 2^30.
-    pub const fn setting(self, value: i32) -> Setting {
+    /// The narrowing casts are safe by construction for the steppers, which
+    /// only produce members of their sets. The digit editor is the exception:
+    /// seven digits of kilohertz reach 9999.999 MHz, which is past what a
+    /// `u32` of hertz holds, and a plain cast would wrap 5200 MHz to 905 MHz
+    /// -- a refused value quietly becoming a legal one. So a frequency above
+    /// the field's range saturates instead. That is not a clamp of a
+    /// configuration: `u32::MAX` is in neither band and is refused, which is
+    /// what the value it stands for would have been.
+    pub const fn setting(self, value: i64) -> Setting {
         match self {
-            Field::Frequency => Setting::Frequency(value as u32),
+            Field::Frequency => Setting::Frequency(if value > u32::MAX as i64 {
+                u32::MAX
+            } else {
+                value as u32
+            }),
             Field::Bandwidth => Setting::Bandwidth(value as u32),
             Field::SpreadingFactor => Setting::SpreadingFactor(value as u8),
             Field::CodingRate => Setting::CodingRate(value as u8),
@@ -119,7 +140,7 @@ impl Field {
     }
 
     /// The fixed set a stepper walks, ascending; empty for the digit editor.
-    pub const fn steps(self) -> &'static [i32] {
+    pub const fn steps(self) -> &'static [i64] {
         match self {
             Field::Frequency => &[],
             Field::Bandwidth => &BANDWIDTH_STEPS,
@@ -130,32 +151,40 @@ impl Field {
     }
 }
 
-/// The bandwidths a LoRa host offers, in hertz. Six of them this chip cannot
-/// do, and they are here so the refusal is reachable -- see the module docs.
-pub const BANDWIDTH_STEPS: [i32; 10] = [
-    7_800, 10_400, 15_600, 20_800, 31_250, 41_700, 62_500, 125_000, 250_000, 500_000,
+/// The bandwidths a LoRa host offers and the three the 2.4 GHz path has, in
+/// hertz, in one ascending set. Six of them this chip cannot do on either
+/// band, and they are here so the refusal is reachable -- see the module
+/// docs. The odd 2.4 GHz values are exact: 1625 kHz over a power of two.
+pub const BANDWIDTH_STEPS: [i64; 13] = [
+    7_800, 10_400, 15_600, 20_800, 31_250, 41_700, 62_500, 125_000, 203_125, 250_000, 406_250,
+    500_000, 812_500,
 ];
 /// The spreading factors an RNode host can ask for.
-pub const SF_STEPS: [i32; 6] = [7, 8, 9, 10, 11, 12];
+pub const SF_STEPS: [i64; 6] = [7, 8, 9, 10, 11, 12];
 /// The coding rates, as the denominator of 4/n.
-pub const CR_STEPS: [i32; 4] = [5, 6, 7, 8];
-/// Powers from the bottom of the low-power PA to the top of what a host can
-/// ask for, one decibel apart. The last two are above the module's rating and
-/// are refused when confirmed.
-pub const POWER_STEPS: [i32; 40] = {
-    let mut steps = [0i32; 40];
+pub const CR_STEPS: [i64; 4] = [5, 6, 7, 8];
+/// Powers from the bottom of the lowest PA to the top of what a host can ask
+/// for, one decibel apart. The bottom is the high-frequency PA's -18 dBm,
+/// which no sub-GHz PA reaches; the top is 22 dBm, above the module's rating
+/// on either band. Both ends are refused when confirmed, which is the point.
+pub const POWER_STEPS: [i64; 41] = {
+    let mut steps = [0i64; 41];
     let mut i = 0;
     while i < steps.len() {
-        steps[i] = pa::LP_MIN_DBM as i32 + i as i32;
+        steps[i] = pa::HF_MIN_DBM as i64 + i as i64;
         i += 1;
     }
     steps
 };
 
-/// How many digits the frequency editor shows: `MMM.kkk`, megahertz to the
-/// kilohertz. Anything under a kilohertz is kept from the original value and
-/// not shown, because no channel plan is drawn in hertz.
-pub const FREQ_DIGITS: usize = 6;
+/// How many digits the frequency editor shows: `MMMM.kkk`, megahertz to the
+/// kilohertz. Four megahertz digits because 2478 MHz needs them; a sub-GHz
+/// frequency shows a blank where its leading zero would be. Anything under a
+/// kilohertz is kept from the original value and not shown, because no
+/// channel plan is drawn in hertz.
+pub const FREQ_DIGITS: usize = 7;
+/// How many of those digits are megahertz: where the point goes.
+pub const FREQ_POINT: usize = 4;
 
 /// Who has the radio, when it is not the panel.
 ///
@@ -191,7 +220,7 @@ pub struct Editor {
     /// this is what cancel leaves in place.
     original: RadioConfig,
     /// The value being edited, in the field's own units.
-    candidate: i32,
+    candidate: i64,
     /// The frequency editor's digits, most significant first, and which one
     /// the cursor is under. Unused by the steppers.
     digits: [u8; FREQ_DIGITS],
@@ -215,7 +244,7 @@ impl Editor {
         let candidate = field.value_in(&config);
         let mut digits = [0u8; FREQ_DIGITS];
         if field == Field::Frequency {
-            // Kilohertz, six digits, most significant first.
+            // Kilohertz, seven digits, most significant first.
             let mut khz = config.frequency_hz / 1_000;
             for slot in digits.iter_mut().rev() {
                 *slot = (khz % 10) as u8;
@@ -237,12 +266,12 @@ impl Editor {
     }
 
     /// The value as it stands, in the field's units.
-    pub const fn candidate(&self) -> i32 {
+    pub const fn candidate(&self) -> i64 {
         self.candidate
     }
 
     /// The value the field had when the editor opened.
-    pub const fn original(&self) -> i32 {
+    pub const fn original(&self) -> i64 {
         self.field.value_in(&self.original)
     }
 
@@ -262,7 +291,7 @@ impl Editor {
         self.refused
     }
 
-    /// The frequency editor's digits, `MMM.kkk` without the point.
+    /// The frequency editor's digits, `MMMM.kkk` without the point.
     pub const fn digits(&self) -> &[u8; FREQ_DIGITS] {
         &self.digits
     }
@@ -328,12 +357,16 @@ impl Editor {
     }
 
     /// The digits as hertz, with the sub-kilohertz part of the original kept.
-    fn frequency_from_digits(&self) -> i32 {
-        let mut khz: u32 = 0;
+    ///
+    /// Wide arithmetic: seven digits of kilohertz is up to ten of hertz, and
+    /// the top of that range is more than a `u32` holds. See
+    /// [`Field::setting`] for what happens to it at confirmation.
+    fn frequency_from_digits(&self) -> i64 {
+        let mut khz: i64 = 0;
         for &d in &self.digits {
-            khz = khz * 10 + d as u32;
+            khz = khz * 10 + d as i64;
         }
-        (khz * 1_000 + self.original.frequency_hz % 1_000) as i32
+        khz * 1_000 + (self.original.frequency_hz % 1_000) as i64
     }
 
     /// The configuration the candidate would produce.
@@ -358,7 +391,7 @@ impl Editor {
 }
 
 // Every stepper set is ascending, or `up` and `down` would skip members.
-const fn ascending(steps: &[i32]) -> bool {
+const fn ascending(steps: &[i64]) -> bool {
     let mut i = 1;
     while i < steps.len() {
         if steps[i] <= steps[i - 1] {
@@ -372,13 +405,40 @@ const _: () = assert!(ascending(&BANDWIDTH_STEPS));
 const _: () = assert!(ascending(&SF_STEPS));
 const _: () = assert!(ascending(&CR_STEPS));
 const _: () = assert!(ascending(&POWER_STEPS));
-// The power set has to reach past the module's rating, or the refusal path is
-// unreachable from the panel; and it has to start where the measured PA does.
-const _: () = assert!(POWER_STEPS[0] == pa::LP_MIN_DBM as i32);
-const _: () = assert!(POWER_STEPS[POWER_STEPS.len() - 1] == pa::HP_MAX_DBM as i32);
-const _: () = assert!(POWER_STEPS[POWER_STEPS.len() - 1] > pa::MODULE_MAX_SUB_GHZ_DBM as i32);
-// Six digits of kilohertz reach 999.999 MHz, which covers the band.
-const _: () = assert!(999_999_000 > pa::US915_MAX_HZ);
+// The power set has to reach past the module's rating on both bands, or the
+// refusal path is unreachable from the panel; and it has to reach the bottom
+// of every PA, so every legal power on either band is reachable.
+const _: () = assert!(POWER_STEPS[0] <= pa::LP_MIN_DBM as i64);
+const _: () = assert!(POWER_STEPS[0] <= pa::HF_MIN_DBM as i64);
+const _: () = assert!(POWER_STEPS[POWER_STEPS.len() - 1] == pa::HP_MAX_DBM as i64);
+const _: () = assert!(POWER_STEPS[POWER_STEPS.len() - 1] > pa::MODULE_MAX_SUB_GHZ_DBM as i64);
+const _: () = assert!(POWER_STEPS[POWER_STEPS.len() - 1] > pa::MODULE_MAX_2G4_DBM as i64);
+// Seven digits of kilohertz reach 9999.999 MHz, which covers both bands; the
+// point sits after the megahertz.
+const _: () = assert!(9_999_999_000 > pa::ISM_2G4_MAX_HZ as u64);
+const _: () = assert!(FREQ_POINT < FREQ_DIGITS && FREQ_DIGITS - FREQ_POINT == 3);
+// The bandwidth set holds every bandwidth of either band, so every legal
+// value is reachable from the panel whichever band the frequency is on.
+const fn holds_every(table: &[(u8, u32)]) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        let mut found = false;
+        let mut j = 0;
+        while j < BANDWIDTH_STEPS.len() {
+            if BANDWIDTH_STEPS[j] == table[i].1 as i64 {
+                found = true;
+            }
+            j += 1;
+        }
+        if !found {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const _: () = assert!(holds_every(&crate::lr1121::lora::BANDWIDTHS));
+const _: () = assert!(holds_every(&crate::lr1121::lora::BANDWIDTHS_2G4));
 
 #[cfg(test)]
 mod tests {
@@ -398,6 +458,12 @@ mod tests {
         }
     }
 
+    /// A board on the other band: the bench configuration, which a host can
+    /// ask the product for.
+    fn high_frequency() -> RadioConfig {
+        crate::lr1121::config::BENCH_2G4
+    }
+
     /// An editor opens on the field's current value and nothing else.
     #[test]
     fn an_editor_opens_on_the_current_value() {
@@ -409,10 +475,14 @@ mod tests {
             assert_eq!(e.original_config(), &config());
         }
         let f = Editor::open(Field::Frequency, config());
-        assert_eq!(f.digits(), &[9, 0, 6, 8, 7, 5], "906.875 MHz");
+        assert_eq!(f.digits(), &[0, 9, 0, 6, 8, 7, 5], "906.875 MHz");
         assert_eq!(f.cursor(), 0);
         assert!(!f.is_stepper());
         assert!(Editor::open(Field::TxPower, config()).is_stepper());
+        let hf = Editor::open(Field::Frequency, high_frequency());
+        assert_eq!(hf.digits(), &[2, 4, 7, 8, 0, 0, 0], "2478.000 MHz");
+        assert_eq!(hf.candidate(), 2_478_000_000);
+        assert!(!hf.changed());
     }
 
     /// **Cancel leaves the previous value in place.** Stepping and then not
@@ -443,7 +513,8 @@ mod tests {
         assert_eq!(e.refused(), None);
 
         let mut e = Editor::open(Field::Bandwidth, config());
-        e.up(); // 250 -> 500 kHz
+        e.up(); // 250 -> 406.25 kHz, the other band's
+        e.up(); // -> 500 kHz
         assert_eq!(e.confirm(), Confirm::Apply(Setting::Bandwidth(500_000)));
 
         let mut e = Editor::open(Field::SpreadingFactor, config());
@@ -489,15 +560,22 @@ mod tests {
     #[test]
     fn every_field_can_be_refused() {
         let mut freq = Editor::open(Field::Frequency, config());
-        freq.up(); // 9 -> 0: 006.875 MHz
+        freq.up(); // 0 -> 1: 1906.875 MHz
+        assert_eq!(freq.candidate(), 1_906_875_000);
         assert!(matches!(
             freq.confirm(),
             Confirm::Refused(ConfigError::FrequencyOutOfBand)
         ));
 
         let mut bw = Editor::open(Field::Bandwidth, config());
+        bw.down(); // 250 -> 203.125 kHz: the chip has it, on the other band
+        assert_eq!(bw.candidate(), 203_125);
+        assert!(matches!(
+            bw.confirm(),
+            Confirm::Refused(ConfigError::BandwidthNotInBand)
+        ));
         for _ in 0..3 {
-            bw.down(); // 250 -> 125 -> 62.5 -> 41.7
+            bw.down(); // -> 125 -> 62.5 -> 41.7
         }
         assert_eq!(bw.candidate(), 41_700);
         assert!(matches!(
@@ -514,6 +592,35 @@ mod tests {
             power.confirm(),
             Confirm::Refused(ConfigError::PowerAboveModuleRating)
         ));
+        for _ in 0..50 {
+            power.down();
+        }
+        assert_eq!(power.candidate(), -18, "saturates at the bottom of the set");
+        assert!(
+            matches!(
+                power.confirm(),
+                Confirm::Refused(ConfigError::PowerUnreachable)
+            ),
+            "no sub-GHz PA goes that low"
+        );
+
+        // The other band has its own rating, one decibel above the bench
+        // configuration, and its own floor, which is the set's.
+        let mut hf = Editor::open(Field::TxPower, high_frequency());
+        hf.up(); // 11 -> 12
+        assert!(matches!(
+            hf.confirm(),
+            Confirm::Refused(ConfigError::PowerAbove2G4Rating)
+        ));
+        for _ in 0..50 {
+            hf.down();
+        }
+        assert_eq!(hf.candidate(), pa::HF_MIN_DBM as i64);
+        assert_eq!(
+            hf.confirm(),
+            Confirm::Apply(Setting::TxPower(pa::HF_MIN_DBM)),
+            "the high-frequency PA's floor is reachable"
+        );
 
         // Spreading factor and coding rate walk the RNode range, all of which
         // this chip does; there is no illegal value a host could ask for.
@@ -537,20 +644,20 @@ mod tests {
         for _ in 0..20 {
             e.up();
         }
-        assert_eq!(e.candidate(), RNODE_SF_MAX as i32);
+        assert_eq!(e.candidate(), RNODE_SF_MAX as i64);
         for _ in 0..20 {
             e.down();
         }
-        assert_eq!(e.candidate(), RNODE_SF_MIN as i32);
+        assert_eq!(e.candidate(), RNODE_SF_MIN as i64);
         let mut e = Editor::open(Field::CodingRate, config());
         for _ in 0..20 {
             e.down();
         }
-        assert_eq!(e.candidate(), CR_MIN as i32);
+        assert_eq!(e.candidate(), CR_MIN as i64);
         for _ in 0..20 {
             e.up();
         }
-        assert_eq!(e.candidate(), CR_MAX as i32);
+        assert_eq!(e.candidate(), CR_MAX as i64);
     }
 
     /// A value a host set that is not in the set steps onto the set, in the
@@ -580,10 +687,11 @@ mod tests {
                 ..config()
             },
         );
-        assert_eq!(e.digits(), &[9, 1, 5, 0, 0, 0]);
-        e.right();
-        e.right();
-        assert_eq!(e.cursor(), 2);
+        assert_eq!(e.digits(), &[0, 9, 1, 5, 0, 0, 0]);
+        for _ in 0..3 {
+            e.right();
+        }
+        assert_eq!(e.cursor(), 3, "the units of megahertz");
         e.up(); // 915 -> 916
         assert_eq!(e.candidate(), 916_000_500, "the 500 Hz is kept");
         for _ in 0..10 {
@@ -591,12 +699,13 @@ mod tests {
         }
         assert_eq!(e.cursor(), FREQ_DIGITS - 1, "stops at the last digit");
         e.down(); // 0 -> 9
-        assert_eq!(e.digits(), &[9, 1, 6, 0, 0, 9]);
+        assert_eq!(e.digits(), &[0, 9, 1, 6, 0, 0, 9]);
         assert_eq!(e.candidate(), 916_009_500);
         for _ in 0..10 {
             e.left();
         }
         assert_eq!(e.cursor(), 0, "stops at the first digit");
+        e.right();
         e.down(); // 9 -> 8
         assert_eq!(e.candidate(), 816_009_500);
         assert!(matches!(
@@ -605,6 +714,95 @@ mod tests {
         ));
         e.up(); // back to 916
         assert_eq!(e.confirm(), Confirm::Apply(Setting::Frequency(916_009_500)));
+    }
+
+    /// **A 2.4 GHz frequency is edited where it is.** Four megahertz digits
+    /// hold 2478, the cursor walks all of them, and a change of one digit
+    /// confirms on that band -- nothing drags it down to the top of the
+    /// sub-GHz band, and a frequency that leaves the band is refused there
+    /// rather than moved.
+    #[test]
+    fn a_high_frequency_is_edited_in_place() {
+        let mut e = Editor::open(Field::Frequency, high_frequency());
+        assert_eq!(e.candidate(), 2_478_000_000);
+        for _ in 0..3 {
+            e.right();
+        }
+        e.up(); // 2478 -> 2479
+        assert_eq!(e.candidate(), 2_479_000_000);
+        assert_eq!(
+            e.confirm(),
+            Confirm::Apply(Setting::Frequency(2_479_000_000))
+        );
+        // The tens digit up takes it past the band's edge: 2483.5 MHz is
+        // in, 2489 is not, and it stays 2489 rather than moving anywhere.
+        e.left();
+        e.up(); // 2479 -> 2489
+        assert_eq!(
+            e.confirm(),
+            Confirm::Refused(ConfigError::FrequencyOutOfBand)
+        );
+        assert_eq!(e.candidate(), 2_489_000_000, "kept, not moved");
+        e.down(); // back to 2479
+        assert_eq!(
+            e.confirm(),
+            Confirm::Apply(Setting::Frequency(2_479_000_000))
+        );
+
+        // And the way down to the other band is through the same editor:
+        // 0915.000 from 2478.000 is four digits, then the bandwidth is the
+        // other band's until it follows.
+        let mut down = Editor::open(Field::Frequency, high_frequency());
+        down.down(); // 2 -> 1
+        down.down(); // 1 -> 0
+        down.right();
+        for _ in 0..5 {
+            down.up(); // 4 -> 9
+        }
+        down.right();
+        for _ in 0..6 {
+            down.down(); // 7 -> 1
+        }
+        down.right();
+        for _ in 0..3 {
+            down.down(); // 8 -> 5
+        }
+        assert_eq!(down.candidate(), 915_000_000);
+        assert_eq!(
+            down.confirm(),
+            Confirm::Refused(ConfigError::BandwidthNotInBand),
+            "812.5 kHz at 915 MHz"
+        );
+    }
+
+    /// **A frequency past the field is refused, not wrapped.** Seven digits
+    /// of kilohertz reach past what a `u32` of hertz holds, and a plain cast
+    /// would turn 5200 MHz into 905 MHz -- a refused value confirming as a
+    /// legal one. The setting saturates instead, to a value in neither band.
+    #[test]
+    fn a_frequency_past_the_field_is_refused_rather_than_wrapped() {
+        let mut e = Editor::open(Field::Frequency, high_frequency());
+        for _ in 0..3 {
+            e.up(); // 2478 -> 5478 MHz
+        }
+        assert_eq!(e.candidate(), 5_478_000_000);
+        assert!(e.candidate() > u32::MAX as i64);
+        assert_eq!(
+            e.confirm(),
+            Confirm::Refused(ConfigError::FrequencyOutOfBand)
+        );
+        let hz = e.candidate_config().frequency_hz;
+        assert_eq!(hz, u32::MAX);
+        assert_eq!(pa::band_of(hz), None);
+        // The value that would have wrapped into the sub-GHz band.
+        assert_eq!(
+            Field::Frequency.setting(5_200_000_000),
+            Setting::Frequency(u32::MAX)
+        );
+        assert_eq!(
+            Field::Frequency.setting(2_478_000_000),
+            Setting::Frequency(2_478_000_000)
+        );
     }
 
     /// Steppers ignore the cursor keys, so a sideways press while stepping
@@ -618,23 +816,49 @@ mod tests {
         assert!(!e.changed());
     }
 
-    /// The bandwidth set holds every bandwidth the chip has, so every legal
-    /// value is reachable, and the refused ones are the ones the chip lacks.
+    /// The bandwidth set holds every bandwidth the chip has on either band,
+    /// so every legal value is reachable whichever band the frequency is on,
+    /// and the refused ones on each band are exactly the rest.
     #[test]
-    fn the_bandwidth_set_covers_the_chip_and_more() {
-        for (_, hz) in lora::BANDWIDTHS {
-            assert!(BANDWIDTH_STEPS.contains(&(hz as i32)), "{hz}");
+    fn the_bandwidth_set_covers_both_bands_and_more() {
+        for (_, hz) in lora::BANDWIDTHS.iter().chain(&lora::BANDWIDTHS_2G4) {
+            assert!(BANDWIDTH_STEPS.contains(&(*hz as i64)), "{hz}");
         }
-        let refused = BANDWIDTH_STEPS
-            .iter()
-            .filter(|&&hz| {
-                config()
-                    .with(Setting::Bandwidth(hz as u32))
-                    .check()
-                    .is_err()
-            })
-            .count();
-        assert_eq!(refused, BANDWIDTH_STEPS.len() - lora::BANDWIDTHS.len());
+        let refused_on = |base: RadioConfig| {
+            BANDWIDTH_STEPS
+                .iter()
+                .filter(|&&hz| base.with(Setting::Bandwidth(hz as u32)).check().is_err())
+                .count()
+        };
+        assert_eq!(
+            refused_on(config()),
+            BANDWIDTH_STEPS.len() - lora::BANDWIDTHS.len()
+        );
+        assert_eq!(
+            refused_on(high_frequency()),
+            BANDWIDTH_STEPS.len() - lora::BANDWIDTHS_2G4.len()
+        );
+        // Stepping from the sub-GHz default up through the set reaches the
+        // 2.4 GHz values, each refused as the other band's, not as unknown.
+        let mut e = Editor::open(Field::Bandwidth, config());
+        e.up(); // 250 -> 406.25
+        assert_eq!(e.candidate(), 406_250);
+        assert_eq!(
+            e.confirm(),
+            Confirm::Refused(ConfigError::BandwidthNotInBand)
+        );
+        // And on 2.4 GHz every one of its three is legal and every sub-GHz
+        // one is the other band's.
+        for (_, hz) in lora::BANDWIDTHS_2G4 {
+            let mut e = Editor::open(Field::Bandwidth, high_frequency());
+            while e.candidate() > hz as i64 {
+                e.down();
+            }
+            while e.candidate() < hz as i64 {
+                e.up();
+            }
+            assert_eq!(e.confirm(), Confirm::Apply(Setting::Bandwidth(hz)));
+        }
     }
 
     /// Every field has a title and a label, and no two share one.

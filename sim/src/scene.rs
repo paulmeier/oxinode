@@ -20,7 +20,7 @@ use monopanel::Canvas;
 use oxinode_core::battery;
 use oxinode_core::edit::Editor;
 use oxinode_core::gps;
-use oxinode_core::lr1121::config::{ConfigError, RadioConfig, DEFAULT};
+use oxinode_core::lr1121::config::{ConfigError, RadioConfig, BENCH_2G4, DEFAULT};
 use oxinode_core::screens::{
     self, Air, BluetoothScreen, Home, Host, Identity, Position, Radio, State, System,
 };
@@ -40,6 +40,8 @@ pub enum Fixture {
     /// A board on its own: a TNC with no host, whose settings the panel may
     /// change.
     Standalone,
+    /// The standalone board on the other band: 2478 MHz on the u.FL.
+    HighFrequency,
 }
 
 impl Fixture {
@@ -49,6 +51,7 @@ impl Fixture {
             "empty" => Some(Fixture::Empty),
             "populated" => Some(Fixture::Populated),
             "standalone" => Some(Fixture::Standalone),
+            "2g4" => Some(Fixture::HighFrequency),
             _ => None,
         }
     }
@@ -58,6 +61,7 @@ impl Fixture {
             Fixture::Empty => State::default(),
             Fixture::Populated => populated(),
             Fixture::Standalone => standalone(),
+            Fixture::HighFrequency => high_frequency(),
         }
     }
 }
@@ -164,6 +168,15 @@ pub fn standalone() -> State {
     state.home.host = Host::None;
     state.home.talking = false;
     state.radio.tnc = true;
+    state
+}
+
+/// The standalone board holding the bench's 2.4 GHz configuration: 2478 MHz,
+/// 812.5 kHz, SF8, 11 dBm, uncorrected. What the screens show on the other
+/// band, and the editors opening on a frequency with four megahertz digits.
+pub fn high_frequency() -> State {
+    let mut state = standalone();
+    state.radio.config = BENCH_2G4;
     state
 }
 
@@ -434,10 +447,17 @@ mod tests {
         assert_eq!(Fixture::named("empty"), Some(Fixture::Empty));
         assert_eq!(Fixture::named("populated"), Some(Fixture::Populated));
         assert_eq!(Fixture::named("standalone"), Some(Fixture::Standalone));
+        assert_eq!(Fixture::named("2g4"), Some(Fixture::HighFrequency));
         assert_eq!(Fixture::named("full"), None);
         assert_eq!(standalone().home.host, Host::None);
         assert!(standalone().radio.tnc);
         assert_eq!(standalone().radio.config, populated().radio.config);
+        // The other band's board is the standalone one on 2478 MHz, and the
+        // configuration it holds is one the radio accepts.
+        assert_eq!(high_frequency().home.host, Host::None);
+        assert_eq!(high_frequency().radio.config.frequency_hz, 2_478_000_000);
+        assert!(high_frequency().radio.config.check().is_ok());
+        assert_eq!(Fixture::HighFrequency.state(), high_frequency());
         assert_eq!(Fixture::Empty.state(), State::default());
         assert_ne!(Fixture::Populated.state(), State::default());
         assert!(pairing().bluetooth.passkey.is_some());

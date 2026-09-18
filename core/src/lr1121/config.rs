@@ -65,12 +65,12 @@ pub const MAX_PAYLOAD: u8 = 255;
 
 /// Which of the chip's two front ends a configuration may be validated for.
 ///
-/// The product image is sub-GHz only: the panel edits sub-GHz frequencies, a
-/// host is told the sub-GHz band, and the antenna a person attached is on the
-/// SMA. The 2.4 GHz path has been driven on the bench and not in the product,
-/// so [`RadioConfig::check`] stays sub-GHz and the bench image asks for
-/// [`Bands::ALL`] explicitly. Extending the product to 2.4 GHz is a matter of
-/// changing what it asks for, once the rest of it can hold the answer.
+/// The board has both, and [`RadioConfig::check`] validates for both: a host
+/// that asks the product image for 2478 MHz gets it, on the u.FL connector,
+/// with the bandwidths and the power rating that path has. The panel, the
+/// stored configuration and the bench console all go through the same check.
+/// [`Bands::SUB_GHZ`] is for a caller that wants to hold itself to one path,
+/// and for the tests that pin what refusing the other band looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bands {
     /// 902–928 MHz on the SMA connector.
@@ -80,12 +80,12 @@ pub struct Bands {
 }
 
 impl Bands {
-    /// The sub-GHz path only: what the product image accepts.
+    /// The sub-GHz path only.
     pub const SUB_GHZ: Self = Self {
         sub_ghz: true,
         high_frequency: false,
     };
-    /// Both paths: what the bench image accepts.
+    /// Both paths: what the board has, and what every image accepts.
     pub const ALL: Self = Self {
         sub_ghz: true,
         high_frequency: true,
@@ -164,6 +164,10 @@ pub const DEFAULT: RadioConfig = RadioConfig {
 
 /// The bench's 2.4 GHz configuration: what the `radio` image's `H` key loads.
 ///
+/// The product has no preset: a host sets these five values as it sets any
+/// others, and `tools/air_exchange.py --frequency 2478000000 --bandwidth
+/// 812500 --txpower 11` is the same configuration from `rnsd`'s side.
+///
 /// * **2478 MHz** — see [`pa::CW_TEST_2G4_HZ`] for why not the middle.
 /// * **812.5 kHz, SF8, CR 4/5** — the widest bandwidth the path has, because
 ///   the question this configuration exists to answer is whether the path
@@ -195,7 +199,8 @@ pub const BENCH_2G4: RadioConfig = RadioConfig {
 /// diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {
-    /// The frequency is outside the band this board's antenna is cut for.
+    /// The frequency is in neither of the bands this board has -- or, for a
+    /// caller that asked for one band, not in that one.
     FrequencyOutOfBand,
     /// The bandwidth is not one the LR1121 offers on either path.
     UnsupportedBandwidth,
@@ -224,10 +229,15 @@ impl ConfigError {
     ///
     /// `oxinode-core` has no dependencies and so cannot derive `defmt::Format`;
     /// the rest of this crate solves that the same way.
+    ///
+    /// Each one also has to fit under an editor on the panel, which leaves
+    /// three lines of twenty characters for it; `crate::screens` has the
+    /// test. That is why the frequency message names both bands and the
+    /// bandwidth one names neither set.
     pub const fn message(self) -> &'static str {
         match self {
-            Self::FrequencyOutOfBand => "frequency is outside the 902-928 MHz band",
-            Self::UnsupportedBandwidth => "bandwidth is not one of 62.5/125/250/500 kHz",
+            Self::FrequencyOutOfBand => "frequency is outside 902-928 and 2400-2483.5 MHz",
+            Self::UnsupportedBandwidth => "bandwidth is not one the chip has on either band",
             Self::BandwidthNotInBand => "bandwidth belongs to the other band",
             Self::SpreadingFactorOutOfRange => "spreading factor is outside 5-12",
             Self::CodingRateOutOfRange => "coding rate is outside 5-8",
@@ -250,19 +260,26 @@ impl RadioConfig {
     /// valid here, because what the chip can do and what a protocol can say are
     /// separate questions and conflating them would make the bench console
     /// unable to reach hardware that works.
+    ///
+    /// Validates for both of the board's bands — see [`Bands`]. The band is
+    /// decided first and everything after is judged against it: a bandwidth
+    /// is right or wrong *for a band*, and so is a power. A host setting one
+    /// field at a time passes through mixed states (a 2.4 GHz frequency with
+    /// the 125 kHz it had at 915 MHz), and
+    /// [`ConfigError::BandwidthNotInBand`] is the answer until the bandwidth
+    /// follows, exactly as an out-of-band frequency is until the antenna's
+    /// band is set again.
     pub const fn check(&self) -> Result<(), ConfigError> {
-        self.check_in(Bands::SUB_GHZ)
+        self.check_in(Bands::ALL)
     }
 
-    /// [`RadioConfig::check`], for a caller that may drive more than the
-    /// sub-GHz path. See [`Bands`] for who may.
+    /// [`RadioConfig::check`], for a caller that holds itself to fewer bands
+    /// than the board has.
     ///
-    /// The band is decided first and everything after is judged against it:
-    /// a bandwidth is right or wrong *for a band*, and so is a power. A
-    /// frequency in a band the caller did not ask for is out of band, not
-    /// "in a band you may not use" — a host on the product image asking for
-    /// 2.4 GHz is told the same thing it would be told for 868 MHz, because
-    /// from where it stands the two are the same fact.
+    /// A frequency in a band the caller did not ask for is out of band, not
+    /// "in a band you may not use" — a caller that asked for sub-GHz alone is
+    /// told the same thing for 2478 MHz as for 868 MHz, because from where it
+    /// stands the two are the same fact.
     pub const fn check_in(&self, bands: Bands) -> Result<(), ConfigError> {
         let band = match pa::band_of(self.frequency_hz) {
             Some(band) if bands.allows(band) => band,
@@ -470,9 +487,10 @@ impl RadioConfig {
 pub struct ValidConfig(RadioConfig);
 
 impl ValidConfig {
-    /// Validate for the sub-GHz path, or say why not.
+    /// Validate for both of the board's bands, or say why not. This is the
+    /// gate every image, the panel and the stored configuration go through.
     pub const fn new(config: RadioConfig) -> Result<Self, ConfigError> {
-        Self::new_in(config, Bands::SUB_GHZ)
+        Self::new_in(config, Bands::ALL)
     }
 
     /// Validate for the given bands, or say why not. See [`Bands`].
@@ -624,14 +642,18 @@ const _: () = assert!(DEFAULT.pa_config().is_some());
 // The RNode subset is a subset. If it ever stopped being one, `check` would be
 // rejecting configurations a host is entitled to ask for.
 const _: () = assert!(RNODE_SF_MIN >= lora::SF_MIN && RNODE_SF_MAX <= lora::SF_MAX);
-// The bench's 2.4 GHz configuration is valid where the bench asks, and only
-// there: the product image must go on refusing it until it can hold it.
-const _: () = assert!(BENCH_2G4.check_in(Bands::ALL).is_ok());
+// The bench's 2.4 GHz configuration is valid through the ordinary gate -- the
+// one the product, the panel and the stored configuration use -- and refused
+// by a caller that holds itself to the sub-GHz path.
+const _: () = assert!(BENCH_2G4.check().is_ok());
 const _: () = assert!(matches!(
-    BENCH_2G4.check(),
+    BENCH_2G4.check_in(Bands::SUB_GHZ),
     Err(ConfigError::FrequencyOutOfBand)
 ));
 const _: () = assert!(matches!(BENCH_2G4.band(), Some(pa::Band::HighFrequency)));
+// The bench configuration is not the default: a board that boots on 2.4 GHz
+// with the antenna on the SMA is a board transmitting into an open port.
+const _: () = assert!(BENCH_2G4.frequency_hz != DEFAULT.frequency_hz);
 // ...and a host could ask for it, which is what question 2 of the spike
 // turned on: the frequency fits the four bytes, and SF8 at 11 dBm is inside
 // what the protocol expresses.
@@ -756,29 +778,62 @@ mod tests {
         );
     }
 
-    /// Sub-GHz callers see nothing new: `check` is `check_in(SUB_GHZ)`, and a
-    /// 2.4 GHz frequency is out of band to them, whatever else is set.
+    /// The ordinary gate is both bands: `check` is `check_in(ALL)`, so the
+    /// bench configuration passes it and the default still does. A caller
+    /// that holds itself to sub-GHz sees 2478 MHz as out of band, whatever
+    /// else is set.
     #[test]
-    fn the_sub_ghz_check_is_unchanged_and_refuses_the_other_band() {
+    fn the_check_covers_both_bands_and_sub_ghz_alone_refuses_the_other() {
         for base in [DEFAULT, BENCH_2G4] {
-            assert_eq!(base.check(), base.check_in(Bands::SUB_GHZ));
+            assert_eq!(base.check(), base.check_in(Bands::ALL));
+            assert_eq!(base.check(), Ok(()));
             assert_eq!(
                 ValidConfig::new(base),
-                ValidConfig::new_in(base, Bands::SUB_GHZ)
+                ValidConfig::new_in(base, Bands::ALL)
             );
         }
-        assert_eq!(BENCH_2G4.check(), Err(ConfigError::FrequencyOutOfBand));
         assert_eq!(
-            RadioConfig {
-                frequency_hz: pa::CW_TEST_2G4_HZ,
-                ..DEFAULT
-            }
-            .check(),
+            BENCH_2G4.check_in(Bands::SUB_GHZ),
             Err(ConfigError::FrequencyOutOfBand)
         );
+        assert_eq!(DEFAULT.check_in(Bands::SUB_GHZ), Ok(()));
         assert!(Bands::SUB_GHZ.allows(pa::Band::SubGhz));
         assert!(!Bands::SUB_GHZ.allows(pa::Band::HighFrequency));
         assert!(Bands::ALL.allows(pa::Band::HighFrequency));
+    }
+
+    /// **The mixed state a host passes through.** `rnsd` sets the frequency
+    /// first, so between that and the bandwidth the configuration is 2478 MHz
+    /// with 125 kHz -- and the answer is the bandwidth's, not the frequency's,
+    /// because the frequency is fine. Once the bandwidth follows it validates.
+    /// The same the other way round: a board coming down from 2.4 GHz holds
+    /// 812.5 kHz at 915 MHz for a moment.
+    #[test]
+    fn a_host_moving_between_bands_is_refused_on_the_bandwidth_until_it_follows() {
+        let mut config = DEFAULT;
+        config.frequency_hz = pa::CW_TEST_2G4_HZ;
+        assert_eq!(config.check(), Err(ConfigError::BandwidthNotInBand));
+        config.bandwidth_hz = 812_500;
+        assert_eq!(
+            config.check(),
+            Err(ConfigError::PowerAbove2G4Rating),
+            "14 dBm"
+        );
+        config.tx_power_dbm = pa::MODULE_MAX_2G4_DBM;
+        assert_eq!(config.check(), Ok(()));
+        let valid = ValidConfig::new(config).unwrap();
+        assert_eq!(valid.band(), pa::Band::HighFrequency);
+        assert_eq!(valid.bandwidth_code(), 0x0F);
+        assert_eq!(valid.pa_config(), pa::HIGH_FREQUENCY);
+
+        config.frequency_hz = pa::CW_TEST_HZ;
+        assert_eq!(config.check(), Err(ConfigError::BandwidthNotInBand));
+        config.bandwidth_hz = 125_000;
+        assert_eq!(
+            config.check(),
+            Ok(()),
+            "11 dBm is fine on the sub-GHz path too"
+        );
     }
 
     /// The modulation word, byte by byte, for both bands. The bandwidth byte
@@ -996,6 +1051,9 @@ mod tests {
         for config in cases {
             assert!(config.airtime_us(16) > base, "{config:?}");
         }
+        // The 2.4 GHz bandwidths are the widest the chip has, so the same
+        // packet is quicker there than on any sub-GHz setting.
+        assert!(BENCH_2G4.airtime_us(16) < DEFAULT.airtime_us(16));
         // ...and falls with bandwidth, which is the one that goes the other way.
         assert!(
             RadioConfig {
@@ -1172,6 +1230,29 @@ mod tests {
                 }
             }
         }
+        // And the other band, through the same gate.
+        for sf in lora::SF_MIN..=lora::SF_MAX {
+            for (_, bw) in lora::BANDWIDTHS_2G4 {
+                for cr in CR_MIN..=CR_MAX {
+                    for dbm in [pa::HF_MIN_DBM, 0, pa::MODULE_MAX_2G4_DBM] {
+                        let config = RadioConfig {
+                            spreading_factor: sf,
+                            bandwidth_hz: bw,
+                            coding_rate: cr,
+                            tx_power_dbm: dbm,
+                            ..BENCH_2G4
+                        };
+                        let valid = ValidConfig::new(config)
+                            .unwrap_or_else(|e| panic!("{config:?}: {}", e.message()));
+                        assert!(valid.bitrate_bps() > 0);
+                        assert!(valid.airtime_us(255) > 0);
+                        assert!(valid.airtime_us(255) < 30_000_000);
+                        assert!((0x0D..=0x0F).contains(&valid.bandwidth_code()));
+                        assert_eq!(valid.pa_config(), pa::HIGH_FREQUENCY);
+                    }
+                }
+            }
+        }
     }
 
     /// The only way to make a `ValidConfig` is to pass validation, and what
@@ -1251,13 +1332,22 @@ mod tests {
         for e in [
             ConfigError::FrequencyOutOfBand,
             ConfigError::UnsupportedBandwidth,
+            ConfigError::BandwidthNotInBand,
             ConfigError::SpreadingFactorOutOfRange,
             ConfigError::CodingRateOutOfRange,
             ConfigError::PowerUnreachable,
             ConfigError::PowerAboveModuleRating,
+            ConfigError::PowerAbove2G4Rating,
             ConfigError::PreambleTooShort,
         ] {
             assert!(e.message().len() > 10, "{e:?}");
         }
+        // The frequency refusal names both bands, because a host that is
+        // told only one would go looking for a second board.
+        let both = ConfigError::FrequencyOutOfBand.message();
+        assert!(
+            both.contains("902-928") && both.contains("2400-2483.5"),
+            "{both}"
+        );
     }
 }
