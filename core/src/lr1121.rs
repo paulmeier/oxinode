@@ -14,6 +14,8 @@
 //!   in each mode.
 //! * [`pa`] — output power limits, and the rules for keying a carrier without
 //!   damaging anything.
+//! * [`rssi`] — the RSSI calibration table each front end needs before the
+//!   number it reports means anything.
 //! * [`irq`] — which interrupts are routed to the one line that reaches the
 //!   MCU.
 //! * [`lora`] — modulation parameters, and how long a packet takes to send.
@@ -32,6 +34,7 @@ pub mod pa;
 pub mod reference;
 pub mod reset;
 pub mod rf_switch;
+pub mod rssi;
 pub mod tcxo;
 pub mod version;
 

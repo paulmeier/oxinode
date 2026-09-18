@@ -27,12 +27,13 @@
 use embassy_time::{with_timeout, Duration, Instant};
 use lr11xx::ops::{
     CadExit, CadParams, Interrupt, LoRaModulation, LoRaPacket, PaConfig, PacketType, RampTime,
-    TxParams,
+    RssiCalibration, TxParams,
 };
 use lr11xx::Lr11xx;
 use oxinode_core::lr1121::config::{ValidConfig, MAX_PAYLOAD};
 use oxinode_core::lr1121::csma::{self, Backoff, Channel, Step};
 use oxinode_core::lr1121::irq as irq_bits;
+use oxinode_core::lr1121::rssi;
 
 use crate::radio::RadioIrq;
 
@@ -199,7 +200,24 @@ where
     /// Standby goes first of all, for a related reason -- see the comment on
     /// the sequence below. Configuration from receive is refused, and refused
     /// quietly.
+    ///
+    /// Receive boost is on. That is the product's setting; the bench can turn
+    /// it off through [`Modem::apply_with`] to see what it is worth.
     pub async fn apply(&mut self, config: &ValidConfig) -> Result<(), ModemError> {
+        self.apply_with(config, true).await
+    }
+
+    /// [`Modem::apply`], with the receive-boost setting chosen by the caller.
+    ///
+    /// `SetRxBoosted` is documented without reference to a band, and the
+    /// chip's gain table has boosted steps on both front ends -- fewer on the
+    /// 2.4 GHz one -- so the product leaves it on everywhere. The switch
+    /// exists so the bench can measure that rather than believe it.
+    pub async fn apply_with(
+        &mut self,
+        config: &ValidConfig,
+        rx_boost: bool,
+    ) -> Result<(), ModemError> {
         let sequence = async {
             // Standby first, and this is not tidiness.
             //
@@ -221,6 +239,18 @@ where
             self.dev
                 .set_rf_frequency(config.commanded_frequency_hz())
                 .await?;
+            // The RSSI calibration table for the front end this frequency
+            // selects. The chip boots with the sub-GHz one and keeps whatever
+            // it was last given, so this goes with every configuration: a
+            // modem that has been on 2.4 GHz would otherwise report sub-GHz
+            // RSSI through the 2.4 GHz table, and choose its gain by it. The
+            // word is packed in core from the manual's layout, because the
+            // crate's bitfield for it is wrong -- see `oxinode_core::lr1121::rssi`.
+            self.dev
+                .set_rssi_calibration(RssiCalibration::new_with_raw_value(
+                    arbitrary_int::u88::new(rssi::table_for(config.band()).to_raw()),
+                ))
+                .await?;
             self.dev.set_lora_modulation(modulation(config)).await?;
             self.dev
                 .set_lora_packet(packet(config, MAX_PAYLOAD))
@@ -239,8 +269,10 @@ where
                 .await?;
             // Sensitivity over receive current. An RNode is a base station on a
             // desk far more often than it is a battery node, and the extra
-            // 2 dB is worth more than the milliamp.
-            self.dev.set_rx_boosted(true).await?;
+            // 2 dB is worth more than the milliamp. Sent even when off: the
+            // setting persists across configurations, and a bench that
+            // turned it off must be able to turn it back on.
+            self.dev.set_rx_boosted(rx_boost).await?;
             // Two settings for the wait before a transmission; see `sense`
             // and `listen`. Once per configuration rather than once per
             // sense, because neither depends on anything that changes

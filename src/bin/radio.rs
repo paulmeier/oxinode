@@ -27,6 +27,7 @@
 #![no_main]
 
 use arbitrary_int::u24;
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
 use embassy_futures::select::{select3, Either3};
@@ -50,6 +51,18 @@ use oxinode_core::lr1121::csma::Backoff;
 use oxinode_core::lr1121::{irq as irq_bits, lora, pa, reference, rf_switch, tcxo, ResetVerdict};
 use oxinode_core::meshtastic;
 use static_cell::StaticCell;
+
+/// The bench's receive-boost switch, on by default as the product has it.
+///
+/// A static rather than a field of the configuration, because it is not a
+/// setting a host can express and not one the product ever changes: it exists
+/// so `B` can turn it off and a listen can say what the 2 dB is worth.
+static RX_BOOST: AtomicBool = AtomicBool::new(true);
+
+/// What the bench's next apply, transmit or listen will program.
+fn rx_boost() -> bool {
+    RX_BOOST.load(Ordering::Relaxed)
+}
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
@@ -478,7 +491,7 @@ where
         pa::CW_SWEEP_HZ[1]
     );
     defmt::info!(
-        "console config: S = spreading factor, W = bandwidth, C = coding rate, P = power, [ / ] = frequency -/+ 100 kHz, R = reference correction, N = sync word, M = Meshtastic LongFast preset, H = 2.4 GHz bench preset, D = oxinode default, A = apply, ? = show"
+        "console config: S = spreading factor, W = bandwidth, C = coding rate, P = power, [ / ] = frequency -/+ 100 kHz, R = reference correction, N = sync word, M = Meshtastic LongFast preset, H = 2.4 GHz bench preset, D = oxinode default, A = apply, B = toggle receive boost, ? = show"
     );
     defmt::info!(
         "console radio: p = send a packet, y = listen 20 s (h/i = -60/+60 kHz), z = coarse frequency sweep, E = fine sweep of the window's upper edge"
@@ -655,14 +668,28 @@ where
                         b'A' => {
                             if let (Some(dev), Some(valid)) = (radio.as_mut(), validate(&cfg)) {
                                 let mut modem = Modem::new(dev, irq);
-                                match modem.apply(&valid).await {
+                                match modem.apply_with(&valid, rx_boost()).await {
                                     Ok(()) => {
                                         log_config(&valid);
-                                        defmt::info!("config: applied");
+                                        defmt::info!(
+                                            "config: applied, receive boost {=bool}",
+                                            rx_boost()
+                                        );
                                     }
                                     Err(e) => defmt::error!("config: apply failed, {}", e),
                                 }
                             }
+                        }
+                        // Receive boost, so a listen with and without it
+                        // can be compared on the same signal. Nothing reaches
+                        // the chip until the next apply, transmit or listen.
+                        b'B' => {
+                            let on = !rx_boost();
+                            RX_BOOST.store(on, Ordering::Relaxed);
+                            defmt::info!(
+                                "config: receive boost {=str} for the next apply, transmit or listen",
+                                if on { "on" } else { "off" }
+                            );
                         }
                         // Step 8: the regulator, and a way to compare the two.
                         b'm' | b'u' => {
@@ -1086,7 +1113,7 @@ async fn tx_packet<S, B>(
     );
 
     let mut modem = Modem::new(dev, irq);
-    if let Err(e) = modem.apply(&valid).await {
+    if let Err(e) = modem.apply_with(&valid, rx_boost()).await {
         defmt::error!("tx: apply failed, {}", e);
         return;
     }
@@ -1253,7 +1280,7 @@ where
     }
 
     let mut modem = Modem::new(dev, irq);
-    if let Err(e) = modem.apply(&shifted).await {
+    if let Err(e) = modem.apply_with(&shifted, rx_boost()).await {
         defmt::error!("rx: apply failed, {}", e);
         return 0;
     }
@@ -1262,7 +1289,7 @@ where
         return 0;
     }
     if verbose {
-        defmt::info!("rx: listening");
+        defmt::info!("rx: listening, receive boost {=bool}", rx_boost());
     }
 
     let until = Instant::now() + dwell;
