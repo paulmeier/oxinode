@@ -51,8 +51,9 @@ has to rediscover it.
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
 - **The 2.4 GHz path is accepted and held, and not yet good.** The product
-  image validates for both bands, the panel shows the band and edits a
-  2.4 GHz frequency in place, and a stored 2.4 GHz configuration comes back
+  image validates for both bands, the panel shows the band, switches it in
+  one step and edits a 2.4 GHz frequency in place, and a stored 2.4 GHz
+  configuration comes back
   after a reboot. What stands between that and a usable link is carrier
   sense: channel activity detection at 812.5 kHz reads a quiet desk as busy
   on nearly every sense, so every transmission waits out its whole budget

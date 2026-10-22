@@ -140,6 +140,14 @@ impl Band {
             Self::HighFrequency => "2.4 GHz",
         }
     }
+
+    /// The connector the antenna goes on for this band.
+    pub const fn connector(self) -> &'static str {
+        match self {
+            Self::SubGhz => "SMA",
+            Self::HighFrequency => "u.FL",
+        }
+    }
 }
 
 /// Whether the high-frequency PA can produce this output power.

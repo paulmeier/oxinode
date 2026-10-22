@@ -755,6 +755,7 @@ mod tests {
     use super::super::command::{self, decode, error};
     use super::super::kiss;
     use super::*;
+    use crate::lr1121::pa;
 
     /// Records frames as the protocol emits them.
     #[derive(Default)]
@@ -1907,6 +1908,40 @@ mod tests {
         let mut next = Protocol::with_storage(restored, 0);
         assert_eq!(next.resume_stored_config(), Action::Reconfigure);
         assert_eq!(next.config().frequency_hz, 916_250_000);
+    }
+
+    /// **The band switch is one panel edit.** On a TNC with the radio on,
+    /// it reprograms the radio onto 2.4 GHz in one step, a host reads the
+    /// three moved values back, and the next boot comes up on that band.
+    #[test]
+    fn the_band_switch_reaches_the_radio_and_survives_a_reboot() {
+        let mut p = Protocol::new();
+        let mut out = Frames::default();
+        p.handle(Command::SaveConfig, &mut out);
+        p.resume_stored_config();
+        assert!(p.radio_is_on());
+        let change = p.set_from_panel(Setting::Band(pa::Band::HighFrequency));
+        assert_eq!(change.radio, Action::Reconfigure, "legal in one step");
+        assert!(change.persist);
+        assert!(p.radio_is_on());
+        assert_eq!(p.last_error(), None);
+        let mut after = Frames::default();
+        p.report_all(&mut after);
+        assert_eq!(
+            after.payload(cmd::FREQUENCY),
+            Some(&2_478_000_000u32.to_be_bytes()[..])
+        );
+        assert_eq!(
+            after.payload(cmd::BANDWIDTH),
+            Some(&406_250u32.to_be_bytes()[..])
+        );
+        assert_eq!(after.payload(cmd::TXPOWER), Some(&[11u8][..]));
+
+        let restored = DeviceStore::decode(&p.store().encode()).unwrap();
+        let mut next = Protocol::with_storage(restored, 0);
+        assert_eq!(next.resume_stored_config(), Action::Reconfigure);
+        assert_eq!(next.config().band(), Some(pa::Band::HighFrequency));
+        assert_eq!(next.config().bandwidth_hz, 406_250);
     }
 
     /// ...and under host control it does not, because the host owns that

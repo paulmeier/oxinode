@@ -75,16 +75,16 @@ sim render --state empty --script "right*4" -o system-empty.png
 
 ## Editing a setting
 
-The Radio menu's first five items open an editor. The scene plays the board's
+The Radio menu's first six items open an editor. The scene plays the board's
 part: with nobody on the line it opens the editor and a confirmed value lands
 in the state, so the next picture shows it; with a host on the line it opens
 the notice instead. The scene applies the same `Action::changes_the_radio`
 the firmware does, so the golden images of the notice are the board's
-behaviour and not an impersonation of it. Here the fifth press is *TX Power*,
+behaviour and not an impersonation of it. Here the sixth press is *TX Power*,
 `up*4` takes 17 dBm to 21, and the last `select` is refused:
 
 ```bash
-sim render --state standalone --script "right select down*5 select up*4 select" -o refused.png
+sim render --state standalone --script "right select down*6 select up*4 select" -o refused.png
 sim render --script "right select down select" -o locked.png
 ```
 
@@ -92,7 +92,7 @@ sim render --script "right select down select" -o locked.png
 
 The interface draws on any size of canvas, and `--panel WxH` renders on one
 the board does not have. 128 × 64 is the size the golden set is also held at,
-with four lines between the bars and the nine-item Radio menu shown two rows
+with four lines between the bars and the ten-item Radio menu shown two rows
 at a time:
 
 ```bash
@@ -123,8 +123,9 @@ sim golden --update   # after an intended change; commit the result
 The set under `sim/golden/` is generated from the screen list and the field
 list: every screen empty and populated, every item of every menu, a scrolled
 page at the top, the middle and the bottom, every editor open, the refusals
-that can be reached, the frequency editor with its cursor moved, the screen
-after a confirmed edit, the notice for USB and for a phone, a pairing in
+that can be reached, the frequency editor with its cursor moved, the band
+editor with the other band chosen and the screen after it is confirmed, the
+screen after a confirmed edit, the notice for USB and for a phone, a pairing in
 progress, and the receiver searching. `sim/golden/128x64/` holds the same
 screens on the other panel. On a mismatch the rendering and a diff land in
 `target/golden-diff/`.

@@ -36,9 +36,10 @@ use monopanel::{font, page, Canvas, Layout};
 
 use crate::battery;
 use crate::ble::NAME_LEN;
-use crate::edit::{Editor, Field, Lock, FREQ_POINT};
+use crate::edit::{Editor, Field, Lock, BAND_2G4, BAND_SUB_GHZ, FREQ_POINT};
 use crate::gps;
 use crate::lr1121::config::{ConfigError, RadioConfig};
+use crate::lr1121::pa;
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
 use crate::rnode::store::MAX_BONDS;
 use crate::status::{Bluetooth as Link, Text};
@@ -763,6 +764,19 @@ impl System {
 /// screen's; ` 915.000 MHz` reads as `915.000 MHz` does.
 fn field_value(out: &mut Text<LINE_CHARS>, field: Field, value: i64) {
     match field {
+        // The screen's word for the band and the connector it puts the
+        // antenna on, because moving the band is moving the antenna.
+        Field::Band => {
+            let band = match value {
+                BAND_SUB_GHZ => Some(pa::Band::SubGhz),
+                BAND_2G4 => Some(pa::Band::HighFrequency),
+                _ => None,
+            };
+            let _ = match band {
+                Some(band) => write!(out, "{}, {}", band.name(), band.connector()),
+                None => out.write_str("-"),
+            };
+        }
         Field::Frequency => {
             // The candidate can exceed what a `u32` holds -- see
             // `Field::setting` -- and the digits shown are the digits typed.
@@ -825,7 +839,28 @@ impl Editor {
         );
         out.line(line.as_str());
 
-        if self.is_stepper() {
+        if self.field() == Field::Band && self.changed() {
+            // Where the other band lands, because the editor moves three
+            // values and shows one. Two lines where the other steppers have
+            // a blank, so a refusal still fits under it.
+            let c = self.candidate_config();
+            v.clear();
+            line.clear();
+            megahertz(&mut v, c.frequency_hz);
+            let _ = write!(
+                line,
+                "{:<width$}{}",
+                "Sets",
+                v.as_str(),
+                width = EDIT_VALUE_COL
+            );
+            out.line(line.as_str());
+            line.clear();
+            kilohertz(&mut line, c.bandwidth_hz);
+            let _ = write!(line, ", {} dBm", c.tx_power_dbm);
+            out.line(line.as_str());
+            out.line("Up/Down: change");
+        } else if self.is_stepper() {
             out.line("");
             out.line("Up/Down: change");
         } else {
@@ -1689,6 +1724,74 @@ mod tests {
         assert_eq!(editor_lines(&e)[1], "Now   4/5");
         let e = Editor::open(Field::SpreadingFactor, populated().radio.config);
         assert_eq!(editor_lines(&e)[1], "Now   8");
+    }
+
+    /// **The band editor says where the board lands.** Was and Now name the
+    /// band and its connector; once the band differs, the two lines under
+    /// them are the frequency, bandwidth and power it will be set to, in the
+    /// Radio screen's words. Unchanged, it reads like any other stepper.
+    #[test]
+    fn the_band_editor_shows_the_band_the_connector_and_the_landing() {
+        let config = populated().radio.config;
+        let e = Editor::open(Field::Band, config);
+        let lines = editor_lines(&e);
+        assert_eq!(lines[0], "Was   sub-GHz, SMA");
+        assert_eq!(lines[1], "Now   sub-GHz, SMA");
+        assert_eq!(lines[2], "");
+        assert_eq!(lines[3], "Up/Down: change");
+
+        let mut e = Editor::open(Field::Band, config);
+        e.up();
+        let lines = editor_lines(&e);
+        assert_eq!(
+            lines,
+            [
+                "Was   sub-GHz, SMA",
+                "Now   2.4 GHz, u.FL",
+                "Sets  2478.000 MHz",
+                "406.25 kHz, 11 dBm",
+                "Up/Down: change",
+                "OK: set Back: cancel",
+            ]
+        );
+
+        let mut e = Editor::open(Field::Band, crate::lr1121::config::BENCH_2G4);
+        e.down();
+        let lines = editor_lines(&e);
+        assert_eq!(lines[1], "Now   sub-GHz, SMA");
+        assert_eq!(lines[2], "Sets  915.000 MHz");
+        assert_eq!(lines[3], "125.0 kHz, 14 dBm");
+
+        let lost = RadioConfig {
+            frequency_hz: 868_000_000,
+            ..config
+        };
+        assert_eq!(editor_lines(&Editor::open(Field::Band, lost))[0], "Was   -");
+    }
+
+    /// A band editor with its landing showing and a refusal under it -- the
+    /// longest it gets -- still fits the panel without scrolling.
+    #[test]
+    fn a_refused_band_editor_fits() {
+        let odd = RadioConfig {
+            coding_rate: 9,
+            ..populated().radio.config
+        };
+        let mut e = Editor::open(Field::Band, odd);
+        e.up();
+        assert!(matches!(e.confirm(), crate::edit::Confirm::Refused(_)));
+        // Bound by the longest a reason may wrap to (three lines, held by
+        // `every_editor_fits_without_scrolling`), not by this one's.
+        let reason = wrap(e.refused().unwrap().message(), LINE_CHARS).count();
+        let lines = editor_lines(&e);
+        assert_eq!(lines[2], "Sets  2478.000 MHz", "the landing is shown");
+        assert!(
+            lines.len() - reason + 3 <= LAYOUT.visible_lines(),
+            "{lines:?}"
+        );
+        for line in &lines {
+            assert!(line.len() <= LINE_CHARS, "`{line}`");
+        }
     }
 
     /// The frequency editor's cursor sits under the digit it edits, on both

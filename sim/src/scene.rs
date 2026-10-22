@@ -353,7 +353,7 @@ mod tests {
     fn an_edit_on_a_standalone_board_changes_the_state() {
         use oxinode_core::lr1121::config::Setting;
         let mut scene = Scene::with_state(standalone());
-        let inputs = script::parse("right select down*5 select").unwrap();
+        let inputs = script::parse("right select down*6 select").unwrap();
         assert_eq!(
             scene.run(&inputs),
             [Action::Edit(oxinode_core::edit::Field::TxPower)]
@@ -390,12 +390,12 @@ mod tests {
         );
         assert_eq!(scene.nav.editor(), None);
         scene.press(Input::Back);
-        // Radio On/Off is the seventh item.
-        scene.run(&script::parse("select down*6 select").unwrap());
+        // Radio On/Off is the eighth item.
+        scene.run(&script::parse("select down*7 select").unwrap());
         assert!(scene.nav.notice_shown().is_some());
         scene.press(Input::Back);
         // Save Config is not the live radio, and goes through.
-        let actions = scene.run(&script::parse("select down*7 select").unwrap());
+        let actions = scene.run(&script::parse("select down*8 select").unwrap());
         assert_eq!(actions, [Action::SaveRadioConfig]);
         assert!(!scene.nav.is_editing());
 

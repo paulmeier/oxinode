@@ -112,7 +112,7 @@ numbers readable. `Lines` records when a line was cut to fit, and every
 screen, editor and notice asserts it was not.
 
 **The editor** (`core/src/edit.rs`): an `Editor` opens on a copy of the whole
-configuration and a field. Four fields are steppers over a fixed set,
+configuration and a field. Five fields are steppers over a fixed set,
 saturating at the ends; a value not in the set (a bandwidth a host set) steps
 onto the set in the direction pressed. Frequency is a digit editor, seven
 digits of kilohertz with four before the point, with whatever the original
@@ -182,7 +182,7 @@ menu item that exists for it.
 
 The interface renders on any canvas size, and the golden set is held at
 128 × 128 (the board's) and 128 × 64. Getting the second size right is where
-the layout's assumptions surfaced: a nine-item menu that does not fit is
+the layout's assumptions surfaced: a menu that does not fit is
 windowed around its highlight; the pairing box is placed from the layout's
 content area; and a `Down` is clamped by how many lines fit, which the
 renderer tells the navigator at the same time it tells it how tall the content
