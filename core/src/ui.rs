@@ -68,10 +68,12 @@ const HOME_MENU: [Item<Action>; 3] = [
     Item::new("Redraw", Action::Redraw),
 ];
 
-/// What [`Screen::Radio`] offers: an editor for each of the five parameters
-/// a host sets, then the three things that act on the configuration whole.
-const RADIO_MENU: [Item<Action>; 9] = [
+/// What [`Screen::Radio`] offers: the band, an editor for each of the five
+/// parameters a host sets, then the three things that act on the
+/// configuration whole. The band first, as it is on the screen.
+const RADIO_MENU: [Item<Action>; 10] = [
     Item::BACK,
+    Item::new(Field::Band.label(), Action::Edit(Field::Band)),
     Item::new(Field::Frequency.label(), Action::Edit(Field::Frequency)),
     Item::new(Field::Bandwidth.label(), Action::Edit(Field::Bandwidth)),
     Item::new(
@@ -502,11 +504,18 @@ mod tests {
                         assert!(!frame.pixel(x, y), "{screen:?} drew at ({x}, {y})");
                     }
                 }
-                // And nothing was windowed: the square panel holds it all.
-                assert_eq!(
-                    monopanel::menu_window(&LAYOUT, screen.menu().len(), selected),
-                    0..screen.menu().len()
-                );
+                // Every menu but the Radio screen's is whole on the square
+                // panel. The Radio menu's ten items are one more than it
+                // holds, so its window slides by one, and whichever item is
+                // highlighted is in it.
+                let len = screen.menu().len();
+                let window = monopanel::menu_window(&LAYOUT, len, selected);
+                assert!(window.contains(&selected), "{screen:?} {selected}");
+                if screen == Screen::Radio {
+                    assert_eq!(window.len(), len - 1, "{screen:?} {selected}");
+                } else {
+                    assert_eq!(window, 0..len, "{screen:?} {selected}");
+                }
             }
         }
     }
@@ -697,6 +706,7 @@ mod tests {
         assert_eq!(
             owned,
             [
+                "Band",
                 "Frequency",
                 "Bandwidth",
                 "Spread Factor",
@@ -717,5 +727,8 @@ mod tests {
             "the receiver is not the radio, whoever has the line"
         );
         assert!(Action::Set(Setting::TxPower(1)).changes_the_radio());
+        assert!(
+            Action::Set(Setting::Band(crate::lr1121::pa::Band::HighFrequency)).changes_the_radio()
+        );
     }
 }

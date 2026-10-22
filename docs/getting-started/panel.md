@@ -42,8 +42,10 @@ current configuration, which is exactly what a host reads back: frequency
 correction), bandwidth, spreading factor, coding rate, power, the bitrate
 they come to, preamble, sync word, CRC, header mode, IQ. Then what the radio
 is *doing* with it: `off`, `receiving`, `refused` with the reason, `failed`,
-or `no radio`. Menu: *Frequency*, *Bandwidth*, *Spread Factor*, *Coding
-Rate*, *TX Power*, *Radio On/Off*, *Save Config*, *Reset Config*.
+or `no radio`. Menu: *Band*, *Frequency*, *Bandwidth*, *Spread Factor*,
+*Coding Rate*, *TX Power*, *Radio On/Off*, *Save Config*, *Reset Config* --
+ten items with *Back*, one more than the panel holds, so the menu slides by
+a row to reach the last.
 
 **Bluetooth.** Absent, advertising or connected; the advertised name; the
 passkey while a pairing is in progress; how many phones are bonded, out of
@@ -65,8 +67,8 @@ Position screen never shows `0.000000` as a claim to be in the Gulf of Guinea.
 
 ## Editing a setting
 
-The first five items of the Radio menu open an editor over the screen.
-Bandwidth, spreading factor, coding rate and power are steppers: up and down
+The first six items of the Radio menu open an editor over the screen.
+Band, bandwidth, spreading factor, coding rate and power are steppers: up and down
 move through a fixed set, saturating at the ends. Frequency is a digit editor,
 `MMMM.kkk`, with left and right moving a cursor under one digit and up and
 down changing it. Four megahertz digits, because 2478 MHz needs them; a
@@ -82,11 +84,30 @@ confirmed.
 The sets are wider than either band, on purpose. The bandwidth stepper holds
 the ten LoRa bandwidths a host can name and the three the 2.4 GHz path has
 (203.125, 406.25 and 812.5 kHz) in one ascending list, and the power stepper
-runs from −18 to 22 dBm. Moving the board to the other band is the frequency
-first, then the bandwidth: with 2478 MHz confirmed, 125 kHz is refused as
-*bandwidth belongs to the other band* until 812.5 kHz is chosen, and 14 dBm
-as above the module's 11 dBm rating there. The Radio screen's first row says
-which band the board is on, which is which connector the antenna belongs on.
+runs from −18 to 22 dBm.
+
+**Changing band** is the *Band* editor, not the frequency and then the
+bandwidth. Each confirmation validates the whole configuration, so 2478 MHz
+with the 125 kHz the board had is refused (*bandwidth belongs to the other
+band*), and so is 406.25 kHz at 915 MHz; no order of one-field edits gets
+across. The Band editor has two values, `sub-GHz, SMA` and `2.4 GHz, u.FL`,
+and once the other is chosen it shows where the board will land:
+
+| | sub-GHz | 2.4 GHz |
+| --- | --- | --- |
+| Frequency | 915.000 MHz | 2478.000 MHz |
+| Bandwidth | 125 kHz | 406.25 kHz |
+| Power | 14 dBm | 11 dBm |
+
+Spreading factor, coding rate and everything else are kept. Confirming the
+band the board is already on changes nothing, so a frequency picked on that
+band stays. 406.25 kHz rather than the path's widest because carrier sense
+at 812.5 kHz reads a quiet channel as busy
+([#47](https://github.com/paulmeier/oxinode/issues/47)); the bandwidth
+editor still reaches it. Like every edit, the switch is stored in TNC mode
+and refused with the *Locked* notice while a host has the radio. **Move the
+antenna** to the connector the editor names. The Radio screen's first row
+says which band the board is on.
 
 ```mermaid
 sequenceDiagram

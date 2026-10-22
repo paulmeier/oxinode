@@ -191,6 +191,21 @@ pub const BENCH_2G4: RadioConfig = RadioConfig {
     invert_iq: false,
 };
 
+/// Where the panel's band switch puts frequency, bandwidth and power on
+/// 2.4 GHz. The sub-GHz side lands on [`DEFAULT`]'s.
+///
+/// * **2478 MHz** -- the bench frequency, for the same reason.
+/// * **406.25 kHz**, not the bench's 812.5 -- carrier sense at 812.5 kHz
+///   reads a quiet channel as busy on nearly every sense (#47), and cleared
+///   in a few senses at the two narrower bandwidths.
+/// * **11 dBm** -- the module's rating on this path.
+///
+/// Only those three fields are taken from it: see [`RadioConfig::on_band`].
+pub const LANDING_2G4: RadioConfig = RadioConfig {
+    bandwidth_hz: 406_250,
+    ..BENCH_2G4
+};
+
 /// Why a configuration may not be given to the radio.
 ///
 /// One variant per reason, rather than a single "invalid". A host that is told
@@ -327,6 +342,35 @@ impl RadioConfig {
         pa::band_of(self.frequency_hz)
     }
 
+    /// This configuration moved to `band`: frequency, bandwidth and power
+    /// together, because no one of them can move alone -- each is judged
+    /// against the band, and a configuration with one moved is refused until
+    /// the others follow. They land on [`DEFAULT`]'s for sub-GHz and on
+    /// [`LANDING_2G4`]'s for 2.4 GHz. Everything else is kept: spreading
+    /// factor and coding rate mean the same on both paths.
+    ///
+    /// Already on `band`, it is unchanged, so choosing the band the board is
+    /// on does not throw away a frequency somebody picked.
+    pub const fn on_band(self, band: pa::Band) -> Self {
+        if matches!(
+            (self.band(), band),
+            (Some(pa::Band::SubGhz), pa::Band::SubGhz)
+                | (Some(pa::Band::HighFrequency), pa::Band::HighFrequency)
+        ) {
+            return self;
+        }
+        let landing = match band {
+            pa::Band::SubGhz => DEFAULT,
+            pa::Band::HighFrequency => LANDING_2G4,
+        };
+        Self {
+            frequency_hz: landing.frequency_hz,
+            bandwidth_hz: landing.bandwidth_hz,
+            tx_power_dbm: landing.tx_power_dbm,
+            ..self
+        }
+    }
+
     /// The frequency to command, which is not the frequency wanted.
     ///
     /// See [`super::reference`]. With the correction off this is the identity,
@@ -423,10 +467,12 @@ impl RadioConfig {
 
 /// One radio parameter with a value, as the panel sets it.
 ///
-/// The five things an RNode host sets, one at a time -- see the module docs.
-/// The panel's editor changes one of them per confirmation, and this is what
-/// it hands back; [`RadioConfig::apply`] is the one place a setting lands in
-/// a configuration, so the panel and the host cannot disagree about which
+/// The five things an RNode host sets, one at a time -- see the module docs
+/// -- and the band, which only the panel sets and which moves three of them
+/// at once ([`RadioConfig::on_band`]). The panel's editor changes one of
+/// these per confirmation, and this is what it hands back;
+/// [`RadioConfig::apply`] is the one place a setting lands in a
+/// configuration, so the panel and the host cannot disagree about which
 /// field a setting means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
@@ -440,6 +486,8 @@ pub enum Setting {
     CodingRate(u8),
     /// dBm at the connector.
     TxPower(i8),
+    /// Frequency, bandwidth and power together, onto this band.
+    Band(pa::Band),
 }
 
 impl Setting {
@@ -451,6 +499,7 @@ impl Setting {
             Setting::SpreadingFactor(_) => "spreading factor",
             Setting::CodingRate(_) => "coding rate",
             Setting::TxPower(_) => "tx power",
+            Setting::Band(_) => "band",
         }
     }
 }
@@ -468,6 +517,7 @@ impl RadioConfig {
             Setting::SpreadingFactor(sf) => self.spreading_factor = sf,
             Setting::CodingRate(cr) => self.coding_rate = cr,
             Setting::TxPower(dbm) => self.tx_power_dbm = dbm,
+            Setting::Band(band) => *self = self.on_band(band),
         }
     }
 
@@ -658,6 +708,12 @@ const _: () = assert!(BENCH_2G4.frequency_hz != DEFAULT.frequency_hz);
 // turned on: the frequency fits the four bytes, and SF8 at 11 dBm is inside
 // what the protocol expresses.
 const _: () = assert!(BENCH_2G4.is_rnode_representable());
+// The band switch's landing on 2.4 GHz is legal, on that band, a host could
+// set it, and is not the bandwidth whose carrier sense reads busy (#47).
+const _: () = assert!(LANDING_2G4.check().is_ok());
+const _: () = assert!(matches!(LANDING_2G4.band(), Some(pa::Band::HighFrequency)));
+const _: () = assert!(LANDING_2G4.is_rnode_representable());
+const _: () = assert!(LANDING_2G4.bandwidth_hz != 812_500);
 // The default has never been anything but sub-GHz.
 const _: () = assert!(matches!(DEFAULT.band(), Some(pa::Band::SubGhz)));
 
@@ -1308,10 +1364,77 @@ mod tests {
                 Setting::SpreadingFactor(_) => back.spreading_factor = DEFAULT.spreading_factor,
                 Setting::CodingRate(_) => back.coding_rate = DEFAULT.coding_rate,
                 Setting::TxPower(_) => back.tx_power_dbm = DEFAULT.tx_power_dbm,
+                Setting::Band(_) => unreachable!("three fields; its own test"),
             }
             assert_eq!(back, DEFAULT, "{setting:?} touched another field");
             assert!(!setting.name().is_empty());
         }
+    }
+
+    /// **The band moves three fields and keeps the rest.** Onto 2.4 GHz,
+    /// frequency, bandwidth and power land on [`LANDING_2G4`]'s; back down,
+    /// on [`DEFAULT`]'s; whatever else the configuration had -- spreading
+    /// factor, coding rate, the reference correction -- is still there, and
+    /// the result is legal either way.
+    #[test]
+    fn the_band_moves_frequency_bandwidth_and_power_together() {
+        let mine = RadioConfig {
+            frequency_hz: 906_875_000,
+            bandwidth_hz: 250_000,
+            spreading_factor: 11,
+            coding_rate: 7,
+            tx_power_dbm: 17,
+            correct_reference: false,
+            ..DEFAULT
+        };
+        let up = mine.with(Setting::Band(pa::Band::HighFrequency));
+        assert_eq!(up.frequency_hz, 2_478_000_000);
+        assert_eq!(up.bandwidth_hz, 406_250);
+        assert_eq!(up.tx_power_dbm, 11);
+        assert_eq!(up.band(), Some(pa::Band::HighFrequency));
+        assert_eq!(up.check(), Ok(()));
+        assert_eq!(
+            RadioConfig {
+                frequency_hz: mine.frequency_hz,
+                bandwidth_hz: mine.bandwidth_hz,
+                tx_power_dbm: mine.tx_power_dbm,
+                ..up
+            },
+            mine,
+            "only the three fields moved"
+        );
+
+        let down = up.with(Setting::Band(pa::Band::SubGhz));
+        assert_eq!(down.frequency_hz, 915_000_000);
+        assert_eq!(down.bandwidth_hz, 125_000);
+        assert_eq!(down.tx_power_dbm, 14);
+        assert_eq!(down.check(), Ok(()));
+        assert_eq!(
+            RadioConfig {
+                frequency_hz: DEFAULT.frequency_hz,
+                bandwidth_hz: DEFAULT.bandwidth_hz,
+                tx_power_dbm: DEFAULT.tx_power_dbm,
+                ..mine
+            },
+            down,
+            "the way back keeps them too"
+        );
+
+        // Choosing the band it is already on keeps a frequency somebody
+        // picked, on either band.
+        assert_eq!(mine.on_band(pa::Band::SubGhz), mine);
+        let hf = RadioConfig {
+            frequency_hz: 2_441_000_000,
+            bandwidth_hz: 203_125,
+            ..up
+        };
+        assert_eq!(hf.on_band(pa::Band::HighFrequency), hf);
+
+        // A frequency in neither band lands on whichever band is chosen.
+        let lost = DEFAULT.with(Setting::Frequency(868_000_000));
+        assert_eq!(lost.on_band(pa::Band::SubGhz).check(), Ok(()));
+        assert_eq!(lost.on_band(pa::Band::HighFrequency).check(), Ok(()));
+        assert!(!Setting::Band(pa::Band::SubGhz).name().is_empty());
     }
 
     /// Applying does not validate, so an editor can hold a refused value

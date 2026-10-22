@@ -159,7 +159,7 @@ pub fn cases() -> Vec<Case> {
             Field::Frequency => Some("down select"),
             Field::Bandwidth => Some("down*2 select"),
             Field::TxPower => Some("up*4 select"),
-            Field::SpreadingFactor | Field::CodingRate => None,
+            Field::Band | Field::SpreadingFactor | Field::CodingRate => None,
         };
         if let Some(refuse) = refuse {
             cases.push(Case {
@@ -175,6 +175,23 @@ pub fn cases() -> Vec<Case> {
         script: format!(
             "{radio} select down*{} select right*4 up",
             item_of(Field::Frequency)
+        ),
+        state: standalone,
+        size: square,
+    });
+    // The band switch: the editor with the other band chosen, saying where
+    // the board lands, and the screen after it was confirmed.
+    cases.push(Case {
+        name: "radio-edit-band-changed".to_string(),
+        script: format!("{radio} select down*{} select up", item_of(Field::Band)),
+        state: standalone,
+        size: square,
+    });
+    cases.push(Case {
+        name: "radio-after-band".to_string(),
+        script: format!(
+            "{radio} select down*{} select up select",
+            item_of(Field::Band)
         ),
         state: standalone,
         size: square,
@@ -221,7 +238,7 @@ pub fn cases() -> Vec<Case> {
     });
 
     // The second panel. Every screen populated; the radio menu at
-    // its top, in its middle and at its bottom, because nine items do not
+    // its top, in its middle and at its bottom, because ten items do not
     // fit and the window has to slide; the radio screen scrolled to its
     // end; an editor with its refusal; the notice; and a pairing, whose box
     // has to fit the shorter content area.
@@ -235,7 +252,7 @@ pub fn cases() -> Vec<Case> {
             size: wide,
         });
     }
-    for (name, downs) in [("top", 0), ("middle", 4), ("bottom", 8)] {
+    for (name, downs) in [("top", 0), ("middle", 4), ("bottom", 9)] {
         cases.push(Case {
             name: format!("{prefix}/radio-menu-{name}"),
             script: format!("{radio} select down*{downs}"),
@@ -394,9 +411,10 @@ mod tests {
         // and refused, then five editors, three refusals, the cursor, the
         // screen after an edit, and two notices. Then every screen, three
         // menu windows, a scroll, an editor, a notice and a pairing on the
-        // second panel. Then the receiver searching, and the other band's
-        // screen and editor.
-        let square = 2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2;
+        // second panel. Then the receiver searching, the other band's
+        // screen and editor, and the band switch open and confirmed.
+        let square =
+            2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2 + 2;
         let wide = Screen::COUNT + 3 + 1 + 1 + 1 + 1;
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
@@ -407,6 +425,8 @@ mod tests {
         assert!(names.contains("radio-locked-edit"));
         assert!(names.contains("radio-2g4"));
         assert!(names.contains("radio-edit-frequency-2g4"));
+        assert!(names.contains("radio-edit-band-changed"));
+        assert!(names.contains("radio-after-band"));
         for screen in Screen::ALL {
             let title = slug(screen.title());
             assert!(names.contains(title.as_str()), "{screen:?}");

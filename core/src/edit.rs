@@ -27,12 +27,21 @@
 //! would never show the refusal path, and the first time it mattered would be
 //! a value nobody had tested.
 //!
-//! One set serves both bands, on purpose. The band is decided by the
-//! frequency, and a person moving the board from 915 MHz to 2478 MHz edits
-//! the frequency first and then the bandwidth -- the same order a host sets
-//! them in, through the same mixed state, refused for the same reason until
-//! the bandwidth follows. A stepper that hid the other band's values would
-//! have to guess which band the person was on their way to.
+//! One set serves both bands, on purpose, so that a value of the other band
+//! is refused *as* the other band's rather than being missing.
+//!
+//! # The band is its own editor
+//!
+//! A host crosses from 915 MHz to 2478 MHz one field at a time, through a
+//! mixed state the modem holds and refuses until the last field arrives. The
+//! panel cannot: every confirmation validates the whole configuration, so
+//! 2478 MHz with the 125 kHz it had is refused on the bandwidth, and 406.25
+//! kHz at 915 MHz on the band, and no order of one-field edits gets across.
+//! [`Field::Band`] is the way over: a stepper of two values whose
+//! confirmation is [`Setting::Band`], which moves frequency, bandwidth and
+//! power together onto the other band -- see [`RadioConfig::on_band`] for
+//! where they land. Its candidate configuration is that landing, validated
+//! like any other.
 //!
 //! # Cancel restores
 //!
@@ -51,6 +60,7 @@ use crate::lr1121::pa;
 /// them and the order the screen's own rows go in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
+    Band,
     Frequency,
     Bandwidth,
     SpreadingFactor,
@@ -60,7 +70,8 @@ pub enum Field {
 
 impl Field {
     /// Every field, in menu order.
-    pub const ALL: [Field; 5] = [
+    pub const ALL: [Field; 6] = [
+        Field::Band,
         Field::Frequency,
         Field::Bandwidth,
         Field::SpreadingFactor,
@@ -71,6 +82,7 @@ impl Field {
     /// The word in the title bar while it is being edited.
     pub const fn title(self) -> &'static str {
         match self {
+            Field::Band => "Band",
             Field::Frequency => "Frequency",
             Field::Bandwidth => "Bandwidth",
             Field::SpreadingFactor => "Spread Factor",
@@ -82,6 +94,7 @@ impl Field {
     /// The menu item that opens it.
     pub const fn label(self) -> &'static str {
         match self {
+            Field::Band => "Band",
             Field::Frequency => "Frequency",
             Field::Bandwidth => "Bandwidth",
             Field::SpreadingFactor => "Spread Factor",
@@ -93,6 +106,7 @@ impl Field {
     /// Its name, for a log.
     pub const fn name(self) -> &'static str {
         match self {
+            Field::Band => "band",
             Field::Frequency => "frequency",
             Field::Bandwidth => "bandwidth",
             Field::SpreadingFactor => "spreading factor",
@@ -104,9 +118,16 @@ impl Field {
     /// The value this field has in a configuration, as the editor carries it.
     ///
     /// Wide, because a 2.4 GHz frequency in hertz does not fit a signed
-    /// 32-bit value, and the editor's arithmetic must not wrap it.
+    /// 32-bit value, and the editor's arithmetic must not wrap it. The band
+    /// is its place in [`BAND_STEPS`], and [`NO_BAND`] for a frequency in
+    /// neither, which a host can leave.
     pub const fn value_in(self, config: &RadioConfig) -> i64 {
         match self {
+            Field::Band => match config.band() {
+                Some(pa::Band::SubGhz) => BAND_SUB_GHZ,
+                Some(pa::Band::HighFrequency) => BAND_2G4,
+                None => NO_BAND,
+            },
             Field::Frequency => config.frequency_hz as i64,
             Field::Bandwidth => config.bandwidth_hz as i64,
             Field::SpreadingFactor => config.spreading_factor as i64,
@@ -125,8 +146,17 @@ impl Field {
     /// the field's range saturates instead. That is not a clamp of a
     /// configuration: `u32::MAX` is in neither band and is refused, which is
     /// what the value it stands for would have been.
+    ///
+    /// [`NO_BAND`] has no setting and is not given one here: an editor
+    /// whose band is still that never changed anything, and
+    /// [`Editor::candidate_config`] leaves the configuration alone for it.
     pub const fn setting(self, value: i64) -> Setting {
         match self {
+            Field::Band => Setting::Band(if value == BAND_2G4 {
+                pa::Band::HighFrequency
+            } else {
+                pa::Band::SubGhz
+            }),
             Field::Frequency => Setting::Frequency(if value > u32::MAX as i64 {
                 u32::MAX
             } else {
@@ -142,6 +172,7 @@ impl Field {
     /// The fixed set a stepper walks, ascending; empty for the digit editor.
     pub const fn steps(self) -> &'static [i64] {
         match self {
+            Field::Band => &BAND_STEPS,
             Field::Frequency => &[],
             Field::Bandwidth => &BANDWIDTH_STEPS,
             Field::SpreadingFactor => &SF_STEPS,
@@ -150,6 +181,17 @@ impl Field {
         }
     }
 }
+
+/// The band editor's two values, sub-GHz below 2.4 GHz as on the dial.
+pub const BAND_STEPS: [i64; 2] = [BAND_SUB_GHZ, BAND_2G4];
+/// The band editor's value for sub-GHz.
+pub const BAND_SUB_GHZ: i64 = 0;
+/// The band editor's value for 2.4 GHz.
+pub const BAND_2G4: i64 = 1;
+/// The band editor's value for a frequency in neither band: below both
+/// steps, so Up steps onto sub-GHz, as a host's off-set bandwidth steps
+/// onto the set in the direction pressed.
+pub const NO_BAND: i64 = -1;
 
 /// The bandwidths a LoRa host offers and the three the 2.4 GHz path has, in
 /// hertz, in one ascending set. Six of them this chip cannot do on either
@@ -370,7 +412,13 @@ impl Editor {
     }
 
     /// The configuration the candidate would produce.
+    ///
+    /// For the band, a candidate that is still [`NO_BAND`] produces the
+    /// configuration it opened on, which is refused for its frequency.
     pub const fn candidate_config(&self) -> RadioConfig {
+        if matches!(self.field, Field::Band) && self.candidate == NO_BAND {
+            return self.original;
+        }
         self.original.with(self.field.setting(self.candidate))
     }
 
@@ -401,6 +449,8 @@ const fn ascending(steps: &[i64]) -> bool {
     }
     true
 }
+const _: () = assert!(ascending(&BAND_STEPS));
+const _: () = assert!(NO_BAND < BAND_STEPS[0]);
 const _: () = assert!(ascending(&BANDWIDTH_STEPS));
 const _: () = assert!(ascending(&SF_STEPS));
 const _: () = assert!(ascending(&CR_STEPS));
@@ -749,9 +799,10 @@ mod tests {
             Confirm::Apply(Setting::Frequency(2_479_000_000))
         );
 
-        // And the way down to the other band is through the same editor:
-        // 0915.000 from 2478.000 is four digits, then the bandwidth is the
-        // other band's until it follows.
+        // And the digits reach the other band, but the configuration does
+        // not follow them: 0915.000 from 2478.000 is four digits, and the
+        // bandwidth is still the other band's. That is the band editor's
+        // job; see `one_field_at_a_time_cannot_cross_bands`.
         let mut down = Editor::open(Field::Frequency, high_frequency());
         down.down(); // 2 -> 1
         down.down(); // 1 -> 0
@@ -773,6 +824,128 @@ mod tests {
             Confirm::Refused(ConfigError::BandwidthNotInBand),
             "812.5 kHz at 915 MHz"
         );
+    }
+
+    /// **No order of one-field edits crosses bands from the panel.** Each
+    /// confirmation validates the whole configuration, and frequency and
+    /// bandwidth are each judged against the other: whichever moves first is
+    /// refused for the one that has not. (Power is the third field the band
+    /// moves, because 20 dBm is refused at 2.4 GHz, but it is not what
+    /// blocks the way: 11 dBm is legal on both.) This is why [`Field::Band`]
+    /// exists, and if it ever stops being true the band editor is a
+    /// shortcut rather than the only way over.
+    #[test]
+    fn one_field_at_a_time_cannot_cross_bands() {
+        for (from, to) in [(config(), high_frequency()), (high_frequency(), config())] {
+            for field in [Field::Frequency, Field::Bandwidth] {
+                let moved = from.with(field.setting(field.value_in(&to)));
+                assert!(
+                    ValidConfig::new(moved).is_err(),
+                    "{field:?} alone from {} Hz crossed",
+                    from.frequency_hz
+                );
+            }
+        }
+    }
+
+    /// **The band editor moves the board across in one confirmation.** Up
+    /// from sub-GHz is 2.4 GHz, confirmed as [`Setting::Band`], whose
+    /// configuration is the landing and is legal; down from 2.4 GHz is the
+    /// way back. Two values, and the stepper stops at both.
+    #[test]
+    fn the_band_editor_crosses_in_one_step() {
+        let mut up = Editor::open(Field::Band, config());
+        assert!(up.is_stepper());
+        assert_eq!(up.candidate(), BAND_SUB_GHZ);
+        up.down();
+        assert_eq!(up.candidate(), BAND_SUB_GHZ, "stops at the bottom");
+        up.up();
+        assert_eq!(up.candidate(), BAND_2G4);
+        up.up();
+        assert_eq!(up.candidate(), BAND_2G4, "stops at the top");
+        assert!(up.changed());
+        let landed = up.candidate_config();
+        assert_eq!(landed, config().on_band(pa::Band::HighFrequency));
+        assert_eq!(
+            (
+                landed.frequency_hz,
+                landed.bandwidth_hz,
+                landed.tx_power_dbm
+            ),
+            (2_478_000_000, 406_250, 11)
+        );
+        assert_eq!(
+            up.confirm(),
+            Confirm::Apply(Setting::Band(pa::Band::HighFrequency))
+        );
+        // What the caller lands from the setting is what was validated.
+        assert_eq!(
+            config().with(Setting::Band(pa::Band::HighFrequency)),
+            landed
+        );
+
+        let mut down = Editor::open(Field::Band, high_frequency());
+        assert_eq!(down.candidate(), BAND_2G4);
+        down.down();
+        let back = down.candidate_config();
+        assert_eq!(
+            (back.frequency_hz, back.bandwidth_hz, back.tx_power_dbm),
+            (
+                DEFAULT.frequency_hz,
+                DEFAULT.bandwidth_hz,
+                DEFAULT.tx_power_dbm
+            )
+        );
+        assert_eq!(
+            down.confirm(),
+            Confirm::Apply(Setting::Band(pa::Band::SubGhz))
+        );
+
+        // Confirming the band it is on changes nothing at all.
+        let mut same = Editor::open(Field::Band, high_frequency());
+        assert_eq!(same.candidate_config(), high_frequency());
+        assert_eq!(
+            same.confirm(),
+            Confirm::Apply(Setting::Band(pa::Band::HighFrequency))
+        );
+        assert_eq!(
+            high_frequency().with(Setting::Band(pa::Band::HighFrequency)),
+            high_frequency()
+        );
+    }
+
+    /// A frequency in neither band -- one a host can leave -- opens the
+    /// band editor on no band, refused for its frequency until a band is
+    /// chosen; and a landing whose other fields a host left illegal is
+    /// refused for those, not applied.
+    #[test]
+    fn the_band_editor_refuses_what_it_cannot_land() {
+        let lost = config().with(Setting::Frequency(868_000_000));
+        let mut e = Editor::open(Field::Band, lost);
+        assert_eq!(e.candidate(), NO_BAND);
+        assert_eq!(e.candidate_config(), lost);
+        assert_eq!(
+            e.confirm(),
+            Confirm::Refused(ConfigError::FrequencyOutOfBand)
+        );
+        e.up();
+        assert_eq!(e.candidate(), BAND_SUB_GHZ);
+        assert_eq!(e.confirm(), Confirm::Apply(Setting::Band(pa::Band::SubGhz)));
+        let mut e = Editor::open(Field::Band, lost);
+        e.down();
+        assert_eq!(e.candidate(), NO_BAND, "nothing below no band");
+
+        let odd = RadioConfig {
+            coding_rate: 9,
+            ..config()
+        };
+        let mut e = Editor::open(Field::Band, odd);
+        e.up();
+        assert_eq!(
+            e.confirm(),
+            Confirm::Refused(ConfigError::CodingRateOutOfRange)
+        );
+        assert_eq!(e.candidate(), BAND_2G4, "kept, not moved");
     }
 
     /// **A frequency past the field is refused, not wrapped.** Seven digits

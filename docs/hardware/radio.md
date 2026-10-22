@@ -257,7 +257,20 @@ interface comes up; the SMA is not on this path.
 
 **From the panel.** The Radio screen's first row is the band, `sub-GHz` or
 `2.4 GHz`, since that is what says which connector the antenna belongs on.
-The frequency editor has four megahertz digits, `MMMM.kkk`, so 2478 MHz is
+The *Band* editor moves the board between them in one confirmation:
+frequency, bandwidth and power land together on 2478 MHz, 406.25 kHz and
+11 dBm going up, and on the default 915 MHz, 125 kHz and 14 dBm coming
+down, because no one of them can be confirmed alone while the others belong
+to the other band. 406.25 rather than 812.5 kHz for carrier sense
+([#47](https://github.com/paulmeier/oxinode/issues/47)). The reference
+correction is kept as it was. A board switched from the default is
+corrected, and tuned to 2478.181 MHz; another board switched the same way
+is tuned the same. A peer on the bench's uncorrected `H` preset sits
+181 kHz away from it, which at 406.25 kHz has not been tried -- the
+exchanges so far were uncorrected on both sides. Whether the correction is
+right up here at all is the reference error
+[#44](https://github.com/paulmeier/oxinode/issues/44) still owes. The
+frequency editor has four megahertz digits, `MMMM.kkk`, so 2478 MHz is
 typed where it is and a sub-GHz frequency shows a blank for its thousands
 digit; the bandwidth stepper lists the 2.4 GHz three between the sub-GHz
 values, each refused as the other band's until the frequency is there; the

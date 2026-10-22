@@ -219,6 +219,7 @@ mod tests {
             Input::Down,
             Input::Down,
             Input::Down,
+            Input::Down,
             Input::Select,
         ] {
             scene.press(input);
