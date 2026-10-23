@@ -113,5 +113,25 @@ class MatchesTheFirmware(unittest.TestCase):
         self.assertEqual(lr.PID, self.const(self.rnode, "USB_PID"))
 
 
+class BoardWentAway(unittest.TestCase):
+    def test_a_read_and_a_quiet_spell_keep_reading(self):
+        self.assertIs(lr.board_went_away(0), False)
+        self.assertIs(lr.board_went_away(lr.LIBUSB_ERROR_TIMEOUT), False)
+
+    def test_not_found_is_a_reset(self):
+        # What macOS returned mid-read when a 1200-baud touch reset the board,
+        # 2026-10-23; the reader exited instead of following it.
+        self.assertEqual(lr.LIBUSB_ERROR_NOT_FOUND, -5)
+        self.assertIs(lr.board_went_away(-5), True)
+
+    def test_the_other_ways_a_board_goes_away(self):
+        for rc in (lr.LIBUSB_ERROR_NO_DEVICE, lr.LIBUSB_ERROR_IO, lr.LIBUSB_ERROR_PIPE):
+            self.assertIs(lr.board_went_away(rc), True)
+
+    def test_anything_else_is_an_error(self):
+        for rc in (lr.LIBUSB_ERROR_ACCESS, lr.LIBUSB_ERROR_BUSY, -8, -12):
+            self.assertIsNone(lr.board_went_away(rc))
+
+
 if __name__ == "__main__":
     unittest.main()

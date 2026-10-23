@@ -2,8 +2,9 @@
 
 Everything under `tools/` runs on the host. The shell scripts are written for
 macOS's bash 3.2; the Python needs only the standard library, except the
-exchange runner, whose two peers need Reticulum, and the log reader, which
-calls libusb through `ctypes`.
+exchange runner, whose two peers need Reticulum, the touch series, which
+borrows pyserial from the Python Reticulum runs under, and the log reader,
+which calls libusb through `ctypes`.
 
 | Tool | What it does |
 |---|---|
@@ -14,6 +15,7 @@ calls libusb through `ctypes`.
 | `verify_flash.py` | Compares the vector table in the board's `CURRENT.UF2` against a built ELF and says `MATCH` or `MISMATCH`. |
 | `log_reader.py` | Reads the product image's `defmt` log from its vendor USB interface, for `defmt-print`. See [Debugging without a probe](../development/debugging.md#the-log). |
 | `setter_burst.py` | Writes RNode setters back to back and counts the ones the board answers, in three host behaviours. The recipe for issue #36. |
+| `touch_series.py` | Reflashes a board by 1200-baud touch, round after round, each touch taken with a phone's Bluetooth link up, and counts the times serial DFU does not answer. The recipe for issue #23. |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
 | `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`. See [Memory layout](../hardware/memory-layout.md). |
