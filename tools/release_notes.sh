@@ -23,7 +23,7 @@ what it does not do yet.
 
 | File | What it does |
 |---|---|
-| \`oxinode-rnode-$version.uf2\` | **The product image.** KISS/RNode protocol on the first USB serial port, defmt log on the second, Bluetooth LE for Sideband, the panel, the pad and the GPS. |
+| \`oxinode-rnode-$version.uf2\` | **The product image.** KISS/RNode protocol on its one USB serial port, the defmt log on a vendor USB interface (read with \`tools/log_reader.py\`), Bluetooth LE for Sideband, the panel, the pad and the GPS. |
 | \`oxinode-radio-$version.uf2\` | LR1121 bring-up diagnostic: walks the radio bring-up, reports what it found, and offers a serial console for carriers and test packets. |
 | \`oxinode-usb-cdc-$version.uf2\` | Enumerates as a USB serial port and echoes. Proves the USB path. |
 | \`oxinode-blink-$version.uf2\` | Blinks the green LED. Proves flashing works. |
