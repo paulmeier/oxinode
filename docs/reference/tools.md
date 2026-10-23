@@ -13,6 +13,7 @@ calls libusb through `ctypes`.
 | `uf2conv.py` | A UF2 writer from the format specification, with tests. |
 | `verify_flash.py` | Compares the vector table in the board's `CURRENT.UF2` against a built ELF and says `MATCH` or `MISMATCH`. |
 | `log_reader.py` | Reads the product image's `defmt` log from its vendor USB interface, for `defmt-print`. See [Debugging without a probe](../development/debugging.md#the-log). |
+| `setter_burst.py` | Writes RNode setters back to back and counts the ones the board answers, in three host behaviours. The recipe for issue #36. |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
 | `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`. See [Memory layout](../hardware/memory-layout.md). |
