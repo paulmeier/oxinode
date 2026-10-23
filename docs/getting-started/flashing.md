@@ -91,11 +91,12 @@ drive needs to be told so:
 OXINODE_DFU_IN_DFU=1 tools/dfu-flash.sh target/thumbv7em-none-eabihf/release/rnode
 ```
 
-!!! note "Disconnect a phone first"
-    Taking the 1200-baud touch on the product image while a phone is
-    connected over Bluetooth has been seen to leave the board in its
-    bootloader with serial DFU not answering. Disconnect the phone or reset
-    the board before reflashing. See [Known limitations](../reference/limitations.md).
+!!! note "If serial DFU does not answer"
+    A board left in its bootloader with serial DFU not answering, even to the
+    retry, is recovered by a double-tap on reset. A touch taken while a phone
+    was connected over Bluetooth did that twice on an earlier image, and has
+    not since; see [Known limitations](../reference/limitations.md). If it
+    happens again, `tools/touch_series.py` is the recipe for repeating it.
 
 ## Checking what is on the chip
 

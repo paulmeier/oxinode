@@ -171,7 +171,8 @@ like a device dropping commands. Check what else is touching the thing you
 are measuring before you believe the measurement.
 
 **A wedged bootloader.** A 1200-baud touch on the product image taken while
-a phone is connected over Bluetooth has been seen to leave the board in its
-bootloader with serial DFU not answering; only a double-tap recovers it.
-Disconnect the phone or reset the board first. See
-[Known limitations](../reference/limitations.md).
+a phone was connected over Bluetooth twice left the board in its bootloader
+with serial DFU not answering; only a double-tap recovered it. It has not
+reproduced since, in 23 touches with a phone's link up;
+`tools/touch_series.py` repeats the recipe and keeps the log of every round.
+See [Known limitations](../reference/limitations.md).

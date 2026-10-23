@@ -82,12 +82,22 @@ has to rediscover it.
 
 ## Observations, recorded
 
-- **A 1200-baud touch with a phone connected can wedge the bootloader.** The
-  board ends in DFU with serial DFU not answering, and only a double-tap
-  recovers it. The `ble` bring-up image has never done this; the product
-  image uses more RAM, which puts the bootloader's double-reset magic word
-  inside its `.bss`, but whether that is the mechanism is not established.
-  Disconnect the phone or reset the board before reflashing.
+- **A 1200-baud touch with a phone connected twice wedged the bootloader**,
+  on 2026-09-07: the board ended in DFU with serial DFU not answering, even to
+  the flasher's retry, and only a double-tap recovered it. It does not
+  reproduce on the current firmware: `tools/touch_series.py`, the recipe as a
+  tool, reflashed RNode 7F23 by touch 10 times out of 10 on 2026-10-23, each
+  touch taken after a fresh boot with the iPhone's link encrypted and carrying
+  traffic, and a first draft of the tool did 13 out of 13 the same day. Five
+  of the 23 needed the flasher's retry, which is the known race with the
+  bootloader's enumeration, not this. Neither suspect explains it. The
+  product image's `.bss` does cover the bootloader's double-reset word at
+  `0x20007F7C` (the Bluetooth controller's memory sits on it), but the
+  bootloader reads that word only after a reset-pin reset; a touch enters DFU
+  through `GPREGRET` whatever the word holds. And the controller held an open
+  link at every one of the 23 resets. Only the iPhone was tried, and the image
+  of 2026-09-07 still had two serial ports. Unattributed, and kept here until
+  a run of the tool loses one.
 - **A synthetic host that wrote six setters back to back with no reads once
   lost roughly one four-byte frame in ten.** It was not the reply direction,
   not SPI and USB contending for EasyDMA, not the decoder, and it never

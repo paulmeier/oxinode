@@ -49,10 +49,25 @@ TRANSFER_BULK = 0x02
 
 LIBUSB_ERROR_TIMEOUT = -7
 LIBUSB_ERROR_NO_DEVICE = -4
+LIBUSB_ERROR_NOT_FOUND = -5
 LIBUSB_ERROR_ACCESS = -3
 LIBUSB_ERROR_BUSY = -6
 LIBUSB_ERROR_PIPE = -9
 LIBUSB_ERROR_IO = -1
+
+
+def board_went_away(rc: int) -> Optional[bool]:
+    """What a bulk read's return code says: False to keep reading, True if the
+    board reset or went away, None for an error that is neither.
+
+    macOS reports a board that resets mid-read as any of these, NOT_FOUND
+    included; that one used to end the reader on the first 1200-baud touch.
+    """
+    if rc in (0, LIBUSB_ERROR_TIMEOUT):
+        return False
+    if rc in (LIBUSB_ERROR_NO_DEVICE, LIBUSB_ERROR_NOT_FOUND, LIBUSB_ERROR_IO, LIBUSB_ERROR_PIPE):
+        return True
+    return None
 
 
 class LogInterface(NamedTuple):
@@ -235,11 +250,11 @@ def read(usb: Libusb, serial: Optional[str], once: bool, out) -> int:
                     if got.value:
                         out.write(buf.raw[: got.value])
                         out.flush()
-                    if rc in (0, LIBUSB_ERROR_TIMEOUT):
-                        continue
-                    if rc in (LIBUSB_ERROR_NO_DEVICE, LIBUSB_ERROR_IO, LIBUSB_ERROR_PIPE):
-                        break  # the board reset or went away
-                    raise UsbError(f"bulk read failed ({rc})")
+                    gone = board_went_away(rc)
+                    if gone is None:
+                        raise UsbError(f"bulk read failed ({rc})")
+                    if gone:
+                        break
             finally:
                 usb.attach(handle, log.number, False)
                 usb.lib.libusb_release_interface(handle, log.number)
