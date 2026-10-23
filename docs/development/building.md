@@ -56,7 +56,7 @@ selection with two boards attached, and recovery.
 ## The log level
 
 `defmt` filters at **compile** time. With `DEFMT_LOG` unset the default level
-is `error`, so `info!` and `debug!` vanish from the binary and the log port
+is `error`, so `info!` and `debug!` vanish from the binary and the log
 stays silent with no hint as to why. `.cargo/config.toml` sets it to `debug`,
 because the `lr11xx` driver logs at debug and that is the whole reason the
 log transport exists. `trace` adds a line per SPI command, which is worth

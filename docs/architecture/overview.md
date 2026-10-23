@@ -73,10 +73,10 @@ flowchart LR
 The modem loop is the one owner of the protocol and the radio. Every other
 task is a place bytes or gestures come from or go to:
 
-- **USB** is two CDC-ACM functions. The KISS port's reads go through a pipe
-  because a USB `read_packet` must never be cancelled (a `select` that drops
-  it loses whatever it had taken from the endpoint), and the modem loop
-  selects on everything.
+- **USB** is one CDC-ACM function and a vendor-specific log interface. The
+  KISS port's reads go through a pipe because a USB `read_packet` must never
+  be cancelled (a `select` that drops it loses whatever it had taken from the
+  endpoint), and the modem loop selects on everything.
 - **Bluetooth** is a second pipe carrying the identical KISS stream, with its
   own decoder and outbox so a frame in progress on one transport can never be
   spliced into a frame on the other. The modem loop never waits on the phone:
@@ -132,7 +132,7 @@ src/boot.rs             VTOR relocation, reboot-into-bootloader
 src/bringup.rs          the radio bring-up sequence
 src/radio.rs            the SPI link to the LR1121, the raw version probe, the interrupt line
 src/modem.rs            the one place that programs a configuration, senses, transmits and receives
-src/usb_log.rs          defmt over the second CDC port
+src/usb_log.rs          defmt over USB: a vendor interface, or a CDC port on bring-up images
 src/store.rs            the device record, in the flash a reflash cannot reach
 src/display.rs          the I²C bus, the 12 V rail, and the panel transport
 src/pad.rs              the pad driver: six pins, the PORT interrupt, the channel; the mode switch

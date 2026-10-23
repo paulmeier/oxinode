@@ -144,13 +144,23 @@ pub fn cases() -> Vec<Case> {
             .position(|i| i.action == Some(Action::Edit(field)))
             .expect("every field has a menu item")
     };
-    for field in Field::ALL {
+    // Both panels, from the one loop, so a refusal added here gets its
+    // picture on the short panel too: that is the panel it falls off.
+    let wide = Size::WIDE;
+    let on = |size: Size, name: String| {
+        if size == wide {
+            format!("{}/{name}", wide.name())
+        } else {
+            name
+        }
+    };
+    for (field, size) in Field::ALL.iter().flat_map(|f| [(*f, square), (*f, wide)]) {
         let open = format!("{radio} select down*{} select", item_of(field));
         cases.push(Case {
-            name: format!("radio-edit-{}", slug(field.label())),
+            name: on(size, format!("radio-edit-{}", slug(field.label()))),
             script: open.clone(),
             state: standalone,
-            size: square,
+            size,
         });
         // Every refusal a stepper or the digits can reach, from the fixture:
         // the first digit down takes 915 MHz to 9915, in neither band; two
@@ -163,10 +173,10 @@ pub fn cases() -> Vec<Case> {
         };
         if let Some(refuse) = refuse {
             cases.push(Case {
-                name: format!("radio-edit-{}-refused", slug(field.label())),
+                name: on(size, format!("radio-edit-{}-refused", slug(field.label()))),
                 script: format!("{open} {refuse}"),
                 state: standalone,
-                size: square,
+                size,
             });
         }
     }
@@ -240,9 +250,8 @@ pub fn cases() -> Vec<Case> {
     // The second panel. Every screen populated; the radio menu at
     // its top, in its middle and at its bottom, because ten items do not
     // fit and the window has to slide; the radio screen scrolled to its
-    // end; an editor with its refusal; the notice; and a pairing, whose box
-    // has to fit the shorter content area.
-    let wide = Size::WIDE;
+    // end; the notice; and a pairing, whose box has to fit the shorter
+    // content area. Its editors and refusals are with the others above.
     let prefix = wide.name();
     for screen in Screen::ALL {
         cases.push(Case {
@@ -264,15 +273,6 @@ pub fn cases() -> Vec<Case> {
         name: format!("{prefix}/radio-scrolled-bottom"),
         script: format!("{radio} down*100"),
         state: populated,
-        size: wide,
-    });
-    cases.push(Case {
-        name: format!("{prefix}/radio-edit-tx-power-refused"),
-        script: format!(
-            "{radio} select down*{} select up*4 select",
-            item_of(Field::TxPower)
-        ),
-        state: standalone,
         size: wide,
     });
     cases.push(Case {
@@ -410,12 +410,13 @@ mod tests {
         // Screens twice, every menu item, three scroll positions, pairing
         // and refused, then five editors, three refusals, the cursor, the
         // screen after an edit, and two notices. Then every screen, three
-        // menu windows, a scroll, an editor, a notice and a pairing on the
-        // second panel. Then the receiver searching, the other band's
-        // screen and editor, and the band switch open and confirmed.
+        // menu windows, a scroll, every editor, three refusals, a notice and
+        // a pairing on the second panel. Then the receiver searching, the
+        // other band's screen and editor, and the band switch open and
+        // confirmed.
         let square =
             2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2 + 2;
-        let wide = Screen::COUNT + 3 + 1 + 1 + 1 + 1;
+        let wide = Screen::COUNT + 3 + 1 + Field::ALL.len() + 3 + 1 + 1;
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
         for field in Field::ALL {

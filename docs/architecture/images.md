@@ -18,7 +18,8 @@ different `critical-section` implementations; see [Building](../development/buil
 
 ## `rnode`
 
-Two CDC-ACM ports (KISS on the first, `defmt` log on the second), the Nordic
+One CDC-ACM port for KISS, the `defmt` log on a vendor interface beside it
+(so the board has one `tty`; see [Debugging](../development/debugging.md#the-log)), the Nordic
 UART Service carrying the same KISS stream, the LR1121 driven through the
 protocol state machine, the SH1107 panel drawn from modem state, the pad, the
 GPS, and the device record. Its structure is on the

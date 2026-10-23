@@ -128,6 +128,17 @@ the three of the 2.4 GHz path) so the refusal path is reachable and tested.
 Cancel hands out nothing: the editor holds a copy and confirm is the only
 thing that hands a value out.
 
+**A modal does not scroll**, so the editor and the notice are written to the
+rows the canvas has (`Editor::lines_in`, `Lock::lines_in`). Each line has a
+priority, a wrapped sentence is one unit, and on a panel too short for all of
+them the least important go first, whole: blank lines, then the word
+*Refused:*, the key hints, the original value and *OK: set Back: cancel*, the
+cursor. What a refused editor keeps longest is the value and the whole of the
+reason it was refused, so a 128 × 64 panel's four rows show exactly those; a
+notice keeps who has the radio and what to do about it. The board's own panel
+has room for every line and shows them all. A test drives every editor to
+every refusal it can reach at both sizes and fails if any is cut.
+
 **The protocol's side** (`Protocol::set_from_panel` and friends): the host's
 setter without the reply. The setting lands unvalidated, as a host's does, and
 if the radio is on it is reprogrammed through `ValidConfig` or refused with

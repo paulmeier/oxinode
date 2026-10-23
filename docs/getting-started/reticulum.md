@@ -3,18 +3,25 @@
 The board is an RNode. Everything a Reticulum host does with an RNode, it does
 with this one, unmodified.
 
-## The two serial ports
+## The serial port
 
 The product image enumerates as a composite USB device named `oxinode RNode`
-with two CDC-ACM serial ports:
+with one CDC-ACM serial port and one vendor interface:
 
-| Port | Carries |
+| Interface | Carries |
 |---|---|
-| first (`/dev/cu.usbmodemXXX1` on macOS) | the KISS-framed RNode protocol |
-| second (`/dev/cu.usbmodemXXX3`) | the firmware's `defmt` log |
+| the serial port (`/dev/cu.usbmodemXXX1` on macOS) | the KISS-framed RNode protocol, and the flasher's 1200-baud touch |
+| `oxinode log`, vendor-specific | the firmware's `defmt` log, read with `tools/log_reader.py` |
 
-The order is fixed: the KISS port is first so that it is the lower-numbered
-tty, which is where `rnsd` and the flasher's 1200-baud touch look.
+One serial port per board is deliberate: `rnodeconf` finds a board again after
+resetting it by USB serial number, and with two ports sharing that number it
+could land on the wrong one.
+
+!!! note "macOS asks once"
+    The first time a Mac sees a board with this layout (including a board
+    updated from an image with two serial ports) it holds the device back
+    until you allow the accessory. If the port does not appear after a flash,
+    look for the *Allow accessory to connect?* prompt, or replug the board.
 
 ## `rnsd`
 
@@ -47,7 +54,7 @@ Two things to know when choosing parameters:
   and 11 dBm at 2.4 GHz. Ask for more and the radio stays off, Reticulum
   notices the mismatch, and it prints *make sure that your hardware actually
   supports the parameters specified in the configuration*. The specific
-  reason goes to the log port.
+  reason goes to the log.
 - **The frequency you get is the frequency you asked for.** The chip is
   commanded 73 ppm higher to cancel the module's reference error, and the
   protocol reports the wanted frequency back, which is what Reticulum
@@ -85,14 +92,6 @@ Provisioning survives a reflash. The EEPROM image, the signature, the stored
 configuration and the Bluetooth bonds live in a device record in the 40 KB of
 flash the bootloader reserves above the application and refuses to write. See
 [Provisioning and storage](../architecture/provisioning.md).
-
-!!! note "`rnodeconf` may pick the wrong port after a reset"
-    `rnodeconf --rom` ends by resetting the board and finding "the" port again
-    by USB serial number, taking the first match. Both CDC ports carry the
-    same serial number and the order is not stable, so it can end with *Could
-    not download EEPROM from device* after the provisioning has in fact
-    succeeded. `rnodeconf -i <port>` a moment later shows the truth. There is
-    nothing the firmware can do about it that would not be worse.
 
 ### TNC mode
 
@@ -143,15 +142,15 @@ the test, and [Known limitations](../reference/limitations.md) has the state.
 
 ## Reading the log
 
-The second port carries `defmt` frames, not text. Decode them with the ELF the
-image was built from:
+The log interface carries `defmt` frames, not text. Read it with
+`tools/log_reader.py` (it needs libusb: `brew install libusb`) and decode it
+with the ELF the image was built from:
 
 ```bash
 cargo install defmt-print
-stty -f /dev/cu.usbmodemXXX3 115200
-defmt-print -e target/thumbv7em-none-eabihf/release/rnode < /dev/cu.usbmodemXXX3
+tools/log_reader.py | defmt-print -e target/thumbv7em-none-eabihf/release/rnode
 ```
 
-Always open the port at an explicit baud rate. The log pump holds the boot
-lines until a terminal opens the port, so opening it late still shows boot
-from the top; see [Debugging without a probe](../development/debugging.md).
+With two boards attached, add `--serial <USB serial number>`. The log pump
+holds the boot lines until a reader attaches, so starting it late still shows
+boot from the top; see [Debugging without a probe](../development/debugging.md).

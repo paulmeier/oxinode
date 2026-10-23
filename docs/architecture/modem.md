@@ -44,7 +44,7 @@ the chip; `is_rnode_representable()` answers that other question.
 
 Nothing clamps. A host asking for 22 dBm on a module rated for 20 is told
 22 dBm and then simply does not get a radio: the state comes back off, the
-host finds the mismatch, and the specific reason goes to the log port.
+host finds the mismatch, and the specific reason goes to the log.
 
 The same `ValidConfig` gate is applied to a host's request over KISS, to the
 stored configuration when a TNC-mode board boots, and to a confirmed edit from

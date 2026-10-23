@@ -1,22 +1,47 @@
 # Debugging without a probe
 
 This board has no debug probe attached and no image assumes one. The only
-diagnostic channel is a USB serial port, and the discipline that follows from
-that is most of what makes the firmware debuggable at all.
+diagnostic channel is the USB log, and the discipline that follows from that
+is most of what makes the firmware debuggable at all.
 
-## The log port
+## The log
 
-Every image with USB carries a `defmt` log on a CDC port (the second port on
-`rnode` and `usb-cdc`; the only port on `radio` and `display`, so that the
-bring-up images can wait for DTR before they start a one-shot sequence).
-`defmt` interns its format strings into a `.defmt` section that never ships to
-the device; the host decoder reads them out of the ELF, which is why the
-stream is compact and why the exact ELF is needed to read it:
+Every image with USB carries a `defmt` log. `defmt` interns its format strings
+into a `.defmt` section that never ships to the device; the host decoder reads
+them out of the ELF, which is why the stream is compact and why the exact ELF
+is needed to read it.
+
+**The product image** sends it down a vendor-specific USB interface rather
+than a serial port, so the board shows the host exactly one `tty`, the KISS
+port. `tools/log_reader.py` claims the interface through libusb and writes the
+bytes to stdout:
 
 ```bash
 cargo install defmt-print
+brew install libusb
+tools/log_reader.py | defmt-print -e target/thumbv7em-none-eabihf/release/rnode
+```
+
+With two boards attached, name one by its USB serial number (`--list` prints
+them). The reader follows its board across resets and reflashes, and only one
+reader can hold a board's log at a time. On Linux the reader needs a udev rule
+giving your user access to `1209:0003`.
+
+Why not a second serial port: two CDC functions share one USB serial number,
+and `rnodeconf` reopens a reset nRF52 on the first port pyserial lists with
+that number. On macOS that order is IOKit's, not the ports' names, and with
+both bench boards attached one of them listed its log port first, which then
+answered a KISS detect with `defmt` bytes. With one `tty` there is nothing to
+choose between.
+
+**The bring-up images** (`usb-cdc`, `radio`, `display`, `ble`) keep the log on
+a CDC port, the second on `usb-cdc` and the only one on the others, because
+that port is also where they take the 1200-baud touch and, on `radio` and
+`display`, the DTR they wait for before a one-shot sequence:
+
+```bash
 stty -f /dev/cu.usbmodemXXX3 115200
-defmt-print -e target/thumbv7em-none-eabihf/release/rnode < /dev/cu.usbmodemXXX3
+defmt-print -e target/thumbv7em-none-eabihf/release/radio < /dev/cu.usbmodemXXX3
 ```
 
 Three things have to be true at once for any of that to work, and each is
@@ -25,23 +50,25 @@ silent on its own: `DEFMT_LOG` set (it filters at compile time, defaulting to
 refuses the ELF), and `defmt::timestamp!` defined. `.cargo/config.toml` takes
 care of all three.
 
-**Always open the port at an explicit baud rate.** macOS caches the last line
-setting per device path, including a flasher's 1200-baud touch, and `cat` on
-the port would replay it and reboot the board into its bootloader.
+**Always open a CDC log port at an explicit baud rate.** macOS caches the last
+line setting per device path, including a flasher's 1200-baud touch, and `cat`
+on the port would replay it and reboot the board into its bootloader.
 
 ### Getting the boot log
 
-Open the port. The product image's log pump waits for DTR on the log port and
-holds 4 KB of ring buffer, which is the whole of boot, so a terminal opened
+Start the reader. The product image's log pump waits for a reader to attach
+and holds 4 KB of ring buffer, which is the whole of boot, so a reader started
 at any time afterwards gets the boot lines from the top and everything since:
 
 ```bash
-stty -f /dev/cu.usbmodemXXX3 115200
-defmt-print -e target/thumbv7em-none-eabihf/release/rnode < /dev/cu.usbmodemXXX3
+tools/log_reader.py | defmt-print -e target/thumbv7em-none-eabihf/release/rnode
 ```
 
-Closing the port, or dropping DTR on an open one, holds the log again; the
-next open or raise delivers what was held.
+The reader attaches with a vendor control request (`LOG_REQUEST_ATTACH` in
+`oxinode_core::usb`), which stands in for DTR; stopping it detaches, and a bus
+reset or suspend forgets it. Either holds the log again, and the next attach
+delivers what was held. On a CDC image, closing the port or dropping DTR does
+the same.
 
 The first line of the product image's log names the version and the commit
 it was built from (`oxinode RNode 0.1.0 (a98dcf6)`, with `-dirty` after the

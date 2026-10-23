@@ -104,4 +104,4 @@ telling somebody to wait for something that is not coming.
 
 A refused radio configuration is *not* reported as `INITRADIO`: the radio
 state comes back off, the host finds the mismatch itself, and the specific
-reason goes to the log port. See [The RNode protocol](../architecture/rnode-protocol.md).
+reason goes to the log. See [The RNode protocol](../architecture/rnode-protocol.md).

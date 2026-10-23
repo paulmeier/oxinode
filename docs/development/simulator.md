@@ -127,7 +127,8 @@ that can be reached, the frequency editor with its cursor moved, the band
 editor with the other band chosen and the screen after it is confirmed, the
 screen after a confirmed edit, the notice for USB and for a phone, a pairing in
 progress, and the receiver searching. `sim/golden/128x64/` holds the same
-screens on the other panel. On a mismatch the rendering and a diff land in
+screens on the other panel, with every editor and every refusal, because that
+is the panel a modal has to be cut down to fit. On a mismatch the rendering and a diff land in
 `target/golden-diff/`.
 
 ## What it does not tell you

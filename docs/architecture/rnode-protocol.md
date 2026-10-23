@@ -138,11 +138,10 @@ again. That is why the panel may not change the radio underneath a host; see
 
 ## The image
 
-`rnode` puts the KISS stream on the first CDC port and the log on the second.
-That order decides which tty gets the lower number, which is the port `rnsd`
-opens and the one the 1200-baud bootloader touch lands on. Each port sees its
-own DTR: the KISS port's is the touch, the log port's gates the log pump so
-that a terminal opened late still gets the boot log. The transmit path signals `CMD_READY` after every packet, which is what
+`rnode` puts the KISS stream on its only CDC port, which is the port `rnsd`
+opens and the one the 1200-baud bootloader touch lands on, and the log on a
+vendor interface beside it. The log pump is gated by the log reader's attach
+request rather than by DTR, so a reader started late still gets the boot log. The transmit path signals `CMD_READY` after every packet, which is what
 releases a host running with flow control.
 
 Two things in the modem loop exist because of failures that are easy to

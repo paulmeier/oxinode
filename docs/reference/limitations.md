@@ -45,8 +45,6 @@ has to rediscover it.
   IQ) are not editable from the panel, on purpose: a host could not read them
   back, and a board whose sync word differs from what its host believes is a
   board that hears nothing and cannot say why.
-- **A modal's lines do not scroll**, so on a 128 × 64 panel a refused
-  editor's reason is off the bottom. The right fix is content that fits.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
@@ -75,10 +73,6 @@ has to rediscover it.
 
 ## Interoperability quirks
 
-- **`rnodeconf` may pick the wrong port after a reset.** Both CDC ports share
-  the USB serial number and the order is not stable, so `--rom` can end with
-  *Could not download EEPROM from device* after succeeding. `rnodeconf -i`
-  shows the truth. See [Using it with Reticulum](../getting-started/reticulum.md).
 - **`rnodeconf -i` reports the band and power from its own table** for model
   `0xff`, not from the device. The firmware enforces the real limits.
 - **`CMD_HASHES` for the running firmware's hash is not answered**, so
@@ -94,11 +88,18 @@ has to rediscover it.
   image uses more RAM, which puts the bootloader's double-reset magic word
   inside its `.bss`, but whether that is the mechanism is not established.
   Disconnect the phone or reset the board before reflashing.
-- **A synthetic host that writes six setters back to back with no reads
-  loses roughly one four-byte frame in ten.** It is not the reply direction,
-  not SPI and USB contending for EasyDMA, not the decoder. It does not happen
-  with Reticulum, which reads continuously while it writes. Real, not
-  attributed, and not reachable by the clients the firmware serves.
+- **A synthetic host that wrote six setters back to back with no reads once
+  lost roughly one four-byte frame in ten.** It was not the reply direction,
+  not SPI and USB contending for EasyDMA, not the decoder, and it never
+  happened with Reticulum. It does not reproduce on the current firmware:
+  `tools/setter_burst.py`, the recipe as a tool, answered every setter on
+  both bench boards on 2026-10-23, 4,800 of 4,800, reading after each round,
+  reading nothing until the end, and reopening the port each round. The image
+  with the log on a second CDC port answered 3,000 of 3,000 the same day
+  under a first draft of the tool (one that could, in principle, credit a
+  late reply to the next round; its no-reads total of 600 of 600 could not
+  be fooled that way), so the change to one serial port is not what removed
+  it. Unattributed, and kept here until a run of the tool loses one.
 - **The LR1121 reports its last reset as `Analog`** after a pulse on NRESET.
 - **The receive window with the correction off dips at +220 and +240 kHz**
   inside a full passband, consistent with a fixed-frequency spur.

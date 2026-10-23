@@ -115,4 +115,4 @@ Between two oxinodes all four exchanges pass. Against a stock RNode running
 the reference firmware the exchange has not been run, and that is the one
 that matters; see [Known limitations](../reference/limitations.md). The
 runner needs no change for it: one `--b` is a stock RNode's port and
-`--b-log none`, since a stock RNode has no log port.
+`--b-log none`, since a stock RNode has no log.
