@@ -813,7 +813,19 @@ impl Editor {
     /// Left-aligned rather than in `label value` rows, because the frequency
     /// editor puts a cursor under one digit and the cursor line has to land
     /// on the same column as the digit whatever the value's width.
+    ///
+    /// Every line: what the board's own panel shows. See [`Editor::lines_in`]
+    /// for a panel with fewer rows.
     pub fn lines(&self, out: &mut Lines) {
+        self.lines_in(out, MAX_LINES);
+    }
+
+    /// The editor in at most `rows` lines. A modal does not scroll, so on a
+    /// short panel the least important lines go, whole, until the rest fit;
+    /// see [`Fit`] for the order. A refusal's reason outlasts everything but
+    /// the value it refused.
+    pub fn lines_in(&self, out: &mut Lines, rows: usize) {
+        let mut fit = Fit::new();
         let mut v = Text::<LINE_CHARS>::new();
         let mut line = Text::<LINE_CHARS>::new();
 
@@ -825,7 +837,7 @@ impl Editor {
             v.as_str(),
             width = EDIT_VALUE_COL
         );
-        out.line(line.as_str());
+        fit.line(Fit::CONTEXT, line.as_str());
 
         v.clear();
         line.clear();
@@ -837,7 +849,7 @@ impl Editor {
             v.as_str(),
             width = EDIT_VALUE_COL
         );
-        out.line(line.as_str());
+        fit.line(Fit::VALUE, line.as_str());
 
         if self.field() == Field::Band && self.changed() {
             // Where the other band lands, because the editor moves three
@@ -854,15 +866,15 @@ impl Editor {
                 v.as_str(),
                 width = EDIT_VALUE_COL
             );
-            out.line(line.as_str());
+            fit.line(Fit::POSITION, line.as_str());
             line.clear();
             kilohertz(&mut line, c.bandwidth_hz);
             let _ = write!(line, ", {} dBm", c.tx_power_dbm);
-            out.line(line.as_str());
-            out.line("Up/Down: change");
+            fit.join(line.as_str());
+            fit.line(Fit::HELP, "Up/Down: change");
         } else if self.is_stepper() {
-            out.line("");
-            out.line("Up/Down: change");
+            fit.line(Fit::SPACING, "");
+            fit.line(Fit::HELP, "Up/Down: change");
         } else {
             // `MMMM.kkk`: the cursor's column skips the point. An underscore
             // rather than a caret, because the font has one and not the
@@ -873,30 +885,148 @@ impl Editor {
             let col = EDIT_VALUE_COL + at + usize::from(at >= FREQ_POINT);
             line.clear();
             let _ = write!(line, "{:>width$}", "_", width = col + 1);
-            out.line(line.as_str());
-            out.line("Up/Down: digit");
-            out.line("Left/Right: move");
+            fit.line(Fit::POSITION, line.as_str());
+            fit.line(Fit::HELP, "Up/Down: digit");
+            fit.line(Fit::HELP, "Left/Right: move");
         }
-        out.line("OK: set Back: cancel");
+        fit.line(Fit::CONTEXT, "OK: set Back: cancel");
         if let Some(reason) = self.refused() {
-            out.line("");
-            out.line("Refused:");
-            out.wrapped(reason.message());
+            fit.line(Fit::SPACING, "");
+            fit.line(Fit::LABEL, "Refused:");
+            fit.wrapped(Fit::REASON, reason.message());
         }
+        fit.emit(out, rows);
     }
 }
 
 impl Lock {
     /// The notice as lines: who has the radio, and what to do about it.
     pub fn lines(self, out: &mut Lines) {
-        out.line(self.headline());
-        out.line("");
-        out.wrapped("It set the radio up and believes what it set, so the panel will not change it underneath.");
-        out.line("");
-        out.wrapped(match self {
-            Lock::Usb => "Close the port to change settings here.",
-            Lock::Bluetooth => "Disconnect the phone to change settings here.",
-        });
+        self.lines_in(out, MAX_LINES);
+    }
+
+    /// The notice in at most `rows` lines: on a short panel, who has the
+    /// radio and what to do about it outlast why.
+    pub fn lines_in(self, out: &mut Lines, rows: usize) {
+        let mut fit = Fit::new();
+        fit.line(Fit::VALUE, self.headline());
+        fit.line(Fit::SPACING, "");
+        fit.wrapped(
+            Fit::HELP,
+            "It set the radio up and believes what it set, so the panel will not change it underneath.",
+        );
+        fit.line(Fit::SPACING, "");
+        fit.wrapped(
+            Fit::REASON,
+            match self {
+                Lock::Usb => "Close the port to change settings here.",
+                Lock::Bluetooth => "Disconnect the phone to change settings here.",
+            },
+        );
+        fit.emit(out, rows);
+    }
+}
+
+/// A modal's lines, each in a group with a priority, cut to the rows a panel
+/// has by dropping whole groups, least important first.
+///
+/// A modal does not scroll -- what it says has to fit -- and the board's own
+/// panel shows every line. A 128 × 64 panel has four rows, fewer than the
+/// shortest editor, and the first thing to fall off its bottom used to be
+/// the reason a value was refused (issue #21). So the order is explicit:
+/// lower priorities go first, and of two at the same priority the later one
+/// goes first. A wrapped sentence is one group, because half a reason is
+/// the failure this exists to remove.
+struct Fit {
+    all: Lines,
+    /// The group each line belongs to.
+    group: [u8; MAX_LINES],
+    /// Each group's priority.
+    priority: [u8; MAX_LINES],
+    groups: usize,
+}
+
+impl Fit {
+    /// The value being edited, and a notice's headline.
+    const VALUE: u8 = 6;
+    /// Why a value was refused, and what to do about a notice.
+    const REASON: u8 = 5;
+    /// Where the value is: the cursor, and where a band change lands.
+    const POSITION: u8 = 4;
+    /// What it was, and how to leave.
+    const CONTEXT: u8 = 3;
+    /// Which keys do what, and why a notice is up.
+    const HELP: u8 = 2;
+    /// The word over a refusal's reason.
+    const LABEL: u8 = 1;
+    /// Blank lines.
+    const SPACING: u8 = 0;
+
+    fn new() -> Self {
+        Fit {
+            all: Lines::new(),
+            group: [0; MAX_LINES],
+            priority: [0; MAX_LINES],
+            groups: 0,
+        }
+    }
+
+    /// A line in a group of its own.
+    fn line(&mut self, priority: u8, text: &str) {
+        if self.groups < MAX_LINES {
+            self.priority[self.groups] = priority;
+            self.groups += 1;
+        }
+        self.join(text);
+    }
+
+    /// A line in the same group as the one before it: kept or dropped with it.
+    fn join(&mut self, text: &str) {
+        let n = self.all.len();
+        self.all.line(text);
+        if self.all.len() > n {
+            self.group[n] = self.groups.saturating_sub(1) as u8;
+        }
+    }
+
+    /// A sentence, wrapped, as one group.
+    fn wrapped(&mut self, priority: u8, text: &str) {
+        let mut first = true;
+        for piece in wrap(text, LINE_CHARS) {
+            if first {
+                self.line(priority, piece);
+                first = false;
+            } else {
+                self.join(piece);
+            }
+        }
+    }
+
+    /// The lines that fit in `rows`, in their order.
+    fn emit(self, out: &mut Lines, rows: usize) {
+        let mut dropped = [false; MAX_LINES];
+        let size = |g: usize| {
+            (0..self.all.len())
+                .filter(|&n| self.group[n] as usize == g)
+                .count()
+        };
+        let mut total = self.all.len();
+        while total > rows {
+            let Some(g) = (0..self.groups)
+                .filter(|&g| !dropped[g])
+                .min_by_key(|&g| (self.priority[g], core::cmp::Reverse(g)))
+            else {
+                break;
+            };
+            dropped[g] = true;
+            total -= size(g);
+        }
+        for n in 0..self.all.len() {
+            if !dropped[self.group[n] as usize] {
+                out.line(self.all.rows[n].as_str());
+            }
+        }
+        out.overflowed |= self.all.overflowed;
     }
 }
 
@@ -940,10 +1070,12 @@ pub fn passkey_box(canvas: &mut impl Canvas, key: u32) {
 pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
     let mut lines = Lines::new();
     // An editor or a notice replaces the screen's lines; the chrome stays.
+    // Cut to the rows this canvas has, because a modal does not scroll.
+    let rows = Layout::for_canvas(canvas).visible_lines();
     if let Some(editor) = nav.editor() {
-        editor.lines(&mut lines);
+        editor.lines_in(&mut lines, rows);
     } else if let Some(lock) = nav.notice_shown() {
-        lock.lines(&mut lines);
+        lock.lines_in(&mut lines, rows);
     } else {
         state.lines(nav.current(), &mut lines);
     }
@@ -1626,6 +1758,93 @@ mod tests {
         (0..out.len())
             .map(|n| out.get(n).unwrap().to_string())
             .collect()
+    }
+
+    /// On a panel with fewer rows than an editor has lines, every editor
+    /// still fits, and a refused one still shows the value and the whole of
+    /// its reason (issue #21). The board's own panel is the case above.
+    #[test]
+    fn every_editor_fits_a_short_panel_and_keeps_its_refusal() {
+        let short = Layout::of(128, 64).visible_lines();
+        assert_eq!(short, 4);
+        let configs = [populated().radio.config, crate::lr1121::config::BENCH_2G4];
+        let mut refusals = 0;
+        for (config, field) in configs.iter().flat_map(|c| Field::ALL.map(|f| (*c, f))) {
+            for pass in ["fresh", "up", "down", "changed"] {
+                let mut e = Editor::open(field, config);
+                match pass {
+                    "up" => {
+                        (0..12).for_each(|_| e.up());
+                        e.confirm();
+                    }
+                    "down" => {
+                        (0..50).for_each(|_| e.down());
+                        e.confirm();
+                    }
+                    "changed" => e.up(),
+                    _ => {}
+                }
+                for rows in [short, LAYOUT.visible_lines()] {
+                    let mut out = Lines::new();
+                    e.lines_in(&mut out, rows);
+                    let lines: Vec<&str> = (0..out.len()).map(|n| out.get(n).unwrap()).collect();
+                    assert!(lines.len() <= rows, "{field:?} {pass} in {rows}: {lines:?}");
+                    assert!(!out.overflowed(), "{field:?} {pass}: a line was cut");
+                    assert!(
+                        lines.iter().any(|l| l.starts_with("Now")),
+                        "{field:?} {pass}: {lines:?}"
+                    );
+                    if let Some(reason) = e.refused() {
+                        refusals += 1;
+                        let shown = lines.join(" ");
+                        assert!(
+                            shown.contains(reason.message()),
+                            "{field:?} {pass} in {rows}: reason cut: {lines:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(refusals > 0, "no editor was driven to a refusal");
+        for lock in [Lock::Usb, Lock::Bluetooth] {
+            let mut out = Lines::new();
+            lock.lines_in(&mut out, short);
+            assert!(out.len() <= short, "{lock:?}");
+            assert!(out.get(0).unwrap().contains("has the radio"), "{lock:?}");
+            let shown = (0..out.len())
+                .map(|n| out.get(n).unwrap())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(shown.contains("settings here."), "{lock:?}: {shown}");
+        }
+    }
+
+    /// Whole groups go, lowest priority first, the later of a tie first,
+    /// and what stays keeps its order.
+    #[test]
+    fn fit_drops_whole_groups_lowest_first() {
+        let fitted = |rows| {
+            let mut fit = Fit::new();
+            fit.line(Fit::CONTEXT, "a");
+            fit.line(Fit::SPACING, "");
+            fit.wrapped(
+                Fit::REASON,
+                "one two three four five six seven eight nine ten",
+            );
+            fit.line(Fit::CONTEXT, "b");
+            let mut out = Lines::new();
+            fit.emit(&mut out, rows);
+            (0..out.len())
+                .map(|n| out.get(n).unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let reason = ["one two three four", "five six seven eight", "nine ten"];
+        assert_eq!(fitted(6), ["a", "", reason[0], reason[1], reason[2], "b"]);
+        assert_eq!(fitted(5), ["a", reason[0], reason[1], reason[2], "b"]);
+        assert_eq!(fitted(4), ["a", reason[0], reason[1], reason[2]]);
+        assert_eq!(fitted(3), reason);
+        // Two rows cannot hold the reason, and half of one is not shown.
+        assert!(fitted(2).is_empty());
     }
 
     /// Every editor, fresh and refused, fits the panel in width and height,

@@ -45,8 +45,6 @@ has to rediscover it.
   IQ) are not editable from the panel, on purpose: a host could not read them
   back, and a board whose sync word differs from what its host believes is a
   board that hears nothing and cannot say why.
-- **A modal's lines do not scroll**, so on a 128 × 64 panel a refused
-  editor's reason is off the bottom. The right fix is content that fits.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
