@@ -56,14 +56,33 @@ class Plan(unittest.TestCase):
 
 
 class Ports(unittest.TestCase):
-    def test_macos_pairs_the_two_cdc_ports(self):
-        self.assertEqual(ax.log_port_for("/dev/cu.usbmodem101"), "/dev/cu.usbmodem103")
-        self.assertEqual(ax.log_port_for("/dev/cu.usbmodem3101"), "/dev/cu.usbmodem3103")
+    PORTS = [
+        ax.PortInfo("/dev/cu.usbmodem1101", "65C11224153B1DFD", 0x1209, 0x0003),
+        ax.PortInfo("/dev/cu.usbmodem3101", "D3304814DC467229", 0x1209, 0x0003),
+        # A stock RNode: a USB-serial bridge, nothing to read a log from.
+        ax.PortInfo("/dev/cu.usbserial-0001", "0001", 0x10C4, 0xEA60),
+        # A bring-up image: an oxinode, but not one with the log interface.
+        ax.PortInfo("/dev/cu.usbmodem2101", "AAAA", 0x1209, 0x0004),
+    ]
 
-    def test_anything_else_is_not_guessed(self):
-        self.assertIsNone(ax.log_port_for("/dev/ttyACM0"))
-        self.assertIsNone(ax.log_port_for("/dev/cu.usbserial-0001"))
-        self.assertIsNone(ax.log_port_for("/dev/cu.usbmodem103"))
+    def test_an_oxinode_is_found_by_its_kiss_port(self):
+        self.assertEqual(ax.usb_serial_for("/dev/cu.usbmodem1101", self.PORTS), "65C11224153B1DFD")
+        self.assertEqual(ax.usb_serial_for("/dev/cu.usbmodem3101", self.PORTS), "D3304814DC467229")
+
+    def test_a_stock_rnode_has_no_log(self):
+        self.assertIsNone(ax.usb_serial_for("/dev/cu.usbserial-0001", self.PORTS))
+
+    def test_another_image_is_not_read(self):
+        self.assertIsNone(ax.usb_serial_for("/dev/cu.usbmodem2101", self.PORTS))
+
+    def test_a_port_that_is_not_attached_has_none(self):
+        self.assertIsNone(ax.usb_serial_for("/dev/ttyACM0", self.PORTS))
+
+    def test_the_vid_and_pid_are_the_rnode_images(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "bin", "rnode.rs")) as f:
+            rnode = f.read()
+        self.assertIn(f"const USB_VID: u16 = 0x{ax.OXINODE_VID_PID[0]:04x};", rnode)
+        self.assertIn(f"const USB_PID: u16 = 0x{ax.OXINODE_VID_PID[1]:04x};", rnode)
 
 
 class Config(unittest.TestCase):

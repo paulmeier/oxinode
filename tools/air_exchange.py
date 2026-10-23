@@ -17,10 +17,11 @@ came with. The sender and receiver compare hashes; the packet's size on the
 air is asserted from `Packet.raw`, so a 400-byte exchange is 400 bytes on the
 air, not 400 bytes of payload.
 
-Every oxinode's `defmt` log is captured from its log port for the whole run,
-so each frame's header byte and sequence nibble, and every join, are in the
-notes alongside Reticulum's own log of the interface. A stock RNode has no
-such port; its side of the story is Reticulum's log.
+Every oxinode's `defmt` log is captured for the whole run, through
+`log_reader.py` and the board's vendor log interface, so each frame's header
+byte and sequence nibble, and every join, are in the notes alongside
+Reticulum's own log of the interface. A stock RNode has no such interface; its
+side of the story is Reticulum's log.
 
     tools/air_exchange.py --a /dev/cu.usbmodem101 --b /dev/cu.usbmodem3101
 
@@ -32,9 +33,11 @@ can check the plan, the sizes and the config without a board or RNS.
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -80,15 +83,40 @@ def data_len_for_raw(raw_len: int) -> int:
     return raw_len - HEADER_1_OVERHEAD
 
 
-def log_port_for(port: str) -> Optional[str]:
-    """The log port that goes with an oxinode's KISS port, where that is knowable.
+# The RNode image's USB identity; see `USB_VID`/`USB_PID` in src/bin/rnode.rs.
+OXINODE_VID_PID = (0x1209, 0x0003)
 
-    On macOS the two CDC ports of one board enumerate as `...XXX1` and
-    `...XXX3`. Anywhere else the pairing is not knowable from the name.
+
+class PortInfo(NamedTuple):
+    device: str
+    serial_number: Optional[str]
+    vid: Optional[int]
+    pid: Optional[int]
+
+
+def usb_serial_for(port: str, ports: Sequence[PortInfo]) -> Optional[str]:
+    """The USB serial number of the oxinode behind a KISS port, or None.
+
+    That is what `log_reader.py` finds the board's log interface by. None for a
+    port that is not the RNode image -- a stock RNode has no log to read -- and
+    for one that is not attached.
     """
-    if port.startswith("/dev/cu.usbmodem") and port.endswith("1"):
-        return port[:-1] + "3"
+    for info in ports:
+        if info.device == port and (info.vid, info.pid) == OXINODE_VID_PID:
+            return info.serial_number
     return None
+
+
+def list_ports(interpreter: str) -> List[PortInfo]:
+    """The host's serial ports, through pyserial in the Python Reticulum runs
+    under, which always has it (this one need not)."""
+    script = (
+        "import json\n"
+        "from serial.tools import list_ports\n"
+        "print(json.dumps([[p.device, p.serial_number, p.vid, p.pid] for p in list_ports.comports()]))\n"
+    )
+    out = subprocess.run([interpreter, "-c", script], check=True, capture_output=True, text=True).stdout
+    return [PortInfo(*row) for row in json.loads(out)]
 
 
 def config_text(port: str, radio: Dict[str, int]) -> str:
@@ -117,7 +145,7 @@ def config_text(port: str, radio: Dict[str, int]) -> str:
 class Side(NamedTuple):
     name: str
     port: str
-    log_port: Optional[str]
+    log_serial: Optional[str]
 
 
 class Exchange(NamedTuple):
@@ -306,26 +334,27 @@ def peer_main(role: str, configdir: str, log_path: str, timeout: float) -> int:
 
 
 class LogCapture:
-    """`defmt-print` on an oxinode's log port, for the whole run."""
+    """`log_reader.py` into `defmt-print` for one oxinode, for the whole run."""
 
-    def __init__(self, port: str, elf: str, path: str):
-        flag = "-f" if sys.platform == "darwin" else "-F"
-        subprocess.run(["stty", flag, port, "115200"], check=True)
-        fd = os.open(port, os.O_RDONLY | os.O_NOCTTY)
+    def __init__(self, serial: str, elf: str, path: str):
+        reader = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_reader.py")
         self.file = open(path, "wb")
-        try:
-            self.proc = subprocess.Popen(
-                ["defmt-print", "-e", elf], stdin=fd, stdout=self.file, stderr=subprocess.STDOUT
-            )
-        finally:
-            os.close(fd)
+        self.reader = subprocess.Popen(
+            [sys.executable, reader, "--serial", serial], stdout=subprocess.PIPE, stderr=self.file
+        )
+        self.decoder = subprocess.Popen(
+            ["defmt-print", "-e", elf], stdin=self.reader.stdout, stdout=self.file, stderr=subprocess.STDOUT
+        )
+        self.reader.stdout.close()  # the decoder holds it now
 
     def stop(self):
-        self.proc.terminate()
-        try:
-            self.proc.wait(5)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
+        # SIGINT, so the reader tells the board it has stopped listening.
+        self.reader.send_signal(signal.SIGINT)
+        for proc in (self.reader, self.decoder):
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         self.file.close()
 
 
@@ -448,8 +477,8 @@ def main() -> int:
     ap.add_argument("--b", help="KISS port of the second RNode")
     ap.add_argument("--a-name", default="A", help="what to call the first (default A)")
     ap.add_argument("--b-name", default="B", help="what to call the second (default B)")
-    ap.add_argument("--a-log", help="the first's log port, or 'none' (default: derived for an oxinode on macOS)")
-    ap.add_argument("--b-log", help="the second's log port, or 'none'")
+    ap.add_argument("--a-log", help="the first's USB serial number, or 'none' (default: looked up from --a for an oxinode)")
+    ap.add_argument("--b-log", help="the second's USB serial number, or 'none'")
     ap.add_argument("--elf", default=DEFAULT_ELF, help="the ELF the oxinodes were built from, for the log")
     ap.add_argument("--sizes", default=",".join(str(s) for s in DEFAULT_SIZES), help="packet sizes on the air, comma separated (default 200,400)")
     ap.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for an RNode, or a packet (default 30)")
@@ -474,34 +503,39 @@ def main() -> int:
         ap.error(str(e))
     radio = {key: getattr(args, key) for key in DEFAULT_RADIO}
 
-    def log_port(given: Optional[str], port: str) -> Optional[str]:
+    interpreter = find_interpreter()
+    ports: Optional[List[PortInfo]] = None
+
+    def log_serial(given: Optional[str], port: str) -> Optional[str]:
+        nonlocal ports
         if given:
             return None if given.lower() == "none" else given
-        return log_port_for(port)
+        if ports is None:
+            ports = list_ports(interpreter)
+        return usb_serial_for(port, ports)
 
     sides = {
-        args.a_name: Side(args.a_name, args.a, log_port(args.a_log, args.a)),
-        args.b_name: Side(args.b_name, args.b, log_port(args.b_log, args.b)),
+        args.a_name: Side(args.a_name, args.a, log_serial(args.a_log, args.a)),
+        args.b_name: Side(args.b_name, args.b, log_serial(args.b_log, args.b)),
     }
     out_dir = args.out or os.path.join("target", "air-exchange", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(out_dir, exist_ok=True)
-    interpreter = find_interpreter()
 
     captures = []
     for side in sides.values():
-        if side.log_port:
+        if side.log_serial:
             if not os.path.exists(args.elf):
                 sys.exit(f"air_exchange: no ELF at {args.elf} to decode {side.name}'s log with")
             if not shutil.which("defmt-print"):
                 sys.exit("air_exchange: defmt-print is not installed (cargo install defmt-print)")
-            captures.append(LogCapture(side.log_port, args.elf, os.path.join(out_dir, f"{side.name}.defmt.log")))
+            captures.append(LogCapture(side.log_serial, args.elf, os.path.join(out_dir, f"{side.name}.defmt.log")))
     if captures:
-        time.sleep(1.0)  # the boot ring drains a moment after DTR
+        time.sleep(1.0)  # the boot ring drains a moment after the reader attaches
 
     results: List[Result] = []
     notes = [f"air exchange, {time.strftime('%Y-%m-%d %H:%M:%S %Z')}"]
     for name, side in sides.items():
-        notes.append(f"{name}: {side.port}" + (f", log {side.log_port}" if side.log_port else ", no log port"))
+        notes.append(f"{name}: {side.port}" + (f", log from {side.log_serial}" if side.log_serial else ", no log"))
     notes.append("radio: " + ", ".join(f"{k} {v}" for k, v in radio.items()))
     notes.append("")
     try:

@@ -1,14 +1,27 @@
-//! Ships defmt output to the host over a CDC-ACM serial port.
+//! Ships defmt output to the host over USB.
 //!
 //! Shared by every firmware image, because with no debug probe this is the only
 //! way anything says anything. See `src/logger.rs` for the buffer it drains.
+//!
+//! Two transports, one pump. The bring-up images send the log down a CDC-ACM
+//! port, which is also the port they are touched on to reach the bootloader.
+//! The RNode image sends it down a vendor-specific bulk interface
+//! ([`VendorLog`]), so that the board shows the host exactly one `tty` and
+//! `rnodeconf` cannot reopen on the wrong one (issue #22).
 
 use crate::logger;
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_futures::select::{select, Either};
 use embassy_time::{with_timeout, Duration, Timer};
 use embassy_usb::class::cdc_acm::{ControlChanged, Receiver, Sender};
-use embassy_usb::driver::Driver;
-use oxinode_core::usb::DrainGate;
+use embassy_usb::control::{OutResponse, Recipient, Request, RequestType};
+use embassy_usb::driver::{Driver, Endpoint, EndpointError, EndpointIn};
+use embassy_usb::types::{InterfaceNumber, StringIndex};
+use embassy_usb::{Builder, Handler};
+use oxinode_core::usb::{
+    log_attach_request, DrainGate, LOG_INTERFACE_CLASS, LOG_INTERFACE_PROTOCOL,
+    LOG_INTERFACE_SUBCLASS,
+};
 
 /// Full-speed bulk endpoints are 64 bytes; anything larger is silently clamped.
 pub const MAX_PACKET_SIZE: u16 = 64;
@@ -44,7 +57,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
 /// [`OPEN_SETTLE_MS`](oxinode_core::usb::OPEN_SETTLE_MS) after `ready` turns
 /// true before it drains, and starts that wait again whenever `ready` drops.
 /// The rule is [`DrainGate`], tested on the host; see it for the measurements.
-pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() -> bool) -> ! {
+pub async fn pump(tx: &mut impl LogSink, ready: impl Fn() -> bool) -> ! {
     let mut buf = [0u8; MAX_PACKET_SIZE as usize];
     loop {
         tx.wait_connection().await;
@@ -94,6 +107,145 @@ pub async fn pump<'d, D: Driver<'d>>(tx: &mut Sender<'d, D>, ready: impl Fn() ->
                 }
             }
         }
+    }
+}
+
+/// Where [`pump`] sends the log: something that comes up with the bus and
+/// takes one packet at a time.
+// The futures are never `Send`, and need not be: every image runs its USB
+// tasks on one executor, which is the case the lint's warning does not cover.
+#[allow(async_fn_in_trait)]
+pub trait LogSink {
+    /// Until the host has configured the device.
+    async fn wait_connection(&mut self);
+    /// One packet, at most [`MAX_PACKET_SIZE`] bytes; an empty one ends a
+    /// transfer.
+    async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError>;
+}
+
+impl<'d, D: Driver<'d>> LogSink for Sender<'d, D> {
+    async fn wait_connection(&mut self) {
+        Sender::wait_connection(self).await
+    }
+    async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
+        Sender::write_packet(self, data).await
+    }
+}
+
+/// The log as a vendor-specific interface with one bulk IN endpoint.
+///
+/// No host has a driver for the class, so nothing turns it into a serial port;
+/// `tools/log_reader.py` claims it through libusb and passes the bytes to
+/// `defmt-print`. The reader announces itself with
+/// [`LOG_REQUEST_ATTACH`](oxinode_core::usb::LOG_REQUEST_ATTACH), and that
+/// flag is what [`pump`]'s `ready` reads in place of DTR.
+pub struct VendorLog<'d, D: Driver<'d>> {
+    ep: D::EndpointIn,
+}
+
+/// Whether a reader has attached since the bus last came up.
+static LISTENING: AtomicBool = AtomicBool::new(false);
+
+/// Answers the attach request, and forgets the reader whenever the bus resets
+/// or sleeps, because a reader that went with the cable never says goodbye.
+pub struct VendorLogControl {
+    interface: Option<InterfaceNumber>,
+    name: Option<StringIndex>,
+}
+
+/// What a person listing the device's interfaces sees.
+const INTERFACE_NAME: &str = "oxinode log";
+
+impl VendorLogControl {
+    pub const fn new() -> Self {
+        Self {
+            interface: None,
+            name: None,
+        }
+    }
+}
+
+impl Default for VendorLogControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Handler for VendorLogControl {
+    fn reset(&mut self) {
+        LISTENING.store(false, Ordering::Relaxed);
+    }
+    fn configured(&mut self, configured: bool) {
+        if !configured {
+            LISTENING.store(false, Ordering::Relaxed);
+        }
+    }
+    fn suspended(&mut self, suspended: bool) {
+        if suspended {
+            LISTENING.store(false, Ordering::Relaxed);
+        }
+    }
+    fn get_string(&mut self, index: StringIndex, _lang_id: u16) -> Option<&str> {
+        (Some(index) == self.name).then_some(INTERFACE_NAME)
+    }
+    fn control_out(&mut self, req: Request, _data: &[u8]) -> Option<OutResponse> {
+        // Only requests addressed to this interface are ours to answer;
+        // `None` passes anything else on to the other handlers.
+        if req.request_type != RequestType::Vendor
+            || req.recipient != Recipient::Interface
+            || Some(req.index as u8) != self.interface.map(|i| i.0)
+        {
+            return None;
+        }
+        Some(match log_attach_request(req.request, req.value) {
+            Some(listening) => {
+                LISTENING.store(listening, Ordering::Relaxed);
+                OutResponse::Accepted
+            }
+            None => OutResponse::Rejected,
+        })
+    }
+}
+
+impl<'d, D: Driver<'d>> VendorLog<'d, D> {
+    /// Add the interface to `builder`. `control` must live as long as the
+    /// device, which in practice means a `StaticCell`.
+    pub fn new(builder: &mut Builder<'d, D>, control: &'d mut VendorLogControl) -> Self {
+        let ep = {
+            let mut function = builder.function(
+                LOG_INTERFACE_CLASS,
+                LOG_INTERFACE_SUBCLASS,
+                LOG_INTERFACE_PROTOCOL,
+            );
+            let mut interface = function.interface();
+            let name = interface.string();
+            control.interface = Some(interface.interface_number());
+            control.name = Some(name);
+            let mut alt = interface.alt_setting(
+                LOG_INTERFACE_CLASS,
+                LOG_INTERFACE_SUBCLASS,
+                LOG_INTERFACE_PROTOCOL,
+                Some(name),
+            );
+            alt.endpoint_bulk_in(None, MAX_PACKET_SIZE)
+        };
+        builder.handler(control);
+        Self { ep }
+    }
+}
+
+/// Whether a reader is attached to the [`VendorLog`]: the `ready` to hand
+/// [`pump`].
+pub fn vendor_log_listening() -> bool {
+    LISTENING.load(Ordering::Relaxed)
+}
+
+impl<'d, D: Driver<'d>> LogSink for VendorLog<'d, D> {
+    async fn wait_connection(&mut self) {
+        self.ep.wait_enabled().await
+    }
+    async fn write_packet(&mut self, data: &[u8]) -> Result<(), EndpointError> {
+        self.ep.write(data).await
     }
 }
 

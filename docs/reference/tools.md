@@ -2,7 +2,8 @@
 
 Everything under `tools/` runs on the host. The shell scripts are written for
 macOS's bash 3.2; the Python needs only the standard library, except the
-exchange runner, whose two peers need Reticulum.
+exchange runner, whose two peers need Reticulum, and the log reader, which
+calls libusb through `ctypes`.
 
 | Tool | What it does |
 |---|---|
@@ -11,6 +12,7 @@ exchange runner, whose two peers need Reticulum.
 | `uf2-flash.sh` | The alternative runner: ELF → UF2 → the bootloader's drive, for hosts where the drive works. Reads the family id from the board's `CURRENT.UF2`. |
 | `uf2conv.py` | A UF2 writer from the format specification, with tests. |
 | `verify_flash.py` | Compares the vector table in the board's `CURRENT.UF2` against a built ELF and says `MATCH` or `MISMATCH`. |
+| `log_reader.py` | Reads the product image's `defmt` log from its vendor USB interface, for `defmt-print`. See [Debugging without a probe](../development/debugging.md#the-log). |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
 | `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`. See [Memory layout](../hardware/memory-layout.md). |
@@ -62,9 +64,9 @@ Reticulum instance of its own with one `RNodeInterface`, so what goes on the
 air is what `rnsd` sends. The sender and the receiver compare hashes, the size
 on the air is asserted from the packet Reticulum built, and the receiver
 reports the signal the packet came with. Every oxinode's `defmt` log is
-captured from its log port for the whole run, so each frame's header byte and
-sequence nibble and every join are in the notes; a stock RNode has no log
-port, and its side is Reticulum's log.
+captured through `log_reader.py` for the whole run, so each frame's header
+byte and sequence nibble and every join are in the notes; a stock RNode has
+no log, and its side is Reticulum's log.
 
 The peers run under whichever Python has Reticulum: this one if it does,
 otherwise the one `rnsd` on the `PATH` runs under. Everything goes to
@@ -75,7 +77,7 @@ exchange, and `<name>.defmt.log` per oxinode.
 |---|---|
 | `--a`, `--b` | the two KISS ports |
 | `--a-name`, `--b-name` | what to call them in the logs (default `A`, `B`) |
-| `--a-log`, `--b-log` | a log port, or `none`; on macOS an oxinode's is derived from its KISS port (`...1` to `...3`) |
+| `--a-log`, `--b-log` | the board's USB serial number to read the log from, or `none`; by default looked up from the KISS port, for the product image only |
 | `--elf` | the ELF the oxinodes were built from (default the release `rnode`) |
 | `--sizes` | sizes on the air, comma separated (default `200,400`) |
 | `--frequency`, `--bandwidth`, `--txpower`, `--spreadingfactor`, `--codingrate` | the radio configuration, given to both; `--frequency 2478000000 --bandwidth 812500 --txpower 11` is the 2.4 GHz path, with both antennas on the u.FL |
@@ -86,6 +88,22 @@ Exit status is zero only when every exchange delivered the bytes that were
 sent. `tools/test_air_exchange.py` pins what it claims about Reticulum's
 framing: the overhead that makes a 400-byte packet 400 bytes on the air, the
 plan, and the config that keeps the two instances apart.
+
+## `log_reader.py`
+
+```bash
+tools/log_reader.py [--serial <USB serial number>] [--once] | defmt-print -e <elf>
+tools/log_reader.py --list
+```
+
+Finds a board running the product image (`1209:0003`), finds the interface
+whose class, subclass and protocol are `LOG_INTERFACE_*` in
+`oxinode_core::usb`, claims it, sends the attach request and copies its bulk
+IN endpoint to stdout. It detaches on the way out however it is stopped, and
+follows its board across a reset unless `--once` is given. Needs libusb
+(`brew install libusb`; on Linux, libusb-1.0 and a udev rule for `1209:0003`).
+`tools/test_log_reader.py` checks the descriptor walk and that the constants
+are the firmware's.
 
 ## `check_layout.py`
 

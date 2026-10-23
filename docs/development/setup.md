@@ -41,8 +41,10 @@ pip install adafruit-nrfutil
 
 - **`shellcheck`**, for the lint step over `tools/*.sh`. `tools/test.sh`
   skips it with a note if it is not installed.
-- **`defmt-print`**, to decode the firmware's log port:
+- **`defmt-print`**, to decode the firmware's log:
   `cargo install defmt-print`.
+- **libusb**, for `tools/log_reader.py`, which reads the product image's log:
+  `brew install libusb`.
 - **MkDocs**, to build this documentation locally:
   `pip install -r docs/requirements.txt`, then `mkdocs serve`.
 

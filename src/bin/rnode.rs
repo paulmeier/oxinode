@@ -278,7 +278,7 @@ async fn main(_spawner: Spawner) {
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
     static DATA_STATE: StaticCell<State> = StaticCell::new();
-    static LOG_STATE: StaticCell<State> = StaticCell::new();
+    static LOG_CONTROL: StaticCell<usb_log::VendorLogControl> = StaticCell::new();
 
     let mut builder = Builder::new(
         driver,
@@ -289,8 +289,10 @@ async fn main(_spawner: Spawner) {
         CONTROL_BUF.init([0; 64]),
     );
 
-    // Order is the contract: the KISS port first, so it enumerates as the
-    // lower-numbered tty and so that it is the one with DTR.
+    // The only serial port the board has. The log is a vendor interface
+    // beside it, because two CDC functions share one USB serial number and
+    // `rnodeconf` reopens a reset board on whichever pyserial lists first --
+    // on macOS that was the log port, measured, on one of two boards (#22).
     let data = CdcAcmClass::new(
         &mut builder,
         DATA_STATE.init(State::new()),
@@ -298,12 +300,10 @@ async fn main(_spawner: Spawner) {
     );
     let (mut kiss_tx, mut kiss_rx, control) = data.split_with_control();
 
-    let logs = CdcAcmClass::new(
+    let mut log = usb_log::VendorLog::new(
         &mut builder,
-        LOG_STATE.init(State::new()),
-        usb_log::MAX_PACKET_SIZE,
+        LOG_CONTROL.init(usb_log::VendorLogControl::new()),
     );
-    let (mut log_tx, _, log_control) = logs.split_with_control();
 
     let mut usb = builder.build();
     let mut led = Led::new(p.P1_03);
@@ -353,7 +353,7 @@ async fn main(_spawner: Spawner) {
     ));
 
     let run_usb = usb.run();
-    // Held until a terminal opens the log port. This used to be `|| true` on
+    // Held until a reader attaches to the log interface. This used to be `|| true` on
     // the grounds that the log is continuous rather than a startup sequence,
     // and that cost the startup sequence: the host discards what arrives on a
     // port nobody has open, and a board re-enumerates faster than a terminal
@@ -361,10 +361,10 @@ async fn main(_spawner: Spawner) {
     // `UICR.NFCPINS`, the mode switch, the panel address -- were gone every
     // time. The ring holds 4 KB, which is the whole of boot; with nobody ever
     // listening it simply fills and drops the oldest, as it always did. The
-    // pump also holds for a moment after DTR rises, because the host raises it
-    // inside `open(2)` and the terminal flushes its input right after -- a
-    // log sent into that gap is a log thrown away. See `usb_log::pump`.
-    let pump = usb_log::pump(&mut log_tx, || log_control.dtr());
+    // reader's attach request stands in for DTR, and the pump's settle after
+    // it is kept: it costs a quarter of a second once, and the gate is the
+    // same rule for every image. See `usb_log::pump`.
+    let pump = usb_log::pump(&mut log, usb_log::vendor_log_listening);
 
     // The Bluetooth controller, unconditionally: the product image does not
     // wait for a keystroke. The stall guard stays, because a controller that

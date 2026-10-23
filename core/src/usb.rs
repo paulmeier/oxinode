@@ -215,3 +215,58 @@ mod drain_gate {
         assert!(!gate.poll(true, 10));
     }
 }
+
+/// The RNode image's log interface: vendor-specific, so the host binds no
+/// serial driver to it and the board shows exactly one `tty`.
+///
+/// Two CDC functions share one USB serial number, and `rnodeconf` reopens a
+/// reset nRF52 on the *first* port pyserial lists with that number. On macOS
+/// that order is IOKit's, not the ports' names: measured on 2026-10-23 with
+/// both boards attached, one board listed its KISS port first and the other
+/// its log port first, and the second answered a KISS detect with defmt bytes
+/// (issue #22). With one `tty` per board there is nothing to choose between.
+///
+/// Matched by class, subclass and protocol together, so the host tool
+/// (`tools/log_reader.py`) finds it without knowing the interface number.
+pub const LOG_INTERFACE_CLASS: u8 = 0xFF;
+pub const LOG_INTERFACE_SUBCLASS: u8 = 0x6F; // 'o'
+pub const LOG_INTERFACE_PROTOCOL: u8 = 0x01;
+
+/// The vendor control request, addressed to the log interface, that stands in
+/// for DTR: `wValue` 1 when a reader starts, 0 when it stops.
+///
+/// A bulk IN endpoint has no line state, and without a gate the pump would
+/// drain the whole of boot into an endpoint nobody polls. The reader says when
+/// it is listening, and [`DrainGate`] treats that exactly as it treats DTR.
+pub const LOG_REQUEST_ATTACH: u8 = 0x01;
+
+/// What a vendor control request to the log interface means for the gate:
+/// `Some(listening)` for an attach or detach, `None` for anything else, which
+/// the firmware rejects.
+pub fn log_attach_request(request: u8, value: u16) -> Option<bool> {
+    match (request, value) {
+        (LOG_REQUEST_ATTACH, 0) => Some(false),
+        (LOG_REQUEST_ATTACH, 1) => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod log_interface {
+    use super::*;
+
+    #[test]
+    fn attach_and_detach_are_the_only_requests() {
+        assert_eq!(log_attach_request(LOG_REQUEST_ATTACH, 1), Some(true));
+        assert_eq!(log_attach_request(LOG_REQUEST_ATTACH, 0), Some(false));
+        assert_eq!(log_attach_request(LOG_REQUEST_ATTACH, 2), None);
+        assert_eq!(log_attach_request(0x00, 1), None);
+        assert_eq!(log_attach_request(0x22, 1), None); // CDC SET_CONTROL_LINE_STATE
+    }
+
+    /// Not a class any host has a driver for, or the second `tty` comes back.
+    #[test]
+    fn the_class_is_vendor_specific() {
+        assert_eq!(LOG_INTERFACE_CLASS, 0xFF);
+    }
+}

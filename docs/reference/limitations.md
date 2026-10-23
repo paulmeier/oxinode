@@ -75,10 +75,6 @@ has to rediscover it.
 
 ## Interoperability quirks
 
-- **`rnodeconf` may pick the wrong port after a reset.** Both CDC ports share
-  the USB serial number and the order is not stable, so `--rom` can end with
-  *Could not download EEPROM from device* after succeeding. `rnodeconf -i`
-  shows the truth. See [Using it with Reticulum](../getting-started/reticulum.md).
 - **`rnodeconf -i` reports the band and power from its own table** for model
   `0xff`, not from the device. The firmware enforces the real limits.
 - **`CMD_HASHES` for the running firmware's hash is not answered**, so
