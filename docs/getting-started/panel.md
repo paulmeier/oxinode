@@ -27,7 +27,10 @@ gesture, and the next gesture wakes it (and is otherwise swallowed).
 
 ## The screens
 
-**Home.** Which host has the line (`USB`, `Bluetooth`, or `none`), whether anything
+**Home.** Which host has the line (`USB`, `Bluetooth`, or `none`); in an image
+with the node, whether the board is that host's `RNode`, a `node` of its own,
+or neither for want of a stored configuration (`no radio config`; *Save
+Config* on the Radio screen is the cure); whether anything
 has been said in the last ten seconds, what the radio is doing, packets in and
 out, the last packet's RSSI and SNR, uptime, the battery, and what the charger
 is doing (`charging`, `full`, `unplugged`, `fault`, `latched off`). The
@@ -150,6 +153,11 @@ one is there, any action that would change the radio (an edit, *Radio
 On/Off*, *Reset Config*) opens a notice saying which host has it and does
 nothing else. A terminal left open on the KISS port counts as a host, and the
 notice says so.
+
+This is the panel's test, and it is stricter than the one that decides
+whether an image with the node runs as a node: that needs a host to have
+spoken, not just the port to be open. See
+[The interface](../architecture/interface.md#two-modes-a-hosts-rnode-or-a-node-of-its-own).
 
 With nobody on the line the panel is a controller, and the edit goes through
 the same setters and validation a host gets. What the panel may do under a

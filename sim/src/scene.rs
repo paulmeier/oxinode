@@ -21,8 +21,10 @@ use oxinode_core::battery;
 use oxinode_core::edit::Editor;
 use oxinode_core::gps;
 use oxinode_core::lr1121::config::{ConfigError, RadioConfig, BENCH_2G4, DEFAULT};
+use oxinode_core::rnode::hosts::Transport;
 use oxinode_core::screens::{
-    self, Air, BluetoothScreen, Home, Host, Identity, NodeHashes, Position, Radio, State, System,
+    self, Air, BluetoothScreen, Home, Host, Identity, Mode, NodeHashes, Position, Radio, State,
+    System,
 };
 use oxinode_core::sh1107::Frame;
 use oxinode_core::status::Bluetooth;
@@ -77,6 +79,7 @@ pub fn populated() -> State {
         name: Some(*b"7F23"),
         home: Home {
             host: Host::Usb,
+            mode: Some(Mode::Rnode(Transport::Usb)),
             talking: true,
             air: Air::Receiving,
             rx_count: 42,
@@ -173,12 +176,14 @@ pub fn searching() -> State {
 }
 
 /// The populated board with nobody on the line: a TNC running on its own,
-/// which is the case the editors exist for. Same numbers, so the editors open
-/// on values a person would recognise from the other pictures.
+/// which is the case the editors exist for, and in an image with the node a
+/// node of its own. Same numbers, so the editors open on values a person
+/// would recognise from the other pictures.
 pub fn standalone() -> State {
     let mut state = populated();
     state.home.host = Host::None;
     state.home.talking = false;
+    state.home.mode = Some(Mode::Node);
     state.radio.tnc = true;
     state
 }
@@ -463,6 +468,7 @@ mod tests {
         assert_eq!(Fixture::named("full"), None);
         assert_eq!(standalone().home.host, Host::None);
         assert!(standalone().radio.tnc);
+        assert_eq!(standalone().home.mode, Some(Mode::Node));
         assert_eq!(standalone().radio.config, populated().radio.config);
         // The other band's board is the standalone one on 2478 MHz, and the
         // configuration it holds is one the radio accepts.

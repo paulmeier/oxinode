@@ -8,28 +8,33 @@
 //!
 //! Without the `node` feature, [`Listener`] is still here and does nothing,
 //! so the modem loop is the same code in both builds and the RNode image
-//! links no stack. Who the host is comes as a closure rather than a value
-//! for the same reason: reading it is two loads the compiler may not drop,
-//! and the RNode should not pay for a question nobody asks.
+//! links no stack. What the loop saw comes as a closure rather than a value
+//! for the same reason: reading it is loads the compiler may not drop, and
+//! the RNode should not pay for a question nobody asks.
 //!
-//! # When it listens
+//! # When it runs
 //!
-//! Only while no host is attached: nobody has the KISS port open and no
-//! phone is connected. With a host, the host is the node and the board is
-//! its RNode, and nothing here runs, so a host sees the RNode it always saw,
-//! timing included. A packet still goes to the host exactly as before; the
-//! listener is handed a copy only when there is no host to give it to.
-//! Exactly what "attached" means, and the handover in both directions, are
-//! settled with the standalone mode itself; this uses the panel's existing
-//! notion of a host until then.
+//! Only in [`Mode::Node`]: no host has spoken, or the last one has been gone
+//! for a few seconds, and a configuration is stored. The rule, and why it
+//! is that rule, is [`oxinode_core::mode`]. With a host, the host is the node
+//! and the board is its RNode, and nothing here runs, so a host sees the
+//! RNode it always saw, timing included. A packet still goes to the host
+//! exactly as before; the listener is handed a copy only when the board is a
+//! node.
+//!
+//! The listener says when the mode changes, and the modem loop acts on it:
+//! when the last host has gone and a configuration is stored, the radio goes
+//! back to that configuration, as it does at boot, because the host may have
+//! left it on its own or switched it off on the way out.
 //!
 //! An announce takes the engine about 43 ms to verify, and the modem loop
 //! waits for it. With no host that delays nothing but the panel.
 
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::Peri;
+use oxinode_core::mode::{Change, Mode, Seen};
 use oxinode_core::rnode::air::Signal;
-use oxinode_core::screens::{Host, NodeHashes};
+use oxinode_core::screens::NodeHashes;
 
 use crate::store::{RecordFlash, Storage};
 
@@ -44,6 +49,7 @@ mod imp {
     use embassy_nrf::rng::Rng;
     use embassy_time::Instant;
     use embedded_alloc::LlffHeap as Heap;
+    use oxinode_core::mode::Presence;
     use oxinode_core::node::key::{NodeKey, Stored};
     use oxinode_core::node::{Entropy, Node, Outcome, TICK_MS};
 
@@ -68,10 +74,13 @@ mod imp {
     /// How much more heap than the last report it takes to report again.
     const PEAK_STEP: usize = 1024;
 
-    /// The node, once it has its identity, and when it last ran its
-    /// housekeeping.
+    /// The node, once it has its identity; whether it may run; and when it
+    /// last ran its housekeeping.
     pub struct Listener {
         node: Option<Node>,
+        presence: Presence,
+        /// Whether a configuration was stored at the last look.
+        stored_config: bool,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
@@ -109,6 +118,8 @@ mod imp {
 
             Self {
                 node: None,
+                presence: Presence::new(),
+                stored_config: false,
                 entropy: Entropy::from_seed(seed),
                 last_tick_ms: now_ms(),
                 reported_peak: 0,
@@ -171,33 +182,72 @@ mod imp {
             self.node.as_ref().map(Node::hashes)
         }
 
+        /// What the modem loop saw on this pass, and whether a configuration
+        /// is stored. Says when the board changes from one mode to the other.
+        pub fn observe(
+            &mut self,
+            seen: impl FnOnce() -> Seen,
+            stored_config: bool,
+        ) -> Option<Change> {
+            self.stored_config = stored_config;
+            let change = self.presence.update(now_ms(), seen())?;
+            match change {
+                Change::HostArrived(transport) => defmt::info!(
+                    "node: a host spoke over {=str}; the board is its RNode",
+                    transport_name(transport)
+                ),
+                Change::HostLeft if stored_config => defmt::info!(
+                    "node: no host for {=u64} ms; the board is a node, on its stored configuration",
+                    oxinode_core::mode::HOLD_MS
+                ),
+                Change::HostLeft => defmt::info!(
+                    "node: no host for {=u64} ms, and no stored configuration to be a node on",
+                    oxinode_core::mode::HOLD_MS
+                ),
+            }
+            // The engine's housekeeping has been on hold; it starts again
+            // from now rather than catching up.
+            self.last_tick_ms = now_ms();
+            Some(change)
+        }
+
+        /// Which of the two the board is, for the Home screen.
+        pub fn mode(&self) -> Option<Mode> {
+            Some(self.presence.mode(self.stored_config))
+        }
+
+        /// Whether the node may run now.
+        fn running(&self) -> bool {
+            self.presence.mode(self.stored_config).is_node()
+        }
+
         /// A packet came off the air and went wherever it goes.
-        pub fn heard(&mut self, packet: &[u8], signal: Signal, host: impl FnOnce() -> Host) {
+        pub fn heard(&mut self, packet: &[u8], signal: Signal) {
+            if !self.running() {
+                return;
+            }
             let Some(node) = self.node.as_mut() else {
                 return;
             };
-            if host() != Host::None {
-                return;
-            }
             let out = node.heard(packet, Some(signal), now_ms(), &mut self.entropy);
             self.report(out);
         }
 
         /// Called on every pass of the modem loop; runs the engine's
         /// housekeeping as often as it asks for it.
-        pub fn tick(&mut self, host: impl FnOnce() -> Host) {
-            let Some(node) = self.node.as_mut() else {
-                return;
-            };
-            if host() != Host::None {
+        pub fn tick(&mut self) {
+            if !self.running() {
                 return;
             }
             let now = now_ms();
             if now.saturating_sub(self.last_tick_ms) < TICK_MS {
                 return;
             }
-            self.last_tick_ms = now;
+            let Some(node) = self.node.as_mut() else {
+                return;
+            };
             let out = node.tick(now, &mut self.entropy);
+            self.last_tick_ms = now;
             self.report(out);
         }
 
@@ -237,6 +287,13 @@ mod imp {
 
     fn now_ms() -> u64 {
         Instant::now().as_millis()
+    }
+
+    fn transport_name(transport: oxinode_core::rnode::hosts::Transport) -> &'static str {
+        match transport {
+            oxinode_core::rnode::hosts::Transport::Usb => "USB",
+            oxinode_core::rnode::hosts::Transport::Bluetooth => "Bluetooth",
+        }
     }
 
     /// `rns-core`'s log lines, in the defmt log.
@@ -316,8 +373,22 @@ impl Listener {
     }
 
     #[inline(always)]
-    pub fn heard(&mut self, _packet: &[u8], _signal: Signal, _host: impl FnOnce() -> Host) {}
+    pub fn observe(
+        &mut self,
+        _seen: impl FnOnce() -> Seen,
+        _stored_config: bool,
+    ) -> Option<Change> {
+        None
+    }
 
     #[inline(always)]
-    pub fn tick(&mut self, _host: impl FnOnce() -> Host) {}
+    pub fn mode(&self) -> Option<Mode> {
+        None
+    }
+
+    #[inline(always)]
+    pub fn heard(&mut self, _packet: &[u8], _signal: Signal) {}
+
+    #[inline(always)]
+    pub fn tick(&mut self) {}
 }

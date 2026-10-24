@@ -178,6 +178,47 @@ stored, because the host sets its configuration again on every connect. The
 stored configuration is the `CONF_*` bytes of the EEPROM image that
 `rnodeconf --tnc` writes; the panel did not need a second home for it.
 
+## Two modes: a host's RNode, or a node of its own
+
+An image built with `node` is one more thing besides: with nobody on the
+line it is a Reticulum node of its own, with its own identity. Which of the
+two it is gets decided in `oxinode_core::mode`, and is on the Home screen as
+`Mode`:
+
+| `Mode` | When | What runs |
+|---|---|---|
+| `RNode` | a host has spoken, on USB or over Bluetooth | the RNode, exactly as an image without the node; the node does nothing |
+| `node` | no host, and a configuration is stored | the node, on the stored configuration |
+| `no radio config` | no host, and nothing stored | neither; the radio is left as the host left it |
+
+**A host is present once it has sent a KISS frame**, not merely once the port
+is open: every real host speaks at once (`RNodeInterface` sends a detect when
+it opens the port, Sideband as soon as the link is up), so this costs nothing,
+and it rules out a computer the board is only charging from, a terminal left
+open on the port, and a bonded phone in range that has not connected. That
+makes it a different test from the ownership rule above, on purpose: a silent
+terminal still locks the panel's editors, which is the safe answer about who
+owns the radio, but it does not stop the board being a node, which would be
+the useless one. So `Host` and `Mode` can disagree, and `Host USB` with
+`Mode node` means exactly that.
+
+**A host arrives with its first frame and leaves slowly.** The node gives way
+on the pass that frame arrives in. A host is gone when, on USB, the bus goes
+(the cable, or the computer asleep) or DTR falls after having been up, which
+is what closing the port does, and over Bluetooth when the link drops. It has
+to stay gone for three seconds (`HOLD_MS`) before the board is a node again,
+so a cable knocked out and pushed back, or `rnsd` restarted, finds the board
+still its RNode. After that it is forgotten, and coming back means speaking
+again.
+
+**The node uses only a stored configuration.** Standalone, the radio runs on
+the configuration TNC mode keeps, the one `rnodeconf --tnc` or *Save Config*
+stored, and when the last host leaves the radio goes back to it, as it does at
+boot, because the host may have left it on its own settings or switched it off
+on its way out (`RNodeInterface` sends `CMD_LEAVE`). A board with nothing
+stored has no configuration anybody chose for it to be a node on, so the node
+does not run and nothing touches the radio.
+
 ## Redraw stays incremental
 
 The modem loop's `Ui` holds two frames: `live`, which is what the controller

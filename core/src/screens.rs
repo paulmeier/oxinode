@@ -40,6 +40,7 @@ use crate::edit::{Editor, Field, Lock, BAND_2G4, BAND_SUB_GHZ, FREQ_POINT};
 use crate::gps;
 use crate::lr1121::config::{ConfigError, RadioConfig};
 use crate::lr1121::pa;
+pub use crate::mode::Mode;
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
 use crate::rnode::store::MAX_BONDS;
 use crate::status::{Bluetooth as Link, Text};
@@ -115,6 +116,10 @@ impl Host {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Home {
     pub host: Host,
+    /// Whether the board is a host's RNode or a node of its own, in an image
+    /// with the node. `None` is an image without one, which is always an
+    /// RNode and draws no row for it.
+    pub mode: Option<Mode>,
     /// A frame passed between the modem and its host in the last few seconds.
     /// Meaningless with no host, and not drawn then.
     pub talking: bool,
@@ -491,6 +496,9 @@ impl Home {
                 Host::Bluetooth => "Bluetooth",
             },
         );
+        if let Some(mode) = self.mode {
+            out.row("Mode", mode.word());
+        }
         out.row(
             "Link",
             match (self.host, self.talking) {
@@ -1132,6 +1140,7 @@ pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rnode::hosts::Transport;
     use crate::sh1107::{self, Frame};
     use crate::ui::{Input, Screen, LAYOUT};
 
@@ -1141,6 +1150,7 @@ mod tests {
             name: Some(*b"7F23"),
             home: Home {
                 host: Host::Usb,
+                mode: Some(Mode::Rnode(Transport::Usb)),
                 talking: true,
                 air: Air::Receiving,
                 rx_count: 42,
@@ -1470,8 +1480,10 @@ mod tests {
     #[test]
     fn changing_any_field_changes_a_line() {
         type Mutation = (&'static str, fn(&mut State));
-        let mutations: [Mutation; 33] = [
+        let mutations: [Mutation; 35] = [
             ("host", |s| s.home.host = Host::Bluetooth),
+            ("mode", |s| s.home.mode = Some(Mode::Node)),
+            ("no node", |s| s.home.mode = None),
             ("talking", |s| s.home.talking = false),
             ("home air", |s| s.home.air = Air::Off),
             ("rx", |s| s.home.rx_count += 1),

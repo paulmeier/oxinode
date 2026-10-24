@@ -107,6 +107,7 @@ use oxinode_core::ble as interop;
 use oxinode_core::edit::Editor;
 use oxinode_core::lr1121::config::{ValidConfig, DEFAULT};
 use oxinode_core::lr1121::csma::Backoff;
+use oxinode_core::mode::{Change, Mode, Seen};
 use oxinode_core::rnode::air::{self, Reassembler, Sequence, Split};
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
@@ -940,6 +941,9 @@ where
             Either3::Second(n) => (&ble_buf[..*n], &mut ble_decoder, Transport::Bluetooth),
             Either3::Third(_) => (&usb_buf[..0], &mut decoder, Transport::Usb),
         };
+        // Which transports a host spoke on this pass, for the node's rule
+        // about who is present; see `oxinode_core::mode`.
+        let (mut usb_spoke, mut phone_spoke) = (false, false);
         for &byte in bytes {
             match dec.feed(byte) {
                 kiss::Step::Pending => {}
@@ -948,6 +952,10 @@ where
                 }
                 kiss::Step::Frame => {
                     last_host_frame = Some(Instant::now());
+                    match via {
+                        Transport::Usb => usb_spoke = true,
+                        Transport::Bluetooth => phone_spoke = true,
+                    }
                     let command = command::decode(dec.command(), dec.payload());
                     match protocol.handle(command, hosts.outbox(via)) {
                         // Not a radio action, and not "write it out now"
@@ -1040,7 +1048,7 @@ where
                                 heard(&mut air_in, &mut protocol, &report, &rx_buf, listener)
                             {
                                 last_host_frame = Some(Instant::now());
-                                node.heard(packet.payload, packet.signal, || host_of(control));
+                                node.heard(packet.payload, packet.signal);
                             }
                             led.on();
                         }
@@ -1067,7 +1075,36 @@ where
             }
         }
 
-        node.tick(|| host_of(control));
+        // Whether the board is a host's RNode or a node of its own. When the
+        // last host has gone and a configuration is stored, the radio goes
+        // back to it, as at boot: the host may have left it on its own
+        // settings, or switched it off on its way out.
+        let seen = || Seen {
+            usb_bus: usb_log::bus_active(),
+            usb_dtr: control.dtr(),
+            usb_frame: usb_spoke,
+            ble_link: phone_connected(),
+            ble_frame: phone_spoke,
+        };
+        if node.observe(seen, protocol.is_tnc()) == Some(Change::HostLeft) && protocol.is_tnc() {
+            let resume = protocol.resume_stored_config();
+            act(
+                dev,
+                irq,
+                &mut protocol,
+                resume,
+                &mut applied,
+                &mut receiving,
+                &mut hosts,
+                Transport::Usb,
+                &mut rx_buf,
+                &mut last_signal,
+                &mut air_in,
+                &mut sequence,
+            )
+            .await;
+        }
+        node.tick();
 
         // Gestures from the pad go to the navigator; what it hands back is
         // done here, where the storage and the panel are.
@@ -1129,6 +1166,7 @@ where
                         &protocol,
                         air_of(&protocol, receiving),
                         host_of(control),
+                        node.mode(),
                         is_talking(last_host_frame),
                         last_signal,
                         battery.read().await,
@@ -1602,6 +1640,7 @@ where
                         &protocol,
                         Air::NoRadio,
                         host_of(control),
+                        None,
                         is_talking(last_host_frame),
                         None,
                         battery.read().await,
@@ -1911,6 +1950,7 @@ impl Facts {
         protocol: &Protocol,
         air: Air,
         host: Host,
+        mode: Option<Mode>,
         talking: bool,
         last_signal: Option<(i16, i8)>,
         battery: Option<oxinode_core::battery::Reading>,
@@ -1922,6 +1962,7 @@ impl Facts {
             name: Some(self.tag),
             home: screens::Home {
                 host,
+                mode,
                 talking,
                 air,
                 rx_count,
