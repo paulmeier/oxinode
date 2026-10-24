@@ -59,11 +59,16 @@ has to rediscover it.
   or leaves it with a propagation node, reaches nothing on the board, and the
   log says a packet came that the board does not read. That is
   [#67](https://github.com/paulmeier/oxinode/issues/67).
-- **Received messages are held in RAM, sixteen of them, and not yet shown.**
-  A reboot loses them ([#65](https://github.com/paulmeier/oxinode/issues/65)),
-  and when a seventeenth comes the oldest one read goes, or the oldest if
-  none has been. The Home screen counts the unread; reading them, and with
-  that marking them read, is the conversation screens' ([#62](https://github.com/paulmeier/oxinode/issues/62)).
+- **Received messages are held in RAM, sixteen of them in all.** A reboot
+  loses them ([#65](https://github.com/paulmeier/oxinode/issues/65)), and
+  when a seventeenth comes the oldest one read goes, or the oldest if none
+  has been; a conversation whose messages have all gone leaves the Messages
+  screen.
+- **A thread shows only what the board received.** The board cannot send
+  yet, so the reply menu is *Back* alone and no message in a thread is the
+  board's own ([#63](https://github.com/paulmeier/oxinode/issues/63),
+  [#64](https://github.com/paulmeier/oxinode/issues/64)). The thread draws
+  the four states a sent message will have; the simulator shows them.
 - **What a message carries beyond its title and text is not shown.** An
   image, a file, a voice message or telemetry is recorded as "has an
   attachment", and the attachment itself is not kept. Formatted content

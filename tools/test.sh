@@ -133,7 +133,13 @@ done
 # without leaving room for a dependency bump to eat the headroom unnoticed. Raising one is a
 # deliberate change, with the reason, in the change that needs it. See
 # docs/hardware/memory-layout.md.
-NODE_MAX_FLASH=589824   # 576 KiB of the 784 KiB the bootloader leaves
+#
+# Raised from 576 KiB on 2026-10-24 by the conversation screens (#62): the
+# image went from 583,280 to 593,384 bytes, 10,104 of them the thread's
+# layout and wrapping, the windowed page and the loop's part. 608 KiB leaves
+# about 29 KB, room for sending (#63) and no more; the store (#65) and text
+# entry (#66) make their own case.
+NODE_MAX_FLASH=622592   # 608 KiB of the 784 KiB the bootloader leaves
 NODE_MAX_RAM=131072     # 128 KiB of 256 KiB; the stack has the rest
 step "build firmware (ble + node: rnode)"
 try cargo build --release --no-default-features --features ble,node --bin rnode \

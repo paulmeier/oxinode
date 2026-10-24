@@ -35,8 +35,9 @@ worth testing are testable somewhere else:
   sentences; every screen's lines from a populated and an empty state; the
   editor's steppers and refusals; and the incremental redraw.
 - **`oxinode-sim`** renders every screen, menu item, editor, refusal and
-  notice and compares each against a committed PNG under `sim/golden/`, at
-  128 × 128 and again at 128 × 64. The pixel assertions in the core say where
+  notice, and in the node's set every conversation case, and compares each
+  against a committed PNG under `sim/golden/`, at 128 × 128 and again at
+  128 × 64. The pixel assertions in the core say where
   nothing is drawn; a golden image says what it looks like.
 - **The host tooling** (UF2 writer, `memory.x` reader, image checker, flash
   runner) is tested directly with `unittest`. The checker's tests mostly feed

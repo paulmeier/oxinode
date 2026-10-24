@@ -2,9 +2,11 @@
 
 A small on-device interface for monochrome panels: screens with a title and
 an icon, a strip of those icons along the foot saying where you are, a popup
-menu of actions over each, scrolling content, and a third level the
-application opens when one value needs editing. It draws with its own 5 × 7
-font onto anything that can set a pixel, and it depends on nothing.
+menu of actions over each, scrolling content, lists to pick from, and two
+levels the application opens over a screen: a modal when one value needs
+editing, and a detail for something longer than a screen. It draws with its
+own 5 × 7 font onto anything that can set a pixel, and it depends on
+nothing.
 
 It came out of [oxinode](https://github.com/paulmeier/oxinode), a LoRa modem
 firmware, where it was written as pure code so it could be tested on the host
@@ -27,6 +29,12 @@ device wants it.
 * **Optionally, a `Modal`.** Something you open over a screen that takes
   the keys until it is done -- an editor, a notice. `NoModal` if you have
   none.
+* **Optionally, lists and a `Detail`.** A screen with `open` set is a list:
+  up and down move a highlight over its lines and select hands `open` back
+  for the highlighted one. A `Detail` is something you open over a screen
+  that is browsed like one and is longer than one -- a conversation, a log
+  -- with its own title, scroll and menu, left and right moving it by its
+  parts; `page_of` draws a window of it. `NoDetail` if you have none.
 
 ```rust
 use monopanel::{page, Bitmap, Input, Item, Nav, Screen};
@@ -40,12 +48,14 @@ static SCREENS: [Screen<Act>; 2] = [
         menu_title: "Home Action",
         icon: [0x78, 0x7c, 0x06, 0x77, 0x06, 0x7c, 0x78],
         menu: &[Item::BACK, Item::new("Beep", Act::Beep)],
+        open: None,
     },
     Screen {
         title: "System",
         menu_title: "System Action",
         icon: [0x1c, 0x3e, 0x77, 0x22, 0x77, 0x3e, 0x1c],
         menu: &[Item::BACK, Item::new("Reboot", Act::Reboot)],
+        open: None,
     },
 ];
 

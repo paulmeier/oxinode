@@ -14,9 +14,9 @@ alias sim='cargo run -q -p oxinode-sim --target "$(rustc -vV | sed -n "s/^host: 
 ```
 
 ```
-oxinode-sim render [--script S] [--state F] [--panel WxH] [--text] -o out.png
-oxinode-sim steps  [--script S] [--state F] [--panel WxH] --out DIR
-oxinode-sim tty    [--script S] [--state F] [--braille | --half]
+oxinode-sim render [--script S] [--state F] [--conversation C] [--panel WxH] [--text] -o out.png
+oxinode-sim steps  [--script S] [--state F] [--conversation C] [--panel WxH] --out DIR
+oxinode-sim tty    [--script S] [--state F] [--conversation C] [--braille | --half]
 oxinode-sim golden [--update] [--dir DIR] [--diff DIR]
 oxinode-sim raw    FILE -o out.png
 ```
@@ -56,7 +56,7 @@ sim tty
 ## What the screens draw from
 
 The screens draw from a `State`, the same plain values the board copies out
-of its modem loop, and the simulator has four fixtures for it:
+of its modem loop, and the simulator has five fixtures for it:
 
 | `--state` | What it is |
 |---|---|
@@ -64,6 +64,7 @@ of its modem loop, and the simulator has four fixtures for it:
 | `empty` | a board that knows nothing yet, so every screen shows how it says so |
 | `standalone` | a TNC with no host attached, which is the one whose settings the panel may change |
 | `2g4` | that TNC on the other band: 2478 MHz, 812.5 kHz, 11 dBm on the u.FL |
+| `conversation` | that TNC with the bundled conversations, some unread |
 
 The populated Radio screen is longer than the panel, which is what exercises
 scrolling and the scrollbar:
@@ -71,6 +72,25 @@ scrolling and the scrollbar:
 ```bash
 sim render --script "right down*3" -o radio-scrolled.png
 sim render --state empty --script "right*4" -o system-empty.png
+```
+
+## Conversations
+
+In an image with the node, the Messages screen and a thread draw from
+conversations written down one message a line, in
+`sim/conversations/bench.txt`; its header gives the format. The bundled set
+has the bench peer's message from the node's test vectors, a reply in every
+state a sent message can be in, a sender not yet verified, a long message,
+a long thread and characters the font lacks. The scene opens the
+highlighted conversation as the board does, and marks read what the thread
+shows. `--conversation FILE` puts another file's conversations on the
+standalone board instead, so one seen on the bench can be written down and
+looked at again:
+
+```bash
+alias simn='cargo run -q -p oxinode-sim --target "$(rustc -vV | sed -n "s/^host: //p")" --features node --'
+simn render --state conversation --script "right select" -o thread.png
+simn tty --conversation my-conversation.txt
 ```
 
 ## Editing a setting

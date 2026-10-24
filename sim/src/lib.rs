@@ -25,7 +25,8 @@
 //!   image says what it looks like. The set is drawn at both panel sizes.
 //!
 //! [`text`] and [`tty`] are the terminal mode: block-character rendering and
-//! arrow keys, for exploring rather than asserting.
+//! arrow keys, for exploring rather than asserting. [`conversation`] is the
+//! messages the Messages screen and a thread draw from, written down.
 //!
 //! # What it does not cover
 //!
@@ -34,6 +35,7 @@
 //! supplied by the caller here exactly as it is on the board. Those need
 //! hardware, and the simulator should not be trusted past its evidence.
 
+pub mod conversation;
 pub mod golden;
 pub mod image;
 pub mod panel;

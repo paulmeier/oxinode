@@ -2,9 +2,10 @@
 //!
 //! Screens with a title and an icon, a strip of those icons along the foot
 //! of the panel saying where you are, a popup menu of actions over each,
-//! scrolling content, and a third level the application can open when one
-//! value needs editing. It draws with its own 5 × 7 font onto anything that
-//! can set a pixel, and it depends on nothing.
+//! scrolling content, lists to pick from, and two levels the application can
+//! open over a screen: a modal when one value needs editing, and a detail
+//! for something longer than a screen. It draws with its own 5 × 7 font onto
+//! anything that can set a pixel, and it depends on nothing.
 //!
 //! It came out of a LoRa modem's firmware, where it was written as pure code
 //! so it could be tested on the host and held to golden images by a
@@ -26,6 +27,11 @@
 //!   there are more.
 //! * **Optionally, a [`Modal`].** Something the application opens over a
 //!   screen that takes the keys until it is done: an editor, a notice.
+//! * **Optionally, lists and a [`Detail`].** A screen whose
+//!   [`Screen::open`] is set is a list: select hands that action back for
+//!   the highlighted line. A detail is opened over a screen, browsed like
+//!   one and longer than one -- a conversation, a log -- and [`page_of`]
+//!   draws a window of it.
 //!
 //! Everything about *where* things go is a [`Layout`] derived from the
 //! canvas size, so the same page lands on a 128 × 128 panel and a 128 × 64
@@ -45,12 +51,14 @@
 //!         menu_title: "Home Action",
 //!         icon: [0x78, 0x7c, 0x06, 0x77, 0x06, 0x7c, 0x78],
 //!         menu: &[Item::BACK, Item::new("Beep", Act::Beep)],
+//!         open: None,
 //!     },
 //!     Screen {
 //!         title: "System",
 //!         menu_title: "System Action",
 //!         icon: [0x1c, 0x3e, 0x77, 0x22, 0x77, 0x3e, 0x1c],
 //!         menu: &[Item::BACK, Item::new("Reboot", Act::Reboot)],
+//!         open: None,
 //!     },
 //! ];
 //!
@@ -88,6 +96,11 @@ pub mod nav;
 pub mod eg;
 
 pub use canvas::{Bitmap, Canvas, Readable};
-pub use draw::{draw_icon, icon_bar, menu, menu_window, page, scrollbar, title_bar};
+pub use draw::{
+    draw_icon, icon_bar, menu, menu_of, menu_window, page, page_of, scrollbar, title_bar, Content,
+};
 pub use layout::Layout;
-pub use nav::{Icon, Input, Item, Modal, Nav, NoModal, Outcome, Screen, ICON_CELL, ICON_H, ICON_W};
+pub use nav::{
+    Detail, Icon, Input, Item, Modal, Nav, NoDetail, NoModal, Outcome, Screen, ICON_CELL, ICON_H,
+    ICON_W,
+};

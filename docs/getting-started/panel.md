@@ -1,24 +1,25 @@
 # The panel
 
 The Super IO's 128 × 128 OLED and six-switch navigation pad give the board an
-interface of its own. Five screens sit side by side; each has a menu of
-actions; and the Radio screen's menu opens an editor for every parameter a
-host can set.
+interface of its own. Five screens sit side by side (seven in an image with
+the node); each has a menu of actions; the Radio screen's menu opens an
+editor for every parameter a host can set; and in an image with the node, the
+Messages screen opens the thread with each peer.
 
 ## Getting around
 
-| Switch | On a screen | In a menu | In an editor |
-|---|---|---|---|
-| left / right | previous / next screen | (ignored) | move the cursor (frequency only) |
-| up / down | scroll the screen | move the highlight | step or change the value |
-| OK | open the menu | pick the item | confirm |
-| back | (nothing) | close the menu | cancel |
+| Switch | On a screen | On Messages | In a thread | In a menu | In an editor |
+|---|---|---|---|---|---|
+| left / right | previous / next screen | previous / next screen | previous / next message | (ignored) | move the cursor (frequency only) |
+| up / down | scroll the screen | move the highlight | scroll a line | move the highlight | step or change the value |
+| OK | open the menu | open the thread | open the reply menu | pick the item | confirm |
+| back | (nothing) | (nothing) | back to Messages | close the menu | cancel |
 
 Held directions auto-repeat after 400 ms at eight steps a second. OK and back
 do not repeat: an action chosen once is chosen once. A notice closes on any
 key.
 
-The bottom of every screen is a strip of five icons saying where you are; the
+The bottom of every screen is a strip of icons, one a screen, saying where you are; the
 top is a title bar with the screen's name, the battery percentage on the left
 and the board's name on the right: the four hex digits that end the name it
 advertises, so two boards on a table can be told apart. A screen with more lines
@@ -42,7 +43,36 @@ has, so it does not flicker between two numbers. Menu: *Sleep Screen*,
 board as soon as the announce budget allows (under a host it opens the same
 notice a radio edit does).
 
-**Peers**, in an image with the node only, next to Home. Who else is
+**Messages**, in an image with the node only, next to Home. One line for
+each peer the board has a conversation with, the one with the newest
+message first: a `*` if something in it has not been read, the peer's name
+(or the start of its address, as on Peers), and how long ago the last
+message was. The highlighted line is knocked out of a bar; up and down move
+it, and OK opens that peer's thread. With no conversations yet, the screen
+says so and OK does nothing. Menu: none, since OK opens the thread.
+
+**A thread** is the conversation with one peer, titled *Thread*, oldest at
+the top and newest at the bottom. It opens at the first message not yet
+read, or at the end if everything has been. Each message is a header line,
+then its text wrapped to the width of the panel at word boundaries and at
+its own line breaks, never cut off: a message longer than the screen is
+scrolled through. A received message's header is the sender's name and its
+age, and its text starts at the left edge. A sent one's header is `You`,
+where it has got to (`queued`, `sent`, `delivered` or `failed`) and its age,
+and its text is set in by two spaces, so the two are told apart by where
+they stand. A sender whose key the board has not heard is marked
+`(unverified sender)` under the header, and one whose key did not sign the
+message `(bad signature)`. An attachment shows as `(attachment)`. Up and
+down scroll a line; left and right jump to the previous or next message;
+back returns to Messages on the line it was opened from. A message is read
+once the lit panel has shown its last line, and Home's count and the `*`
+on Messages follow. OK opens the reply menu, which has only *Back* until
+the board can send
+([#63](https://github.com/paulmeier/oxinode/issues/63),
+[#64](https://github.com/paulmeier/oxinode/issues/64)). Under a host the
+screens read the same way: they only show what the board has.
+
+**Peers**, in an image with the node only, after Messages. Who else is
 around: every Sideband, MeshChat or oxinode the board has heard announce an
 LXMF address, the one heard most recently first. Two lines each: the name
 from its announce and how long ago it was heard; then the signal of that
@@ -52,14 +82,13 @@ shows the start of its address in angle brackets, `<3b079e41d2>`, and a
 character the font cannot draw shows as a box. The board keeps sixteen
 peers, in RAM until a reboot; when a seventeenth is heard, the one heard
 longest ago goes, unless every peer has sent the board a message, in which
-case the newcomer is not kept. Menu: only *Back* for now; messaging a peer
-comes with conversations.
+case the newcomer is not kept. Menu: only *Back* for now; writing to a peer
+comes with sending ([#63](https://github.com/paulmeier/oxinode/issues/63)).
 
 **A message arriving** lights the panel if it was out, and keeps it lit for
 the same minute a press would. The first press after that acts as usual;
-only a press made while the panel is out is taken as waking it. The
-messages themselves are shown by the conversation screens, which come next
-([#62](https://github.com/paulmeier/oxinode/issues/62)).
+only a press made while the panel is out is taken as waking it. A thread
+that is open when a message arrives shows it at the bottom.
 
 The punctuation a phone types in place of plain ASCII is drawn as the ASCII
 it stands for: curly quotes as `'`, dashes and the minus sign as `-`, an

@@ -17,12 +17,19 @@
 //!
 //! # The navigation model
 //!
-//! Two levels and one exception, because a small panel with a deep tree on
+//! Two levels and two exceptions, because a small panel with a deep tree on
 //! it is a maze:
 //!
 //! * **Browsing.** Left and right move between screens, which wrap. Up and
 //!   down scroll the current screen's content. This is where the device
 //!   sits.
+//!
+//!   A screen can instead be a **list** ([`Screen::open`]): each of its
+//!   lines is one entry, up and down move a highlight over them (the view
+//!   follows it), and select hands back the screen's `open` action for the
+//!   caller to act on the highlighted entry, [`Nav::selected`]. A list
+//!   with no entries yet is an ordinary screen until it has some. A list has
+//!   no menu, because select is taken.
 //! * **A menu.** Select opens the current screen's action menu over the
 //!   content. Up and down move the highlight, select activates it, back
 //!   closes it. Left and right are ignored rather than being made to mean
@@ -33,7 +40,17 @@
 //!   notice to acknowledge. What it is and what each key does inside it are
 //!   the application's, through the [`Modal`] trait; what is here is that it
 //!   is opened with [`Nav::open`], that it gets every key until it says it
-//!   is finished, and that the screen's scroll is kept under it.
+//!   is finished, and that the screen's scroll is kept under it. A modal
+//!   does not scroll: what it says has to fit.
+//! * **A detail**, the other exception: something the application opens
+//!   over a screen, usually from a list, that is browsed like a screen and
+//!   is longer than one -- a conversation, a log. It has its own title, its
+//!   own scroll and its own menu, which select opens; up and down scroll it
+//!   by line, left and right move it by whatever the application says its
+//!   parts are ([`Detail::step`]), and back closes it, leaving the screen
+//!   under it where it was: the same scroll, the same highlight. The strip
+//!   still marks the screen it was opened from. Opened with
+//!   [`Nav::open_detail`]; a menu or a modal can be opened over it.
 //!
 //! Back at the browsing level does nothing at all. There is nowhere above
 //! the top, and a back button that silently jumps to the first screen is a
@@ -63,6 +80,10 @@ pub struct Screen<A: 'static> {
     /// that can only be left by a key the user has not found yet is a trap,
     /// and the way out costs one line.
     pub menu: &'static [Item<A>],
+    /// `Some` makes the screen a list: select hands this back for the
+    /// highlighted entry, [`Nav::selected`], rather than opening a menu, so
+    /// a list's menu must be empty. `None` for an ordinary screen.
+    pub open: Option<A>,
 }
 
 /// One line in an action menu.
@@ -183,44 +204,126 @@ impl<A> Modal<A> for NoModal {
     }
 }
 
+/// Something the application opens over a screen that is browsed like one:
+/// see the module docs.
+///
+/// The navigator owns the value while it is open and keeps its scroll; the
+/// application draws its lines, as it does a screen's. The value can be
+/// changed while it is open ([`Nav::detail_mut`]), which is how one learns
+/// where its parts begin once its lines have been laid out.
+pub trait Detail<A: 'static> {
+    /// The word in the title bar while it is open.
+    fn title(&self) -> &'static str;
+
+    /// The heading over its menu.
+    fn menu_title(&self) -> &'static str;
+
+    /// What its menu offers, [`Item::BACK`] first; empty for none, and then
+    /// select does nothing.
+    fn menu(&self) -> &'static [Item<A>];
+
+    /// The line left or right moves the view to, from `top`, the first line
+    /// in view: the start of the part before it or the next one, by the
+    /// detail's own idea of a part. The navigator clamps what comes back, so
+    /// "the end" can be said as `usize::MAX`.
+    fn step(&self, top: usize, forward: bool) -> usize;
+}
+
+/// The detail for an application that has none. Like [`NoModal`], it can
+/// never be opened.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum NoDetail {}
+
+impl<A: 'static> Detail<A> for NoDetail {
+    fn title(&self) -> &'static str {
+        match *self {}
+    }
+
+    fn menu_title(&self) -> &'static str {
+        match *self {}
+    }
+
+    fn menu(&self) -> &'static [Item<A>] {
+        match *self {}
+    }
+
+    fn step(&self, _top: usize, _forward: bool) -> usize {
+        match *self {}
+    }
+}
+
 /// What is over the content, if anything.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Overlay<M> {
     None,
-    /// An action menu, with the highlighted item.
+    /// An action menu, with the highlighted item: the detail's while one is
+    /// open, else the screen's.
     Menu(usize),
     /// Something of the application's.
     Modal(M),
 }
 
+/// Where the view of a screen is: what a detail keeps of the screen under it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+struct Place {
+    /// First visible content row, in lines.
+    scroll: usize,
+    /// Lines of content, set by the renderer.
+    lines: usize,
+    /// The highlighted entry, on a list.
+    selected: usize,
+    /// Entries the list has, set by the renderer.
+    entries: usize,
+}
+
+/// A detail, and the place of the screen under it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct Opened<D> {
+    detail: D,
+    under: Place,
+}
+
 /// Where the user is.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct Nav<A: 'static, M = NoModal> {
+pub struct Nav<A: 'static, M = NoModal, D = NoDetail> {
     screens: &'static [Screen<A>],
     screen: usize,
     overlay: Overlay<M>,
-    /// First visible content row, in lines, while browsing.
-    scroll: usize,
-    /// Lines of content the current screen has, set by the renderer.
-    lines: usize,
+    /// Where the view is, on the screen or on the detail over it.
+    place: Place,
     /// Lines of content that fit, set by the renderer, which is the only
     /// thing that knows how tall the canvas is.
     visible: usize,
+    detail: Option<Opened<D>>,
 }
 
-impl<A: 'static, M> Nav<A, M> {
+impl<A: 'static, M, D> Nav<A, M, D> {
     /// On the first screen, at its top, with nothing open.
     ///
-    /// `screens` must not be empty: there has to be somewhere to be.
+    /// `screens` must not be empty: there has to be somewhere to be. A list
+    /// must have no menu, since select opens its entries.
     pub const fn new(screens: &'static [Screen<A>]) -> Self {
         assert!(!screens.is_empty(), "a navigator needs a screen to be on");
+        let mut n = 0;
+        while n < screens.len() {
+            assert!(
+                screens[n].open.is_none() || screens[n].menu.is_empty(),
+                "a list's select opens its entries, so it can have no menu"
+            );
+            n += 1;
+        }
         Nav {
             screens,
             screen: 0,
             overlay: Overlay::None,
-            scroll: 0,
-            lines: 0,
+            place: Place {
+                scroll: 0,
+                lines: 0,
+                selected: 0,
+                entries: 0,
+            },
             visible: 0,
+            detail: None,
         }
     }
 
@@ -229,12 +332,13 @@ impl<A: 'static, M> Nav<A, M> {
         self.screens
     }
 
-    /// The position of the screen being shown, in the strip.
+    /// The position of the screen being shown, in the strip. While a detail
+    /// is open, the screen it was opened from.
     pub const fn screen_index(&self) -> usize {
         self.screen
     }
 
-    /// The screen being shown.
+    /// The screen being shown, or the one under the detail.
     pub fn screen(&self) -> &'static Screen<A> {
         &self.screens[self.screen]
     }
@@ -271,9 +375,69 @@ impl<A: 'static, M> Nav<A, M> {
         self.overlay = Overlay::Modal(modal);
     }
 
+    /// The detail, while one is open.
+    pub fn detail(&self) -> Option<&D> {
+        self.detail.as_ref().map(|o| &o.detail)
+    }
+
+    /// The detail, to change while it is open.
+    pub fn detail_mut(&mut self) -> Option<&mut D> {
+        self.detail.as_mut().map(|o| &mut o.detail)
+    }
+
+    /// Whether a detail is open.
+    pub const fn detail_is_open(&self) -> bool {
+        self.detail.is_some()
+    }
+
+    /// Open `detail` over the current screen, at its top, with nothing over
+    /// it. The screen's scroll and highlight are kept for when it closes;
+    /// opening one over another replaces it and keeps the screen's.
+    pub fn open_detail(&mut self, detail: D) {
+        let under = match self.detail.take() {
+            Some(open) => open.under,
+            None => self.place,
+        };
+        self.detail = Some(Opened { detail, under });
+        self.place = Place::default();
+        self.overlay = Overlay::None;
+    }
+
+    /// Close the detail, if one is open, and whatever is over it: the
+    /// screen under it is where it was.
+    pub fn close_detail(&mut self) {
+        if let Some(open) = self.detail.take() {
+            self.place = open.under;
+            self.overlay = Overlay::None;
+        }
+    }
+
     /// The first content line visible.
     pub const fn scroll(&self) -> usize {
-        self.scroll
+        self.place.scroll
+    }
+
+    /// Move the view so `line` is at its top, as far as the content goes.
+    /// For an application placing a detail it has just laid out: at the
+    /// first thing not yet seen, say.
+    pub fn set_scroll(&mut self, line: usize) {
+        self.place.scroll = line.min(self.max_scroll());
+    }
+
+    /// The highlighted entry, on a list that has entries and with no detail
+    /// over it.
+    pub fn selected(&self) -> Option<usize> {
+        (self.is_list() && self.place.entries > 0).then_some(self.place.selected)
+    }
+
+    /// Whether what is being browsed is a list: a list screen, with no
+    /// detail over it.
+    fn is_list(&self) -> bool {
+        self.detail.is_none() && self.screen().open.is_some()
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.place.lines.saturating_sub(self.visible)
     }
 
     /// Tell the navigator how tall the current screen's content is, and how
@@ -284,62 +448,70 @@ impl<A: 'static, M> Nav<A, M> {
     /// list losing an entry -- cannot leave the view stranded past the end
     /// of it.
     pub fn set_content(&mut self, lines: usize, visible: usize) {
-        self.lines = lines;
+        self.place.lines = lines;
         self.visible = visible;
-        let max = lines.saturating_sub(visible);
-        if self.scroll > max {
-            self.scroll = max;
+        let max = self.max_scroll();
+        if self.place.scroll > max {
+            self.place.scroll = max;
         }
     }
 
-    /// Movement between and within screens.
-    fn browsing(&mut self, input: Input) {
-        let count = self.screens.len();
-        match input {
-            // Wrapping, so a strip of screens is never more than half a lap
-            // away in whichever direction is closer.
-            Input::Left => self.screen = (self.screen + count - 1) % count,
-            Input::Right => self.screen = (self.screen + 1) % count,
-            Input::Up => self.scroll = self.scroll.saturating_sub(1),
-            Input::Down => {
-                let max = self.lines.saturating_sub(self.visible);
-                self.scroll = (self.scroll + 1).min(max);
-            }
-            // A screen with no menu has nothing to open, and a press that
-            // opened an empty box would be a press that did nothing visible.
-            Input::Select => {
-                if !self.screen().menu.is_empty() {
-                    self.overlay = Overlay::Menu(0);
-                }
-            }
-            // Nothing above the top level; see the module docs.
-            Input::Back => {}
+    /// Tell the navigator how many of a list's lines are entries: the first
+    /// `entries`, one a line. Called by the renderer after
+    /// [`Nav::set_content`]. Clamps the highlight to the list as it now is
+    /// and brings it into view. Zero, for a list with nothing in it yet,
+    /// makes the screen an ordinary one until there is.
+    /// On anything but a list it does nothing: there is no highlight to
+    /// keep.
+    pub fn set_entries(&mut self, entries: usize) {
+        if !self.is_list() {
+            return;
         }
-        if matches!(input, Input::Left | Input::Right) {
-            // A new screen starts at its top, and its length is unknown until
-            // it has been rendered once.
-            self.scroll = 0;
-            self.lines = 0;
+        self.place.entries = entries;
+        self.place.selected = self.place.selected.min(entries.saturating_sub(1));
+        if entries > 0 {
+            self.follow();
         }
+    }
+
+    /// Scroll just far enough that the highlight is in view.
+    fn follow(&mut self) {
+        let selected = self.place.selected;
+        if selected < self.place.scroll {
+            self.place.scroll = selected;
+        } else if self.visible > 0 && selected >= self.place.scroll + self.visible {
+            self.place.scroll = selected + 1 - self.visible;
+        }
+        self.place.scroll = self.place.scroll.min(self.max_scroll());
     }
 }
 
-impl<A: Copy + 'static, M: Modal<A>> Nav<A, M> {
+impl<A: Copy + 'static, M: Modal<A>, D: Detail<A>> Nav<A, M, D> {
     /// The word in the title bar: the modal's while one is open, else the
-    /// screen's.
+    /// detail's, else the screen's.
     pub fn title(&self) -> &'static str {
-        match &self.overlay {
-            Overlay::Modal(modal) => modal.title(),
-            Overlay::None | Overlay::Menu(_) => self.screen().title,
+        match (&self.overlay, self.detail()) {
+            (Overlay::Modal(modal), _) => modal.title(),
+            (_, Some(detail)) => detail.title(),
+            _ => self.screen().title,
+        }
+    }
+
+    /// The heading and items of the menu select opens: the detail's while
+    /// one is open, else the screen's.
+    pub fn menu(&self) -> (&'static str, &'static [Item<A>]) {
+        match self.detail() {
+            Some(detail) => (detail.menu_title(), detail.menu()),
+            None => (self.screen().menu_title, self.screen().menu),
         }
     }
 
     /// Feed the navigator one gesture.
     ///
-    /// Returns an action only when the user picked one -- from a menu, or
-    /// out of a modal. Movement returns `None`, and so does an item that
-    /// only closes the menu, which is this module's own business rather
-    /// than the caller's.
+    /// Returns an action only when the user picked one -- from a menu, out
+    /// of a modal, or an entry of a list. Movement returns `None`, and so
+    /// does an item that only closes the menu, which is this module's own
+    /// business rather than the caller's.
     pub fn handle(&mut self, input: Input) -> Option<A> {
         match &mut self.overlay {
             Overlay::Menu(selected) => {
@@ -357,16 +529,72 @@ impl<A: Copy + 'static, M: Modal<A>> Nav<A, M> {
                     Some(action)
                 }
             },
-            Overlay::None => {
-                self.browsing(input);
-                None
-            }
+            Overlay::None => self.browsing(input),
         }
+    }
+
+    /// Movement between and within screens, and within a detail.
+    fn browsing(&mut self, input: Input) -> Option<A> {
+        if let Some(open) = &self.detail {
+            let top = self.place.scroll;
+            match input {
+                Input::Left | Input::Right => {
+                    let to = open.detail.step(top, input == Input::Right);
+                    self.place.scroll = to.min(self.max_scroll());
+                }
+                Input::Up => self.place.scroll = top.saturating_sub(1),
+                Input::Down => self.place.scroll = (top + 1).min(self.max_scroll()),
+                Input::Select => {
+                    if !open.detail.menu().is_empty() {
+                        self.overlay = Overlay::Menu(0);
+                    }
+                }
+                Input::Back => self.close_detail(),
+            }
+            return None;
+        }
+        let list = self.is_list() && self.place.entries > 0;
+        let count = self.screens.len();
+        match input {
+            // Wrapping, so a strip of screens is never more than half a lap
+            // away in whichever direction is closer.
+            Input::Left => self.screen = (self.screen + count - 1) % count,
+            Input::Right => self.screen = (self.screen + 1) % count,
+            // A list moves its highlight, which stops at the ends rather
+            // than wrapping: the top of a list is a place, as the top of a
+            // page is.
+            Input::Up if list => {
+                self.place.selected = self.place.selected.saturating_sub(1);
+                self.follow();
+            }
+            Input::Down if list => {
+                self.place.selected = (self.place.selected + 1).min(self.place.entries - 1);
+                self.follow();
+            }
+            Input::Up => self.place.scroll = self.place.scroll.saturating_sub(1),
+            Input::Down => self.place.scroll = (self.place.scroll + 1).min(self.max_scroll()),
+            Input::Select if list => return self.screen().open,
+            // A screen with no menu has nothing to open, and a press that
+            // opened an empty box would be a press that did nothing visible.
+            Input::Select => {
+                if !self.screen().menu.is_empty() {
+                    self.overlay = Overlay::Menu(0);
+                }
+            }
+            // Nothing above the top level; see the module docs.
+            Input::Back => {}
+        }
+        if matches!(input, Input::Left | Input::Right) {
+            // A new screen starts at its top, and its length is unknown until
+            // it has been rendered once.
+            self.place = Place::default();
+        }
+        None
     }
 
     /// Movement inside an open action menu.
     fn in_menu(&mut self, selected: usize, input: Input) -> Option<A> {
-        let items = self.screen().menu;
+        let (_, items) = self.menu();
         match input {
             Input::Up => {
                 self.overlay = Overlay::Menu((selected + items.len() - 1) % items.len());
@@ -405,6 +633,9 @@ pub(crate) mod fixture {
         Boop,
         Set(i32),
         Reboot,
+        /// Open the highlighted letter of the inbox.
+        Read,
+        Reply,
     }
 
     pub const HOME_MENU: [Item<Act>; 3] = [
@@ -426,26 +657,69 @@ pub(crate) mod fixture {
         Item::new("Reboot", Act::Reboot),
     ];
 
-    pub const SCREENS: [Screen<Act>; 3] = [
+    pub const SCREENS: [Screen<Act>; 4] = [
         Screen {
             title: "Home",
             menu_title: "Home Action",
             icon: [0x78, 0x7c, 0x06, 0x77, 0x06, 0x7c, 0x78],
             menu: &HOME_MENU,
+            open: None,
         },
         Screen {
             title: "Settings",
             menu_title: "Settings Action",
             icon: [0x1c, 0x3e, 0x77, 0x22, 0x77, 0x3e, 0x1c],
             menu: &LONG_MENU,
+            open: None,
+        },
+        Screen {
+            title: "Inbox",
+            menu_title: "",
+            icon: [0x7f, 0x43, 0x45, 0x49, 0x45, 0x43, 0x7f],
+            menu: &[],
+            open: Some(Act::Read),
         },
         Screen {
             title: "About",
             menu_title: "About Action",
             icon: [0x00, 0x22, 0x14, 0x7f, 0x36, 0x00, 0x00],
             menu: &[],
+            open: None,
         },
     ];
+
+    /// Where the inbox is in the strip.
+    pub const INBOX: usize = 2;
+
+    /// A letter: a detail whose parts are paragraphs of five lines.
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    pub struct Letter(pub usize);
+
+    pub const LETTER_MENU: [Item<Act>; 2] = [Item::BACK, Item::new("Reply", Act::Reply)];
+
+    impl Detail<Act> for Letter {
+        fn title(&self) -> &'static str {
+            "Letter"
+        }
+
+        fn menu_title(&self) -> &'static str {
+            "Letter Action"
+        }
+
+        fn menu(&self) -> &'static [Item<Act>] {
+            &LETTER_MENU
+        }
+
+        fn step(&self, top: usize, forward: bool) -> usize {
+            if forward {
+                (top / 5 + 1) * 5
+            } else if top % 5 == 0 {
+                top.saturating_sub(5)
+            } else {
+                top / 5 * 5
+            }
+        }
+    }
 
     /// A modal that counts presses, closes on back, and emits on select.
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -473,8 +747,20 @@ pub(crate) mod fixture {
         }
     }
 
-    pub fn nav() -> Nav<Act, Counter> {
+    pub fn nav() -> Nav<Act, Counter, Letter> {
         Nav::new(&SCREENS)
+    }
+
+    /// A navigator on the inbox, rendered once with `entries` letters on a
+    /// panel of eleven lines.
+    pub fn on_inbox(entries: usize) -> Nav<Act, Counter, Letter> {
+        let mut nav = nav();
+        for _ in 0..INBOX {
+            nav.handle(Input::Right);
+        }
+        nav.set_content(entries, 11);
+        nav.set_entries(entries);
+        nav
     }
 }
 
@@ -771,6 +1057,242 @@ mod tests {
         assert_eq!(nav.handle(Input::Select), Some(Act::Set(1)));
         assert_eq!(nav.modal(), None);
         assert!(!nav.modal_is_open());
+    }
+
+    // ---- the list ------------------------------------------------------
+
+    /// Up and down move the highlight over a list's entries, stopping at
+    /// both ends, and the view follows it.
+    #[test]
+    fn a_list_moves_its_highlight_and_the_view_follows() {
+        let mut nav = on_inbox(20);
+        assert_eq!(nav.selected(), Some(0));
+        nav.handle(Input::Up);
+        assert_eq!(nav.selected(), Some(0), "stops at the top");
+        for _ in 0..10 {
+            nav.handle(Input::Down);
+        }
+        assert_eq!((nav.selected(), nav.scroll()), (Some(10), 0), "in view");
+        nav.handle(Input::Down);
+        assert_eq!((nav.selected(), nav.scroll()), (Some(11), 1), "followed");
+        for _ in 0..30 {
+            nav.handle(Input::Down);
+        }
+        assert_eq!((nav.selected(), nav.scroll()), (Some(19), 9), "stops");
+        for _ in 0..12 {
+            nav.handle(Input::Up);
+        }
+        assert_eq!((nav.selected(), nav.scroll()), (Some(7), 7), "back up");
+    }
+
+    /// Select on a list hands back its `open` action, once, and opens no
+    /// menu: which entry is the navigator's to say.
+    #[test]
+    fn select_on_a_list_hands_back_open() {
+        let mut nav = on_inbox(3);
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), Some(Act::Read));
+        assert_eq!(nav.selected(), Some(1));
+        assert!(!nav.menu_is_open());
+        assert_eq!(nav.handle(Input::Back), None, "nothing to close");
+        assert_eq!(nav.selected(), Some(1));
+    }
+
+    /// A list with nothing in it is an ordinary screen with no menu: select
+    /// does nothing, and nothing is highlighted.
+    #[test]
+    fn an_empty_list_has_nothing_to_open() {
+        let mut nav = on_inbox(0);
+        assert_eq!(nav.selected(), None);
+        let before = nav;
+        assert_eq!(nav.handle(Input::Select), None);
+        assert_eq!(nav, before);
+        // Entries arriving make it a list.
+        nav.set_content(1, 11);
+        nav.set_entries(1);
+        assert_eq!(nav.handle(Input::Select), Some(Act::Read));
+    }
+
+    /// A list that loses entries pulls its highlight back onto what is left,
+    /// and keeps it in view.
+    #[test]
+    fn a_shrinking_list_keeps_its_highlight_on_it() {
+        let mut nav = on_inbox(20);
+        for _ in 0..19 {
+            nav.handle(Input::Down);
+        }
+        nav.set_content(4, 11);
+        nav.set_entries(4);
+        assert_eq!((nav.selected(), nav.scroll()), (Some(3), 0));
+    }
+
+    /// Leaving a list and coming back starts it at its top, as any screen.
+    #[test]
+    fn a_list_left_and_returned_to_starts_at_the_top() {
+        let mut nav = on_inbox(5);
+        nav.handle(Input::Down);
+        nav.handle(Input::Right);
+        assert_eq!(nav.selected(), None, "not a list");
+        nav.handle(Input::Left);
+        nav.set_content(5, 11);
+        nav.set_entries(5);
+        assert_eq!(nav.selected(), Some(0));
+    }
+
+    /// Only a list has a highlight; an ordinary screen ignores being told
+    /// about entries, and keeps its scroll.
+    #[test]
+    fn an_ordinary_screen_has_no_highlight() {
+        let mut nav = nav();
+        nav.set_content(20, 11);
+        nav.handle(Input::Down);
+        nav.handle(Input::Down);
+        nav.set_entries(20);
+        assert_eq!(nav.selected(), None);
+        assert_eq!(nav.scroll(), 2);
+    }
+
+    /// A list cannot have a menu: select is taken.
+    #[test]
+    #[should_panic(expected = "no menu")]
+    fn a_list_with_a_menu_is_refused() {
+        static BAD: [Screen<Act>; 1] = [Screen {
+            title: "Bad",
+            menu_title: "Bad Action",
+            icon: [0; ICON_W],
+            menu: &HOME_MENU,
+            open: Some(Act::Read),
+        }];
+        let _ = Nav::<Act>::new(&BAD);
+    }
+
+    // ---- the detail ----------------------------------------------------
+
+    /// The inbox's thirteenth letter open as a detail, the inbox under it
+    /// scrolled to keep the highlight in view.
+    fn reading() -> Nav<Act, Counter, Letter> {
+        let mut nav = on_inbox(20);
+        for _ in 0..12 {
+            nav.handle(Input::Down);
+        }
+        assert_eq!(nav.handle(Input::Select), Some(Act::Read));
+        nav.open_detail(Letter(12));
+        nav.set_content(23, 11);
+        nav
+    }
+
+    /// A detail has its own title and scroll, keeps the strip on the screen
+    /// it came from, and back puts the screen under it exactly where it was.
+    #[test]
+    fn a_detail_keeps_the_screen_under_it() {
+        let mut nav = reading();
+        assert!(nav.detail_is_open());
+        assert_eq!(nav.detail(), Some(&Letter(12)));
+        assert_eq!(nav.title(), "Letter");
+        assert_eq!(nav.screen_index(), INBOX);
+        assert_eq!(nav.selected(), None, "no highlight in a detail");
+        assert_eq!(nav.scroll(), 0, "opened at its top");
+        nav.handle(Input::Down);
+        nav.handle(Input::Down);
+        assert_eq!(nav.scroll(), 2);
+        for _ in 0..20 {
+            nav.handle(Input::Down);
+        }
+        assert_eq!(nav.scroll(), 12, "stops at the end");
+        assert_eq!(nav.handle(Input::Back), None);
+        assert!(!nav.detail_is_open());
+        assert_eq!(nav.title(), "Inbox");
+        assert_eq!((nav.selected(), nav.scroll()), (Some(12), 2));
+        assert_eq!(nav.handle(Input::Back), None, "and back stops there");
+        assert_eq!(nav.screen_index(), INBOX);
+    }
+
+    /// Sideways in a detail moves it by part, as the detail says, clamped to
+    /// the content; it never changes screen.
+    #[test]
+    fn sideways_in_a_detail_moves_by_part() {
+        let mut nav = reading();
+        let mut tops = Vec::new();
+        for _ in 0..4 {
+            nav.handle(Input::Right);
+            tops.push(nav.scroll());
+        }
+        assert_eq!(tops, [5, 10, 12, 12], "the last part is clamped");
+        nav.handle(Input::Left);
+        assert_eq!(nav.scroll(), 10);
+        nav.handle(Input::Up);
+        nav.handle(Input::Left);
+        assert_eq!(nav.scroll(), 5, "from inside a part, to its start");
+        for _ in 0..3 {
+            nav.handle(Input::Left);
+        }
+        assert_eq!(nav.scroll(), 0);
+        assert_eq!(nav.screen_index(), INBOX);
+    }
+
+    /// Select opens the detail's own menu, whose action comes back once;
+    /// back from the menu leaves the detail open.
+    #[test]
+    fn a_detail_has_a_menu_of_its_own() {
+        let mut nav = reading();
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), None);
+        assert_eq!(nav.menu(), ("Letter Action", &LETTER_MENU[..]));
+        assert_eq!(nav.title(), "Letter");
+        nav.handle(Input::Left);
+        assert_eq!(nav.menu_item(), Some(0), "sideways ignored in the menu");
+        assert_eq!(nav.scroll(), 1);
+        nav.handle(Input::Back);
+        assert!(nav.detail_is_open() && !nav.menu_is_open());
+        nav.handle(Input::Select);
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), Some(Act::Reply));
+        assert!(nav.detail_is_open(), "still reading");
+        assert_eq!(nav.scroll(), 1);
+    }
+
+    /// A modal opened over a detail takes the keys and closes back onto it.
+    #[test]
+    fn a_modal_over_a_detail_closes_back_onto_it() {
+        let mut nav = reading();
+        nav.handle(Input::Down);
+        nav.open(Counter(0));
+        assert_eq!(nav.title(), "Count");
+        nav.handle(Input::Down);
+        nav.handle(Input::Right);
+        assert_eq!(nav.scroll(), 1, "the keys went to the modal");
+        nav.handle(Input::Back);
+        assert!(nav.detail_is_open());
+        assert_eq!(nav.title(), "Letter");
+    }
+
+    /// A detail opened over a detail replaces it, and the screen under both
+    /// is still the one kept; closing shuts whatever was over it too.
+    #[test]
+    fn a_detail_over_a_detail_keeps_the_screen() {
+        let mut nav = reading();
+        nav.handle(Input::Down);
+        nav.open_detail(Letter(3));
+        assert_eq!(nav.detail(), Some(&Letter(3)));
+        assert_eq!(nav.scroll(), 0);
+        nav.set_content(23, 11);
+        nav.handle(Input::Select);
+        assert!(nav.menu_is_open());
+        nav.close_detail();
+        assert!(!nav.menu_is_open());
+        assert_eq!((nav.selected(), nav.scroll()), (Some(12), 2));
+        nav.close_detail();
+        assert_eq!(nav.selected(), Some(12), "closing nothing changes nothing");
+    }
+
+    /// The application can place a detail's view, as far as it goes.
+    #[test]
+    fn set_scroll_is_clamped_to_the_content() {
+        let mut nav = reading();
+        nav.set_scroll(7);
+        assert_eq!(nav.scroll(), 7);
+        nav.set_scroll(usize::MAX);
+        assert_eq!(nav.scroll(), 12);
     }
 
     /// Items say what they are.

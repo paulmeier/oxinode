@@ -11,7 +11,7 @@
 
 use crate::font;
 use crate::layout::Layout;
-use crate::nav::{Icon, Modal, Nav, Screen, ICON_CELL, ICON_H, ICON_W};
+use crate::nav::{Detail, Icon, Item, Modal, Nav, Screen, ICON_CELL, ICON_H, ICON_W};
 use crate::Canvas;
 
 /// Draw the title bar: a solid strip with the text knocked out of it.
@@ -102,9 +102,13 @@ pub fn menu_window(layout: &Layout, count: usize, selected: usize) -> core::ops:
 /// `<` as well as being inverted. Belt and braces on purpose: the panel is
 /// viewed at an angle as often as not, and inversion alone is easy to lose.
 pub fn menu<A>(canvas: &mut impl Canvas, screen: &Screen<A>, selected: usize) {
+    menu_of(canvas, screen.menu_title, screen.menu, selected);
+}
+
+/// Draw a menu over the content from its heading and its items: a screen's,
+/// or a detail's.
+pub fn menu_of<A>(canvas: &mut impl Canvas, title: &str, items: &[Item<A>], selected: usize) {
     let layout = Layout::for_canvas(canvas);
-    let items = screen.menu;
-    let title = screen.menu_title;
     if items.is_empty() {
         return;
     }
@@ -182,6 +186,22 @@ pub fn scrollbar(canvas: &mut impl Canvas, first: usize, lines: usize) {
     canvas.rect(x, top, 2, thumb, true);
 }
 
+/// What a page shows between its bars.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Content<'a> {
+    /// Every line, from the first. On a list screen, every line is an entry.
+    Lines(&'a [&'a str]),
+    /// A list with nothing in it yet: lines that say so, none of them an
+    /// entry, so nothing is highlighted and select does what it does on an
+    /// ordinary screen.
+    Empty(&'a [&'a str]),
+    /// Some of a longer content: `total` lines in all, and the ones from the
+    /// scroll on, for content that is not held whole. The caller tells the
+    /// navigator first ([`Nav::set_content`]) and draws its window from the
+    /// [`Nav::scroll`] that leaves; `lines[0]` is that line.
+    Window { total: usize, lines: &'a [&'a str] },
+}
+
 /// Draw a whole page: chrome, content and, if one is open, the menu.
 ///
 /// This is the one composition a firmware and a simulator share, so that
@@ -195,44 +215,73 @@ pub fn scrollbar(canvas: &mut impl Canvas, first: usize, lines: usize) {
 ///
 /// A modal's lines replace the screen's and are never scrolled, so the
 /// screen's own scroll is left where it was for when the modal closes.
-pub fn page<A: Copy + 'static, M: Modal<A>>(
+pub fn page<A: Copy + 'static, M: Modal<A>, D: Detail<A>>(
     canvas: &mut impl Canvas,
-    nav: &mut Nav<A, M>,
+    nav: &mut Nav<A, M, D>,
     left: &str,
     right: &str,
     lines: &[&str],
 ) {
+    page_of(canvas, nav, left, right, Content::Lines(lines));
+}
+
+/// [`page`], for any [`Content`]: a list that is empty, or a window onto
+/// content too long to hold. On a list, the highlighted entry is drawn
+/// knocked out of a bar the width of the line.
+pub fn page_of<A: Copy + 'static, M: Modal<A>, D: Detail<A>>(
+    canvas: &mut impl Canvas,
+    nav: &mut Nav<A, M, D>,
+    left: &str,
+    right: &str,
+    content: Content<'_>,
+) {
     let layout = Layout::for_canvas(canvas);
     canvas.fill(false);
-    let first = if nav.modal_is_open() {
+    let (lines, total, entries) = match content {
+        Content::Lines(lines) => (lines, lines.len(), lines.len()),
+        Content::Empty(lines) => (lines, lines.len(), 0),
+        Content::Window { total, lines } => (lines, total, 0),
+    };
+    let modal = nav.modal_is_open();
+    let first = if modal {
         0
     } else {
-        nav.set_content(lines.len(), layout.visible_lines());
+        nav.set_content(total, layout.visible_lines());
+        nav.set_entries(entries);
         nav.scroll()
     };
+    // A window starts at the scroll; the rest are drawn from it.
+    let skip = match content {
+        Content::Window { .. } if !modal => 0,
+        _ => first,
+    };
+    let highlight = if modal { None } else { nav.selected() };
     title_bar(canvas, left, nav.title(), right);
 
     for (n, line) in lines
         .iter()
-        .skip(first)
+        .skip(skip)
         .take(layout.visible_lines())
         .enumerate()
     {
-        font::draw(
-            canvas,
-            layout.content_left,
-            layout.content_top + n * font::LINE_HEIGHT,
-            line,
-            true,
-        );
+        let y = layout.content_top + n * font::LINE_HEIGHT;
+        let lit = highlight == Some(first + n);
+        if lit {
+            // From just left of the text to a pixel short of the scrollbar.
+            let x = layout.content_left.saturating_sub(2);
+            let w = layout.width.saturating_sub(3).saturating_sub(x);
+            canvas.rect(x, y.saturating_sub(1), w, font::LINE_HEIGHT, true);
+        }
+        font::draw(canvas, layout.content_left, y, line, !lit);
     }
-    if !nav.modal_is_open() {
-        scrollbar(canvas, first, lines.len());
+    if !modal {
+        scrollbar(canvas, first, total);
     }
 
     icon_bar(canvas, nav.screens(), nav.screen_index());
     if let Some(selected) = nav.menu_item() {
-        menu(canvas, nav.screen(), selected);
+        let (title, items) = nav.menu();
+        menu_of(canvas, title, items, selected);
     }
 }
 
@@ -500,6 +549,158 @@ mod tests {
     }
 
     /// Content lines land in the content area, starting at the scroll.
+    /// The lit pixels of one content row, in the text and highlight columns.
+    fn row_lit(canvas: &impl Readable, layout: &Layout, row: usize) -> usize {
+        let top = layout.content_top + row * font::LINE_HEIGHT - 1;
+        (0..layout.width - 3)
+            .flat_map(|x| (top..top + font::LINE_HEIGHT).map(move |y| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y))
+            .count()
+    }
+
+    /// Whether a content row has the highlight's bar: its left end, in the
+    /// margin no glyph reaches.
+    fn barred(canvas: &impl Readable, layout: &Layout, row: usize) -> bool {
+        let y = layout.content_top + row * font::LINE_HEIGHT + font::HEIGHT / 2;
+        canvas.pixel(layout.content_left - 2, y)
+    }
+
+    /// A list draws its highlighted entry knocked out of a bar, and only
+    /// that one; moving the highlight moves the bar.
+    #[test]
+    fn a_list_page_highlights_one_entry() {
+        let layout = Layout::of(128, 128);
+        let entries = ["Ana", "Bea", "Cy"];
+        let mut nav = nav();
+        for _ in 0..INBOX {
+            nav.handle(Input::Right);
+        }
+        let mut first = Square::new();
+        page(&mut first, &mut nav, "", "", &entries);
+        assert_eq!(nav.selected(), Some(0));
+        let bar = |c: &Square, row| barred(c, &layout, row);
+        assert!(bar(&first, 0), "the first entry is lit");
+        assert!(!bar(&first, 1) && !bar(&first, 2));
+        nav.handle(Input::Down);
+        let mut second = Square::new();
+        page(&mut second, &mut nav, "", "", &entries);
+        assert!(!bar(&second, 0) && bar(&second, 1) && !bar(&second, 2));
+        // The text is still there, knocked out: the bar is not solid.
+        let solid = (layout.width - 3 - (layout.content_left - 2)) * font::LINE_HEIGHT;
+        assert!(row_lit(&second, &layout, 1) < solid);
+    }
+
+    /// On a list longer than the panel, the bar is on the highlighted entry
+    /// where the scroll has put it, not where it would be unscrolled.
+    #[test]
+    fn a_scrolled_list_highlights_where_the_entry_is_drawn() {
+        let layout = Layout::of(128, 128);
+        let all: Vec<String> = (0..20).map(|n| format!("entry {n}")).collect();
+        let entries: Vec<&str> = all.iter().map(String::as_str).collect();
+        let mut nav = nav();
+        for _ in 0..INBOX {
+            nav.handle(Input::Right);
+        }
+        let mut b = Square::new();
+        page(&mut b, &mut nav, "", "", &entries);
+        for _ in 0..15 {
+            nav.handle(Input::Down);
+        }
+        page(&mut b, &mut nav, "", "", &entries);
+        assert_eq!((nav.selected(), nav.scroll()), (Some(15), 5));
+        let lit: Vec<usize> = (0..layout.visible_lines())
+            .filter(|&row| barred(&b, &layout, row))
+            .collect();
+        assert_eq!(lit, [10], "entry 15 is the eleventh row drawn");
+    }
+
+    /// An empty list says so in lines that are not entries: nothing lit.
+    #[test]
+    fn an_empty_list_page_highlights_nothing() {
+        let layout = Layout::of(128, 128);
+        let mut nav = nav();
+        for _ in 0..INBOX {
+            nav.handle(Input::Right);
+        }
+        let mut b = Square::new();
+        page_of(&mut b, &mut nav, "", "", Content::Empty(&["No letters."]));
+        assert_eq!(nav.selected(), None);
+        assert!(!barred(&b, &layout, 0));
+        assert!(row_lit(&b, &layout, 0) > 0, "the sentence is drawn");
+        assert_eq!(nav.handle(Input::Select), None);
+        assert!(!nav.menu_is_open());
+    }
+
+    /// A window draws its lines from the top of the content area, the
+    /// scrollbar is the whole content's, and what it draws is what the
+    /// whole content would have drawn at that scroll.
+    #[test]
+    fn a_window_is_drawn_as_the_whole_would_be() {
+        let layout = Layout::of(128, 128);
+        let all: Vec<String> = (0..30).map(|n| format!("line {n}")).collect();
+        let refs: Vec<&str> = all.iter().map(String::as_str).collect();
+        let mut whole = nav();
+        let mut window = nav();
+        let mut a = Square::new();
+        let mut b = Square::new();
+        page(&mut a, &mut whole, "", "", &refs);
+        page_of(
+            &mut b,
+            &mut window,
+            "",
+            "",
+            Content::Window {
+                total: 30,
+                lines: &refs[..11],
+            },
+        );
+        for _ in 0..7 {
+            whole.handle(Input::Down);
+            window.handle(Input::Down);
+        }
+        page(&mut a, &mut whole, "", "", &refs);
+        let first = window.scroll();
+        assert_eq!(first, 7);
+        page_of(
+            &mut b,
+            &mut window,
+            "",
+            "",
+            Content::Window {
+                total: 30,
+                lines: &refs[first..first + layout.visible_lines()],
+            },
+        );
+        assert!(!differs(&a, &b), "the window is the page");
+    }
+
+    /// A detail's page carries its title, and its menu is its own.
+    #[test]
+    fn a_detail_page_draws_its_title_and_its_menu() {
+        let mut nav = nav();
+        nav.open_detail(Letter(0));
+        let mut b = Square::new();
+        page(&mut b, &mut nav, "", "", &["Dear Ana,"]);
+        let mut chrome = Square::new();
+        title_bar(&mut chrome, "", "Letter", "");
+        let row = |c: &Square| (0..128).map(|x| c.pixel(x, 4)).collect::<Vec<_>>();
+        assert_eq!(row(&b), row(&chrome));
+        nav.handle(Input::Select);
+        let mut open = Square::new();
+        page(&mut open, &mut nav, "", "", &["Dear Ana,"]);
+        let mut want = Square::new();
+        page(&mut want, &mut nav, "", "", &["Dear Ana,"]);
+        menu_of(&mut want, "Letter Action", &LETTER_MENU, 0);
+        assert!(
+            !differs(&open, &want),
+            "the detail's menu, not the screen's"
+        );
+        let mut home = Square::new();
+        page(&mut home, &mut nav, "", "", &["Dear Ana,"]);
+        menu_of(&mut home, "Home Action", &HOME_MENU, 0);
+        assert!(differs(&open, &home));
+    }
+
     #[test]
     fn a_page_draws_its_lines_from_the_scroll() {
         fn check<const W: usize, const H: usize>() {

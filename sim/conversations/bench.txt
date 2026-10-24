@@ -1,0 +1,52 @@
+# Conversations for the simulator: what the Messages screen and a thread
+# draw from without a board. `oxinode-sim --conversation FILE` reads another.
+#
+# `peer <32 hex digits> [name]` starts a conversation; no name is a peer
+# that announced none, or has not been heard. Then a message a line:
+#
+#   <direction> <age> <state>[,unread][,attachment] <text>
+#
+# `<` is received, its state verified, unverified or bad; `>` is sent, its
+# state queued, sent, delivered or failed. The age is in seconds, or `-` for
+# not known. `\n` in the text is a newline.
+#
+# The bench peer's first message is the text Python LXMF sent in the node's
+# test vectors (core/src/node/vectors/lxmf.txt), typographic punctuation and
+# all; the rest is written to show one thing each.
+
+peer fae321c442e3c9bdcd7a3e79d850e03c Bench peer
+< 1260 verified Hello from the bench – it’s “Python”…
+> 1140 delivered On my way
+< 14 verified,unread Where are you? The board says it is on the desk but I cannot see it.
+
+peer 5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d Galaxy S9
+< 95 verified Ok
+
+peer 4a6e61d2e1a3b8c09f7e6d5c4b3a2918 Ana
+> 3600 delivered Lunch at one?
+> 2400 failed Lunch at one?
+> 600 sent Running late
+> 30 queued Here now
+
+peer 3b079e41d288106c2fe5935a0d71c4b6
+< 400 unverified,unread Is this the bench board? This is a phone it has not heard announce.
+
+peer 77a1c3e5f7092b4d6f8091a2b3c4d5e6 Zoë 🙂
+< 7200 verified Grüße aus Zürich – 10 °C und ☀, naïve café ✓
+
+peer 0f1e2d3c4b5a69788796a5b4c3d2e1f0 Long winded
+< 86400 verified This message is longer than the panel is tall, which is the case the conversation screen exists for and a modal could never show. It wraps at word boundaries to the width of a line, scrolls a line at a time with up and down, and is never cut off: every word of it is somewhere on the screen once you have scrolled far enough. A word longer than a line, like Llanfairpwllgwyngyllgogerychwyrndrobwllllantysiliogogogoch, is broken where it must be.\n\nA blank line is kept, and so is this one.
+
+peer 1234567890abcdef1234567890abcdef Chatty
+< 7000 verified One
+> 6900 delivered Two
+< 6800 verified Three
+> 6700 delivered Four
+< 6600 verified Five, which is a little longer than the others
+> 6500 delivered Six
+< 6400 verified Seven
+> 6300 delivered Eight
+< 6200 verified,attachment Nine, with a picture
+> 6100 delivered Ten
+< 6000 verified,unread Eleven
+< 5900 bad,unread Twelve, which the sender's own key did not sign
