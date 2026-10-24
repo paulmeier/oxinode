@@ -19,6 +19,7 @@ Reticulum runs under, and the log reader, which calls libusb through
 | `touch_series.py` | Reflashes a board by 1200-baud touch, round after round, each touch taken with a phone's Bluetooth link up, and counts the times serial DFU does not answer. The recipe for issue #23. |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
 | `peer.py` | A Reticulum and LXMF peer on the bench, through the second board: checks the board's announces, sends it messages and times the proofs, and checks the messages it sends back. The other end of every messaging test. See [below](#peerpy). |
+| `lxmf_vectors.py` | Writes the LXMF messages `oxinode_core::node::lxmf` is tested against, packed by stock LXMF for opportunistic delivery and put in packets as LXMF puts them on the air: a plain message, the same message sent again, one with a title and fields, one with a stamp, one from a stranger with the stranger's announce, and the delivery proof Reticulum makes for the first. Run by hand; its output is committed. |
 | `node_vectors.py` | Writes the Reticulum packets `oxinode_core::node` is tested against, from stock Python Reticulum: an `lxmf.delivery` announce and a path request. Run by hand; its output is committed. The board's own announce and path response beside them are written the other way, by `cargo test -p oxinode-core --features node` with `OXINODE_WRITE_VECTORS=1`, and `test_peer.py` holds them to the peer's reading and Reticulum's. |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
 | `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`, and with `--max-flash` and `--max-ram` against a budget. See [Memory layout](../hardware/memory-layout.md). |
@@ -122,7 +123,15 @@ board, so a board that came up later still learns it.
   after, it sends opportunistic LXMF messages one at a time through LXMF's own
   router, and prints the proof and how long it took, or the failure. Content
   too long to go in one packet is refused before the run starts, because LXMF
-  would quietly send it over a link instead.
+  would quietly send it over a link instead. With `--repeat`, each message
+  delivered is sent once more as a new packet with the same message hash, as
+  LXMF does when a proof is lost, and needs a proof of its own: the board's
+  log says it was proved again and not kept twice.
+- **A sender the board has not heard.** With `--no-announce` the peer never
+  announces, so a message from it comes from a stranger: the board keeps it
+  unverified and asks for the peer's path, Reticulum answers with the peer's
+  announce, and the board's log says the message was then verified. Give it
+  an `--identity` the board has not heard since it booted.
 - **Messages from the board.** Every message is printed with LXMF's own
   signature check, and the peer reads its framing itself and checks that the
   hash comes out as LXMF's.
@@ -143,6 +152,8 @@ regression run as well as something to watch. Everything goes to
 | `--expect-announces` | announces from the board to see (default 1) |
 | `--send` | messages to send it (default 0) |
 | `--expect-proofs` | proofs to see (default one per message sent) |
+| `--repeat` | send each delivered message again as a new packet, and expect a proof for that too |
+| `--no-announce` | never announce, so the board has to ask for the peer's key |
 | `--expect-messages` | messages from the board to see (default 0) |
 | `--text`, `--title` | what to send; `{n}` and `{time}` in the text are filled in |
 | `--settle`, `--gap` | seconds from the board's first announce to the first message (default 5), and from one message's end to the next (default 10) |

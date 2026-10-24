@@ -33,7 +33,11 @@
 //! nothing. The modem loop waits for that, which with no host delays nothing
 //! but the panel. What the engine verifies as an `lxmf.delivery` announce
 //! becomes a peer ([`oxinode_core::node::peers`]), and the Peers screen
-//! lists them.
+//! lists them. A message delivered to the board is kept, and proved so its
+//! sender shows it delivered; one from a sender not yet heard is kept
+//! unverified while the board asks for the sender's key. What is done with
+//! each is [`oxinode_core::node::Station::take`]'s, and is tested there; this
+//! logs it. A new message wakes the panel.
 
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::Peri;
@@ -63,9 +67,11 @@ mod imp {
     use oxinode_core::mode::Presence;
     use oxinode_core::node::announce::{self, Kind};
     use oxinode_core::node::key::{NodeKey, Stored};
+    use oxinode_core::node::messages::{Arrival, Trust};
     use oxinode_core::node::peers::{Learned, Table};
     use oxinode_core::node::{
-        announce_len, lxmf_app_data, Entropy, Followed, Inbox, Node, Outcome, Sending, TICK_MS,
+        announce_len, lxmf_app_data, Entropy, Event, Followed, Inbox, Node, Outcome, Sending,
+        Station, Unreadable, TICK_MS,
     };
 
     use super::*;
@@ -103,8 +109,8 @@ mod imp {
         app_data: Vec<u8>,
         /// Packets heard and waiting for the engine.
         inbox: Inbox,
-        /// Who else is around.
-        peers: Table,
+        /// Who else is around, and what they have sent.
+        station: Station,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
@@ -147,7 +153,7 @@ mod imp {
                 sending: Sending::new(),
                 app_data: Vec::new(),
                 inbox: Inbox::new(),
-                peers: Table::new(),
+                station: Station::new(),
                 entropy: Entropy::from_seed(seed),
                 last_tick_ms: now_ms(),
                 reported_peak: 0,
@@ -337,7 +343,18 @@ mod imp {
 
         /// What the Peers screen shows.
         pub fn peers(&self) -> Peers {
-            self.peers.screen(now_ms())
+            self.station.peers.screen(now_ms())
+        }
+
+        /// Messages not yet read, for the Home screen.
+        pub fn unread(&self) -> Option<u16> {
+            Some(self.station.messages.unread().min(usize::from(u16::MAX)) as u16)
+        }
+
+        /// A number that moves when a new message arrives, for the panel to
+        /// wake on.
+        pub fn arrived(&self) -> u32 {
+            self.station.messages.arrived()
         }
 
         /// A packet came off the air: queued for the engine, which sees it
@@ -365,9 +382,12 @@ mod imp {
             }
             if radio_quiet {
                 if let (Some(node), Some(inbound)) = (self.node.as_mut(), self.inbox.pop()) {
-                    let out =
+                    let mut out =
                         node.heard(&inbound.packet, inbound.signal, now_ms(), &mut self.entropy);
-                    self.learn(&out, inbound.at_ms);
+                    let events =
+                        self.station
+                            .take(node, &mut out, inbound.at_ms, &mut self.entropy);
+                    self.learn(&events);
                     self.report(out);
                 }
             }
@@ -394,40 +414,117 @@ mod imp {
             }
         }
 
-        /// The peers in what the engine verified, heard at `at_ms`.
-        fn learn(&mut self, out: &Outcome, at_ms: u64) {
-            for heard in &out.heard {
-                let name = |p: &Table| {
-                    p.get(&heard.destination)
-                        .and_then(|p| p.name.clone())
-                        .unwrap_or_default()
-                };
-                match self.peers.heard(heard, at_ms) {
-                    Learned::NotLxmf => {}
-                    Learned::New => defmt::info!(
-                        "node: a new peer {=[u8]:02x} \"{=str}\", {=usize} of {=usize}",
-                        &heard.destination[..],
-                        name(&self.peers).as_str(),
-                        self.peers.len(),
-                        Table::CAPACITY
+        /// What the station made of a packet, in the log.
+        fn learn(&self, events: &[Event]) {
+            let peers = &self.station.peers;
+            let name = |destination: &[u8; 16]| {
+                peers
+                    .get(destination)
+                    .and_then(|p| p.name.clone())
+                    .unwrap_or_default()
+            };
+            for event in events {
+                match event {
+                    Event::Peer { destination, learned } => match learned {
+                        Learned::NotLxmf => {}
+                        Learned::New => defmt::info!(
+                            "node: a new peer {=[u8]:02x} \"{=str}\", {=usize} of {=usize}",
+                            &destination[..],
+                            name(destination).as_str(),
+                            peers.len(),
+                            Table::CAPACITY
+                        ),
+                        Learned::Updated => defmt::info!(
+                            "node: peer {=[u8]:02x} \"{=str}\" heard again",
+                            &destination[..],
+                            name(destination).as_str()
+                        ),
+                        Learned::Evicted(gone) => defmt::info!(
+                            "node: a new peer {=[u8]:02x} \"{=str}\" in place of {=[u8]:02x}, heard longest ago",
+                            &destination[..],
+                            name(destination).as_str(),
+                            &gone[..]
+                        ),
+                        Learned::Refused => defmt::warn!(
+                            "node: a new peer {=[u8]:02x} not kept: every peer has a conversation ({=u32} turned away)",
+                            &destination[..],
+                            peers.refused()
+                        ),
+                    },
+                    Event::Settled { source, settled } => defmt::info!(
+                        "node: the key of {=[u8]:02x} arrived: {=usize} messages verified, {=usize} failed",
+                        &source[..],
+                        settled.verified,
+                        settled.failed
                     ),
-                    Learned::Updated => defmt::info!(
-                        "node: peer {=[u8]:02x} \"{=str}\" heard again",
-                        &heard.destination[..],
-                        name(&self.peers).as_str()
-                    ),
-                    Learned::Evicted(gone) => defmt::info!(
-                        "node: a new peer {=[u8]:02x} \"{=str}\" in place of {=[u8]:02x}, heard longest ago",
-                        &heard.destination[..],
-                        name(&self.peers).as_str(),
-                        &gone[..]
-                    ),
-                    Learned::Refused => defmt::warn!(
-                        "node: a new peer {=[u8]:02x} not kept: every peer has a conversation ({=u32} turned away)",
-                        &heard.destination[..],
-                        self.peers.refused()
-                    ),
+                    Event::Message {
+                        hash,
+                        source,
+                        arrival,
+                    } => self.log_message(hash, source, *arrival),
+                    Event::Unreadable(why) => match why {
+                        Unreadable::NotOpportunistic {
+                            packet_type,
+                            context,
+                        } => defmt::info!(
+                            "node: a packet for the board of type {=u8}, context {=u8}, which it does not read",
+                            packet_type,
+                            context
+                        ),
+                        Unreadable::Undecryptable => {
+                            defmt::warn!("node: a packet for the board that does not decrypt")
+                        }
+                        Unreadable::Malformed(m) => defmt::warn!(
+                            "node: a packet for the board that is not an LXMF message ({=str})",
+                            malformed_name(*m)
+                        ),
+                    },
                 }
+            }
+        }
+
+        fn log_message(&self, hash: &[u8; 32], source: &[u8; 16], arrival: Arrival) {
+            let messages = &self.station.messages;
+            match arrival {
+                Arrival::New(trust) => {
+                    let (len, attachment) = messages.get(hash).map_or((0, false), |r| {
+                        (r.message.content.len(), r.message.attachment)
+                    });
+                    defmt::info!(
+                        "node: a message {=[u8]:02x} from {=[u8]:02x}, {=str}, {=usize} bytes{=str}; proved; {=usize} unread, {=usize} kept",
+                        &hash[..8],
+                        &source[..],
+                        trust_name(trust),
+                        len,
+                        if attachment { ", with an attachment" } else { "" },
+                        messages.unread(),
+                        messages.len()
+                    );
+                    if trust == Trust::Unverified {
+                        defmt::info!(
+                            "node: {=[u8]:02x} has not been heard; its path, and so its key, asked for",
+                            &source[..]
+                        );
+                    }
+                }
+                Arrival::Duplicate(trust) => defmt::info!(
+                    "node: message {=[u8]:02x} again, from {=[u8]:02x} ({=str}): proved again, not kept twice",
+                    &hash[..8],
+                    &source[..],
+                    trust.map_or("let go since", trust_name)
+                ),
+                Arrival::Forged => defmt::warn!(
+                    "node: a message {=[u8]:02x} claiming {=[u8]:02x} is not signed by its key: refused, not proved ({=u32} in all)",
+                    &hash[..8],
+                    &source[..],
+                    messages.forged()
+                ),
+            }
+            if messages.dropped() > 0 && matches!(arrival, Arrival::New(_)) {
+                defmt::info!(
+                    "node: {=u32} messages let go to make room, in all",
+                    messages.dropped()
+                );
             }
         }
 
@@ -477,6 +574,26 @@ mod imp {
 
     fn now_ms() -> u64 {
         Instant::now().as_millis()
+    }
+
+    fn trust_name(trust: Trust) -> &'static str {
+        match trust {
+            Trust::Verified => "verified",
+            Trust::Unverified => "unverified",
+            Trust::Failed => "failed verification",
+        }
+    }
+
+    fn malformed_name(m: oxinode_core::node::lxmf::Malformed) -> &'static str {
+        use oxinode_core::node::lxmf::Malformed;
+        match m {
+            Malformed::Short => "short",
+            Malformed::Payload => "payload",
+            Malformed::Timestamp => "timestamp",
+            Malformed::Text => "text",
+            Malformed::Fields => "fields",
+            Malformed::Length => "length",
+        }
     }
 
     fn transport_name(transport: oxinode_core::rnode::hosts::Transport) -> &'static str {
@@ -618,5 +735,15 @@ impl Listener {
     #[inline(always)]
     pub fn peers(&self) -> Peers {
         Peers::default()
+    }
+
+    #[inline(always)]
+    pub fn unread(&self) -> Option<u16> {
+        None
+    }
+
+    #[inline(always)]
+    pub fn arrived(&self) -> u32 {
+        0
     }
 }

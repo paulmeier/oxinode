@@ -868,6 +868,9 @@ where
 
     // The interface: see `Ui`.
     let mut ui = Ui::new();
+    // The node's count of messages arrived, as the panel last saw it: when
+    // it moves, a message came, and the panel lights.
+    let mut arrived = node.arrived();
     let mut last_signal: Option<(i16, i8)> = None;
     // When a frame last passed between the modem and a host, on either
     // transport and in either direction, for the Home screen's "talking".
@@ -1156,6 +1159,13 @@ where
                 ui.wake(panel).await;
             }
         }
+        // A message came: the panel lights, and stays lit as long as after a
+        // press. Unlike a press, nothing is swallowed: the panel is awake
+        // before anyone touches it, so the first press acts.
+        if node.arrived() != arrived {
+            arrived = node.arrived();
+            ui.rouse(panel.as_deref_mut()).await;
+        }
         for action in chosen {
             // The node is the loop's, so it is told here; `perform` gives a
             // host's notice instead when a host has the radio.
@@ -1221,6 +1231,7 @@ where
                         battery.charger(),
                     );
                     state.peers = node.peers();
+                    state.home.unread = node.unread();
                     screens::render(&mut ui.scratch, &mut ui.nav, &state);
                 }
                 ui.commit();
@@ -1912,6 +1923,20 @@ impl Ui {
         }
     }
 
+    /// Light the panel for something that happened, not for a press: on if
+    /// it was out, and the idle sleep counted from now. No press was taken,
+    /// so none is swallowed.
+    async fn rouse(&mut self, panel: Option<&mut Panel<'_>>) {
+        self.last_gesture = Instant::now();
+        if self.asleep {
+            self.asleep = false;
+            if let Some(panel) = panel {
+                self.wake(panel).await;
+            }
+        }
+        self.redraw_now();
+    }
+
     /// Put the panel back on after a sleep.
     async fn wake(&mut self, panel: &mut Panel<'_>) {
         if let Err(e) = panel.power(true).await {
@@ -2088,6 +2113,8 @@ impl Facts {
             home: screens::Home {
                 host,
                 mode,
+                // The node's, set by the caller where there is one.
+                unread: None,
                 talking,
                 air,
                 rx_count,

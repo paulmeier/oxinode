@@ -297,6 +297,22 @@ class Verdicts(unittest.TestCase):
             self.assertEqual(run.seen().proofs, 2)
             run.events.close()
 
+    def test_a_message_sent_again_needs_a_proof_of_its_own(self):
+        expect = peer.Expect(1, 1, 0, 1)
+        self.assertEqual(peer.shortfalls(expect, peer.Seen(1, 0, 1, 0, 0, 1)), [])
+        self.assertEqual(
+            peer.shortfalls(expect, peer.Seen(1, 0, 1, 0, 0, 0)),
+            ["0 of 1 proofs for messages sent again"],
+        )
+        with tempfile.TemporaryDirectory() as d:
+            run = peer.Run(d, None)
+            run.prove(1)
+            self.assertEqual(run.seen().repeat_proofs, 0, "the first proof is not the repeat's")
+            self.assertTrue(run.prove_again(1))
+            self.assertFalse(run.prove_again(1))
+            self.assertEqual(run.seen(), peer.Seen(0, 0, 1, 0, 0, 1))
+            run.events.close()
+
     def test_hashes_as_reticulum_prints_them(self):
         h = bytes(range(16))
         self.assertEqual(peer.parse_hash("<" + h.hex() + ">"), h)
