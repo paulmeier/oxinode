@@ -11,7 +11,10 @@ radio is dead. Everything here is decidable from the ELF and the UF2 alone:
   * the vector table's initial stack pointer points into RAM and its reset
     vector points into FLASH with the Thumb bit set -- the two words the CPU
     reads first, and the ones that are wrong when a linker script is wrong,
-  * the UF2 carries the same bytes, at the same addresses, in the right family.
+  * the UF2 carries the same bytes, at the same addresses, in the right family,
+  * and, when given ceilings, the image is under them: a budget an image is
+    held to rather than the whole of the chip, so growth is noticed when it
+    happens instead of when the chip is full.
 
 The parsing helpers are pure functions over bytes so `test_check_layout.py` can
 feed them deliberately broken images and confirm this script actually fails.
@@ -248,6 +251,43 @@ def check_uf2(
     return problems
 
 
+# ------------------------------------------------------------------- the budget
+
+
+class Usage(NamedTuple):
+    flash: int
+    ram: int
+
+
+def usage(elf: Elf, regions: Dict[str, layout.Region]) -> Usage:
+    """Bytes written to flash, and bytes of RAM the image claims statically.
+
+    Flash counts what the loader writes, `.data`'s initial values included.
+    RAM counts every segment that runs from RAM, `.bss` included; the stack
+    is whatever is left above it.
+    """
+    ram = regions["RAM"]
+    return Usage(
+        flash=sum(s.filesz for s in elf.segments),
+        ram=sum(s.memsz for s in elf.segments if ram.contains_range(s.vaddr, s.memsz)),
+    )
+
+
+def check_budget(used: Usage, max_flash=None, max_ram=None) -> List[str]:
+    """Problems for each ceiling the image is over; `None` is no ceiling."""
+    problems = []
+    if max_flash is not None and used.flash > max_flash:
+        problems.append(
+            f"flash {used.flash} bytes is over its ceiling of {max_flash} "
+            f"by {used.flash - max_flash}"
+        )
+    if max_ram is not None and used.ram > max_ram:
+        problems.append(
+            f"ram {used.ram} bytes is over its ceiling of {max_ram} by {used.ram - max_ram}"
+        )
+    return problems
+
+
 # -------------------------------------------------------------------------- main
 
 
@@ -263,6 +303,16 @@ def main() -> int:
         "Read the truth off the board with "
         "`uf2conv.py --print-family /Volumes/<drive>/CURRENT.UF2`.",
     )
+    ap.add_argument(
+        "--max-flash",
+        type=lambda v: int(v, 0),
+        help="fail if the image writes more than this many bytes of flash",
+    )
+    ap.add_argument(
+        "--max-ram",
+        type=lambda v: int(v, 0),
+        help="fail if the image claims more than this many bytes of RAM statically",
+    )
     ap.add_argument("-q", "--quiet", action="store_true", help="only report problems")
     args = ap.parse_args()
 
@@ -271,6 +321,8 @@ def main() -> int:
         elf = parse_elf(f.read())
 
     problems = check_elf(elf, regions)
+    used = usage(elf, regions)
+    problems += check_budget(used, args.max_flash, args.max_ram)
 
     if args.uf2:
         flash = regions["FLASH"]
@@ -298,10 +350,7 @@ def main() -> int:
 
     if not args.quiet:
         flash, ram = regions["FLASH"], regions["RAM"]
-        flash_used = sum(s.filesz for s in elf.segments)
-        ram_used = sum(
-            s.memsz for s in elf.segments if ram.contains_range(s.vaddr, s.memsz)
-        )
+        flash_used, ram_used = used
         print(f"{args.elf}")
         print(f"  entry      {elf.entry:#010x}")
         print(
@@ -312,6 +361,10 @@ def main() -> int:
             f"  ram        {ram_used:>7} / {ram.length} bytes"
             f"  ({100 * ram_used / ram.length:.1f}%)"
         )
+        if args.max_flash is not None or args.max_ram is not None:
+            print(
+                f"  ceilings   flash {args.max_flash or '-'}, ram {args.max_ram or '-'}"
+            )
         if args.uf2:
             print(f"  uf2        {len(blocks)} blocks, family {int(args.family, 0):#x}")
 

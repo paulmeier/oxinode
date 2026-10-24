@@ -208,6 +208,39 @@ class TestRejectsBrokenImages(unittest.TestCase):
         self.assertTrue(check_layout.check_elf(elf, {"FLASH": FLASH}))
 
 
+class TestBudget(unittest.TestCase):
+    """The ceilings: a budget the image is held to, below the chip's limits."""
+
+    def used(self):
+        return check_layout.usage(check_layout.parse_elf(good_elf()), REGIONS)
+
+    def test_usage_counts_loaded_bytes_and_ram_including_bss(self):
+        # 0x500 of text and 4 of .data's initial values in flash; .data's 4
+        # and .bss's 0x200 in RAM.
+        self.assertEqual(self.used(), check_layout.Usage(flash=0x504, ram=0x204))
+
+    def test_no_ceiling_is_no_problem(self):
+        self.assertEqual(check_layout.check_budget(self.used()), [])
+
+    def test_exactly_at_a_ceiling_is_allowed(self):
+        self.assertEqual(check_layout.check_budget(self.used(), 0x504, 0x204), [])
+
+    def test_a_byte_over_the_flash_ceiling_fails_and_says_by_how_much(self):
+        problems = check_layout.check_budget(self.used(), max_flash=0x503)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("flash 1284 bytes is over its ceiling of 1283 by 1", problems[0])
+
+    def test_a_byte_over_the_ram_ceiling_fails_and_says_by_how_much(self):
+        problems = check_layout.check_budget(self.used(), max_ram=0x203)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("ram 516 bytes is over its ceiling of 515 by 1", problems[0])
+
+    def test_each_ceiling_is_its_own_check(self):
+        # A RAM ceiling says nothing about flash, and the other way round.
+        self.assertEqual(check_layout.check_budget(self.used(), max_ram=0x204), [])
+        self.assertEqual(len(check_layout.check_budget(self.used(), 1, 1)), 2)
+
+
 class TestUf2Checking(unittest.TestCase):
     def setUp(self):
         self.image = bytes((i * 13) & 0xFF for i in range(700))

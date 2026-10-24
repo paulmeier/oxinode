@@ -21,6 +21,18 @@ cargo build --release                                                  # the fou
 cargo build --release --no-default-features --features ble --bin rnode  # the product image
 ```
 
+`node` adds a Reticulum stack to the product image, for the board as a node
+of its own when no host is attached. It goes on top of `ble`, and `test.sh`
+builds it into a target directory of its own so it never replaces the RNode
+image a developer flashes:
+
+```bash
+cargo build --release --no-default-features --features ble,node --bin rnode --target-dir target/node
+```
+
+Without `node` the image links no stack, no allocator and no heap. With it,
+the image is held to the ceilings on [Memory layout](../hardware/memory-layout.md#the-budget-for-the-image-with-a-node).
+
 Release builds are `opt-level = "s"` with fat LTO, one codegen unit,
 `panic = "abort"`, and debug info kept (it costs nothing in flash and makes a
 fault address resolvable). Debug builds keep `opt-level = "s"` too, because

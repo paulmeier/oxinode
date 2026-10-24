@@ -39,6 +39,13 @@ ble = [
     "nrf-mpsl/critical-section-impl",
 ]
 
+# A Reticulum stack in the product image, for the board as a node of its own
+# when no host is attached. On top of `ble`, since only `rnode` carries it:
+#     cargo build --release --no-default-features --features ble,node --bin rnode
+# Without it the image is the RNode and links no stack at all. See
+# `oxinode_core::node` and `oxinode::node`.
+node = ["oxinode-core/node", "dep:embedded-alloc", "dep:log"]
+
 [dependencies]
 oxinode-core = { path = "core" }
 critical-section = "1.2"
@@ -124,6 +131,13 @@ trouble-host = { version = "0.8", optional = true, default-features = false, fea
     "security",
 ] }
 static_cell = "2.1"
+
+# For `node`: `rns-core` is `no_std` with `alloc`, so the image needs a heap,
+# and it logs through `log`, which `oxinode::node` hands to defmt. The level
+# is cut at compile time like defmt's, so the stack's debug and trace lines
+# and their format strings are not in the image at all.
+embedded-alloc = { version = "0.7", optional = true, features = ["llff"] }
+log = { version = "0.4", optional = true, features = ["max_level_info", "release_max_level_info"] }
 
 [build-dependencies]
 # Shares the memory.x parser with the firmware, so the address baked into the

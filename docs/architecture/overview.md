@@ -9,7 +9,7 @@ flowchart TB
         sim["oxinode-sim<br/>renders the interface, golden images, terminal mode"]
     end
     subgraph nostd["no_std, host-testable"]
-        core["oxinode-core<br/>radio config · RNode protocol · KISS · provisioning<br/>air header · CSMA · screens · editor · pad timing · GPS parser · SH1107 frame"]
+        core["oxinode-core<br/>radio config · RNode protocol · KISS · provisioning<br/>air header · CSMA · screens · editor · pad timing · GPS parser · SH1107 frame<br/>with node: a Reticulum node on rns-core"]
         panel["monopanel<br/>Canvas · Layout · Nav · menus · font<br/>no dependencies"]
     end
     subgraph target["thumbv7em-none-eabihf only"]
@@ -26,7 +26,7 @@ flowchart TB
 | Crate | Path | Target | What is in it |
 |---|---|---|---|
 | `oxinode` | `src/` | Cortex-M only | The firmware: drivers, tasks, and the images in `src/bin/`. Depends on `embassy-nrf`, which only builds for the target, so it has no unit tests and never will. |
-| `oxinode-core` | `core/` | `no_std`, builds anywhere | Everything decidable without a peripheral. Unit tested on the host; the bulk of the project's tests. Nothing here may depend on `embassy-*`, `cortex-m`, or any chip. |
+| `oxinode-core` | `core/` | `no_std`, builds anywhere | Everything decidable without a peripheral. Unit tested on the host; the bulk of the project's tests. Nothing here may depend on `embassy-*`, `cortex-m`, or any chip. With the `node` feature it also holds the board's own Reticulum node, on `rns-core`, and needs `alloc`. |
 | `monopanel` | `panel/` | `no_std`, no dependencies | The on-device interface as a crate with nothing of oxinode in it: a `Canvas` trait, a `Layout` derived from the canvas size, a navigator over application-supplied screens, menus, a font, and an optional `embedded-graphics` adapter. |
 | `oxinode-sim` | `sim/` | host only | The panel simulator: any screen to a PNG, the menus in a terminal, and the golden-image regression set. |
 

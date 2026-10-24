@@ -12,3 +12,18 @@ publish = false
 # is here -- the screens, their content, the editor -- is what oxinode
 # supplies to it through its public interface, and nothing else.
 monopanel = { path = "../panel" }
+
+# A Reticulum stack, for the board as a node of its own when no host is
+# attached. `rns-core` and `rns-crypto` (rns-rs, under the Reticulum License,
+# the same terms as this firmware) are `no_std` with `alloc` in this shape, so
+# a build with `node` needs a global allocator -- the firmware supplies one,
+# and the host tests have std's. Off by default: without it this crate has no
+# dependency beyond the interface crate, and the RNode never links a stack.
+rns-core = { version = "0.6.0", optional = true, default-features = false }
+rns-crypto = { version = "0.2.1", optional = true, default-features = false }
+# What the engine draws randomness from: ChaCha20, seeded from the chip's
+# hardware RNG once at boot (see `node::Entropy` for why not the RNG itself).
+rand_chacha = { version = "0.10", optional = true, default-features = false }
+
+[features]
+node = ["dep:rns-core", "dep:rns-crypto", "dep:rand_chacha"]

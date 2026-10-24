@@ -30,6 +30,8 @@ pub mod linker_script;
 pub mod logbuf;
 pub mod lr1121;
 pub mod meshtastic;
+#[cfg(feature = "node")]
+pub mod node;
 pub mod pad;
 pub mod rnode;
 pub mod screens;

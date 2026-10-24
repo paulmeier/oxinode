@@ -2,9 +2,10 @@
 
 Everything under `tools/` runs on the host. The shell scripts are written for
 macOS's bash 3.2; the Python needs only the standard library, except the
-exchange runner, whose two peers need Reticulum, the touch series, which
-borrows pyserial from the Python Reticulum runs under, and the log reader,
-which calls libusb through `ctypes`.
+exchange runner, whose two peers need Reticulum, the test-vector writer,
+which needs it too, the touch series, which borrows pyserial from the Python
+Reticulum runs under, and the log reader, which calls libusb through
+`ctypes`.
 
 | Tool | What it does |
 |---|---|
@@ -17,8 +18,9 @@ which calls libusb through `ctypes`.
 | `setter_burst.py` | Writes RNode setters back to back and counts the ones the board answers, in three host behaviours. The recipe for issue #36. |
 | `touch_series.py` | Reflashes a board by 1200-baud touch, round after round, each touch taken with a phone's Bluetooth link up, and counts the times serial DFU does not answer. The recipe for issue #23. |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
+| `node_vectors.py` | Writes the Reticulum packets `oxinode_core::node` is tested against, from stock Python Reticulum: an `lxmf.delivery` announce and a path request. Run by hand; its output is committed. |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
-| `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`. See [Memory layout](../hardware/memory-layout.md). |
+| `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`, and with `--max-flash` and `--max-ram` against a budget. See [Memory layout](../hardware/memory-layout.md). |
 | `crate_version.py` | Reads the version out of `Cargo.toml`. |
 | `package.sh` | Builds every image and lays out the files that go on a release under `dist/`. |
 | `release_notes.sh` | Writes the body of a release to stdout. |

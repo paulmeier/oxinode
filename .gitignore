@@ -23,6 +23,9 @@ target
 # Build outputs from the UF2 flashing path
 *.uf2
 *.bin
+# ...except the Reticulum packets the node is tested against, which are
+# inputs, not outputs (tools/node_vectors.py writes them).
+!core/src/node/vectors/*.bin
 
 # Python bytecode from the host-side tooling
 __pycache__/
