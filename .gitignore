@@ -36,6 +36,9 @@ __pycache__/
 
 # Bootstrapped by tools/dfu-flash.sh when adafruit-nrfutil is not on PATH
 /tools/.venv/
+
+# The bench peer's identity, kept between runs (tools/peer.py)
+/tools/.peer/
 *.hex
 *.zip
 

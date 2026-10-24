@@ -2,8 +2,8 @@
 
 Everything under `tools/` runs on the host. The shell scripts are written for
 macOS's bash 3.2; the Python needs only the standard library, except the
-exchange runner, whose two peers need Reticulum, the test-vector writer,
-which needs it too, the touch series, which borrows pyserial from the Python
+exchange runner, whose two peers need Reticulum, the bench peer, which needs
+Reticulum and LXMF, the test-vector writer, which needs Reticulum too, the touch series, which borrows pyserial from the Python
 Reticulum runs under, and the log reader, which calls libusb through
 `ctypes`.
 
@@ -18,6 +18,7 @@ Reticulum runs under, and the log reader, which calls libusb through
 | `setter_burst.py` | Writes RNode setters back to back and counts the ones the board answers, in three host behaviours. The recipe for issue #36. |
 | `touch_series.py` | Reflashes a board by 1200-baud touch, round after round, each touch taken with a phone's Bluetooth link up, and counts the times serial DFU does not answer. The recipe for issue #23. |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
+| `peer.py` | A Reticulum and LXMF peer on the bench, through the second board: checks the board's announces, sends it messages and times the proofs, and checks the messages it sends back. The other end of every messaging test. See [below](#peerpy). |
 | `node_vectors.py` | Writes the Reticulum packets `oxinode_core::node` is tested against, from stock Python Reticulum: an `lxmf.delivery` announce and a path request. Run by hand; its output is committed. |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
 | `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`, and with `--max-flash` and `--max-ram` against a budget. See [Memory layout](../hardware/memory-layout.md). |
@@ -93,6 +94,76 @@ Exit status is zero only when every exchange delivered the bytes that were
 sent. `tools/test_air_exchange.py` pins what it claims about Reticulum's
 framing: the overhead that makes a 400-byte packet 400 bytes on the air, the
 plan, and the config that keeps the two instances apart.
+
+## `peer.py`
+
+```bash
+python3.11 tools/peer.py --rnode /dev/cu.usbmodem3101 --board-log 65C11224153B1DFD --send 3
+```
+
+The other end of a messaging test: stock Python Reticulum and LXMF in a
+configuration directory of their own, speaking through the second bench board
+as an ordinary `RNodeInterface`, to a board under test that has no host and is
+a node of its own. It keeps one identity between runs, in `tools/.peer/`, and
+announces it as `Bench peer` when it starts and again when it first hears the
+board, so a board that came up later still learns it.
+
+- **Announces.** Every frame is read as it comes off the air, before
+  Reticulum drops repeats, and every `lxmf.delivery` announce is checked by
+  the peer itself: the name hash, the destination hash against the key, the
+  Ed25519 signature over what Reticulum signs, and the display name and stamp
+  cost in the app data as LXMF reads them. Each is printed with its hops,
+  whether it carries a ratchet, the announcing node's clock, its size and its
+  signal, and a repeat is marked as one. An announce sent in answer to a path
+  request is checked the same way but called a path response, and is not
+  counted as the board announcing. The board is the hash given with
+  `--board`, or the first `lxmf.delivery` announce that checks out.
+- **Messages to the board.** Once the board has announced, and a few seconds
+  after, it sends opportunistic LXMF messages one at a time through LXMF's own
+  router, and prints the proof and how long it took, or the failure. Content
+  too long to go in one packet is refused before the run starts, because LXMF
+  would quietly send it over a link instead.
+- **Messages from the board.** Every message is printed with LXMF's own
+  signature check, and the peer reads its framing itself and checks that the
+  hash comes out as LXMF's.
+
+The run stops when everything asked for has happened, or after `--seconds`,
+and exits non-zero if anything is missing or did not check out: so it is a
+regression run as well as something to watch. Everything goes to
+`target/peer/<time>/`: `events.log`, `summary.txt`, `reticulum.log`, and the
+`defmt` log of each oxinode through `log_reader.py`.
+
+| Option | |
+|---|---|
+| `--rnode` | the KISS port of the board the peer speaks through |
+| `--board` | the board's `lxmf.delivery` hash; by default the first one heard that checks out |
+| `--board-log` | the board under test's USB serial number, to keep its log |
+| `--rnode-log` | the RNode's USB serial number, or `none`; by default looked up from `--rnode` |
+| `--board-elf`, `--rnode-elf` | the ELFs the two run, for their logs (default the node build and the release `rnode`) |
+| `--expect-announces` | announces from the board to see (default 1) |
+| `--send` | messages to send it (default 0) |
+| `--expect-proofs` | proofs to see (default one per message sent) |
+| `--expect-messages` | messages from the board to see (default 0) |
+| `--text`, `--title` | what to send; `{n}` and `{time}` in the text are filled in |
+| `--settle`, `--gap` | seconds from the board's first announce to the first message (default 5), and from one message's end to the next (default 10) |
+| `--announce-every` | seconds between the peer's own announces, beyond the two above (default 0, none) |
+| `--seconds` | the longest the run lasts (default 120) |
+| `--listen` | run all of `--seconds` even once everything expected has happened |
+| `--name`, `--identity` | the peer's display name and where its identity is kept |
+| `--frequency`, `--bandwidth`, `--txpower`, `--spreadingfactor`, `--codingrate` | the radio configuration, which must be the board under test's stored one |
+| `--timeout`, `--out` | as for `air_exchange.py` |
+
+The RNode the peer speaks through must have no phone connected: while one is,
+the board sends what it hears to the phone, and the peer hears nothing. If
+Reticulum refuses the configuration, the radio may be locked by an earlier
+host; the peer says so with Reticulum's error rather than waiting.
+
+`tools/test_peer.py` pins what it claims about the framing: the announce
+`node_vectors.py` wrote, read field by field and with a ratchet and a second
+header added; the 295 bytes of content that fit in one packet; where the
+message hash comes from and why a stamp is not part of it; and the msgpack
+subset it reads with. Run under the Python Reticulum is installed in, it also
+holds each reading to Reticulum's and LXMF's own.
 
 ## `log_reader.py`
 
