@@ -38,12 +38,21 @@
 //! unverified while the board asks for the sender's key. What is done with
 //! each is [`oxinode_core::node::Station::take`]'s, and is tested there; this
 //! logs it. A new message wakes the panel.
+//!
+//! A message the board writes -- a reply from a conversation's menu -- is
+//! queued in the station's outbox and followed until its proof comes back
+//! or it fails; the rules are [`oxinode_core::node::outbox`]'s. Encrypting
+//! an attempt takes about a tenth of a second, so it is built on a pass when
+//! the radio is quiet, like looking at a heard packet, and then waits to go
+//! as the node's other packets do. Under a host the outbox is held, and an
+//! attempt built and not yet sent is let go uncounted.
 
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::Peri;
 use oxinode_core::mode::{Change, Mode, Seen};
 use oxinode_core::rnode::air::Signal;
 use oxinode_core::screens::{Conversations, NodeHashes, Peers, Read, Thread};
+use oxinode_core::ui::Refusal;
 
 use crate::store::{RecordFlash, Storage};
 
@@ -68,11 +77,13 @@ mod imp {
     use oxinode_core::node::announce::{self, Kind};
     use oxinode_core::node::key::{NodeKey, Stored};
     use oxinode_core::node::messages::{Arrival, Trust};
+    use oxinode_core::node::outbox::give_up_ms;
     use oxinode_core::node::peers::{Learned, Table};
     use oxinode_core::node::{
-        announce_len, lxmf_app_data, Entropy, Event, Followed, Inbox, Node, Outcome, Sending,
-        Station, Unreadable, TICK_MS,
+        announce_len, lxmf_app_data, Attempt, Entropy, Event, Followed, Inbox, Node, Outcome,
+        Sending, Station, Step, Unreadable, Unsent, TICK_MS,
     };
+    use oxinode_core::screens::{Failure, Wait};
 
     use super::*;
 
@@ -109,8 +120,12 @@ mod imp {
         app_data: Vec<u8>,
         /// Packets heard and waiting for the engine.
         inbox: Inbox,
-        /// Who else is around, and what they have sent.
+        /// Who else is around, what they have sent, and what the board has
+        /// sent them.
         station: Station,
+        /// An attempt at one of the board's messages, built and waiting for
+        /// the air, with the message's hash.
+        ready: Option<([u8; 32], Attempt)>,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
@@ -154,6 +169,7 @@ mod imp {
                 app_data: Vec::new(),
                 inbox: Inbox::new(),
                 station: Station::new(),
+                ready: None,
                 entropy: Entropy::from_seed(seed),
                 last_tick_ms: now_ms(),
                 reported_peak: 0,
@@ -258,14 +274,100 @@ mod imp {
         fn follow_mode(&mut self) {
             let running = self.running() && self.node.is_some();
             match self.sending.follow(running, now_ms()) {
-                Some(Followed::Started) => defmt::info!("node: running; an announce is due"),
-                Some(Followed::Stopped(dropped)) => defmt::info!(
-                    "node: stopped; {=usize} packets it had waiting were dropped, {=u32} in all; {=usize} heard and not yet looked at",
-                    dropped,
-                    self.sending.dropped(),
-                    self.inbox.clear()
+                Some(Followed::Started) => defmt::info!(
+                    "node: running; an announce is due, and {=usize} held messages are queued again",
+                    self.station.outbox.resume(now_ms())
                 ),
+                Some(Followed::Stopped(dropped)) => {
+                    defmt::info!(
+                        "node: stopped; {=usize} packets it had waiting were dropped, {=u32} in all; {=usize} heard and not yet looked at",
+                        dropped,
+                        self.sending.dropped(),
+                        self.inbox.clear()
+                    );
+                    // An attempt built and not sent is not counted: the
+                    // message is held, and goes again when the node runs.
+                    self.ready = None;
+                    let held = self.station.outbox.hold(self.held().unwrap_or(Wait::Host));
+                    if held > 0 {
+                        defmt::info!("node: {=usize} messages on their way held", held);
+                    }
+                }
                 None => {}
+            }
+        }
+
+        /// Why a message written now would wait, if the node is not running.
+        fn held(&self) -> Option<Wait> {
+            match self.presence.mode(self.stored_config) {
+                Mode::Node => None,
+                Mode::Rnode(_) => Some(Wait::Host),
+                Mode::Idle => Some(Wait::Idle),
+            }
+        }
+
+        /// Write `content` to `peer`, from a conversation's menu: queued, and
+        /// held if the node is not running. Says why not, if it was not.
+        pub fn reply(&mut self, peer: [u8; 16], content: &str) -> Result<(), Refusal> {
+            // Never, in practice: the identity is adopted at boot, before
+            // the panel can open a conversation.
+            let Some(node) = self.node.as_ref() else {
+                defmt::error!("node: a message written before the node has an identity");
+                return Err(Refusal::Full);
+            };
+            let now = now_ms();
+            let timestamp = self.station.clock_s(gps_seconds(), now);
+            let held = self.held();
+            match self
+                .station
+                .compose(node, &peer, content, timestamp, now, held)
+            {
+                Ok(hash) => {
+                    defmt::info!(
+                        "node: message {=[u8]:02x} to {=[u8]:02x} queued, {=usize} bytes, stamped {=u64}{=str}",
+                        &hash[..8],
+                        &peer[..],
+                        content.len(),
+                        timestamp,
+                        match held {
+                            None => "",
+                            Some(Wait::Idle) => "; held: no radio config",
+                            Some(_) => "; held while a host has the radio",
+                        }
+                    );
+                    Ok(())
+                }
+                Err(Unsent::Full) => {
+                    defmt::warn!(
+                        "node: a message to {=[u8]:02x} refused: every one kept is on its way",
+                        &peer[..]
+                    );
+                    Err(Refusal::Full)
+                }
+                Err(Unsent::TooLong(over)) => {
+                    defmt::warn!(
+                        "node: a message to {=[u8]:02x} is {=usize} bytes too long for a packet",
+                        &peer[..],
+                        over
+                    );
+                    Err(Refusal::TooLong)
+                }
+            }
+        }
+
+        /// *Retry Failed* in the conversation with `peer`.
+        pub fn retry_failed(&mut self, peer: [u8; 16]) -> Result<(), Refusal> {
+            let held = self.held();
+            match self.station.outbox.retry(&peer, now_ms(), held) {
+                0 => Err(Refusal::NothingFailed),
+                n => {
+                    defmt::info!(
+                        "node: {=usize} failed messages to {=[u8]:02x} queued again",
+                        n,
+                        &peer[..]
+                    );
+                    Ok(())
+                }
             }
         }
 
@@ -288,20 +390,54 @@ mod imp {
             nobody_on_the_line: impl FnOnce() -> bool,
         ) -> Option<Outgoing> {
             self.follow_mode();
-            if !self.running() {
+            if !self.running() || !nobody_on_the_line() {
                 return None;
             }
-            self.sending
-                .next(nobody_on_the_line())
-                .map(|(packet, kind)| Outgoing { packet, kind })
+            if let Some((packet, kind)) = self.sending.next(true) {
+                return Some(Outgoing {
+                    packet,
+                    kind: Source::Node(kind),
+                });
+            }
+            let (hash, attempt) = self.ready.take()?;
+            Some(Outgoing {
+                packet: attempt.packet,
+                kind: Source::Message {
+                    hash,
+                    packet_hash: attempt.packet_hash,
+                },
+            })
         }
 
         /// What became of a packet [`Listener::next_packet`] gave out:
         /// `Some(airtime)` if it went. An announce that went spends the
-        /// budget; one that did not is asked for again.
+        /// budget; one that did not is asked for again. An attempt at a
+        /// message waits for its proof, or is tried again.
         pub fn sent(&mut self, out: Outgoing, went: Option<u32>) {
-            self.sending.sent(out.kind, went, now_ms());
-            if let (Some(kind), Some(airtime_us)) = (out.kind, went) {
+            let kind = match out.kind {
+                Source::Node(kind) => kind,
+                Source::Message { hash, packet_hash } => {
+                    let outbox = &mut self.station.outbox;
+                    outbox.went(&hash, &packet_hash, went, now_ms());
+                    let tries = outbox.get(&hash).map_or(0, |s| s.attempts());
+                    match went {
+                        Some(airtime_us) => defmt::info!(
+                            "node: message {=[u8]:02x} sent, try {=u8}, {=u32} us on the air; failed if unproved in {=u64} ms from the first",
+                            &hash[..8],
+                            tries,
+                            airtime_us,
+                            give_up_ms(airtime_us)
+                        ),
+                        None => defmt::info!(
+                            "node: message {=[u8]:02x} did not go; tried again shortly",
+                            &hash[..8]
+                        ),
+                    }
+                    return;
+                }
+            };
+            self.sending.sent(kind, went, now_ms());
+            if let (Some(kind), Some(airtime_us)) = (kind, went) {
                 defmt::info!(
                     "node: {=str} sent, {=u32} us on the air; the next may go in {=u64} ms",
                     match kind {
@@ -324,11 +460,7 @@ mod imp {
         /// What the GPS says the time is, for an announce's emission time:
         /// Unix seconds, or zero, which Reticulum reads as not known.
         fn emitted_s() -> u64 {
-            let position = crate::gps::position();
-            match (position.date, position.time) {
-                (Some(date), Some(time)) => date.unix_seconds(time).unwrap_or(0),
-                _ => 0,
-            }
+            gps_seconds().unwrap_or(0)
         }
 
         /// Which of the two the board is, for the Home screen.
@@ -353,9 +485,7 @@ mod imp {
 
         /// What the Messages screen shows.
         pub fn conversations(&self) -> Conversations {
-            self.station
-                .messages
-                .conversations(&self.station.peers, now_ms())
+            self.station.conversations(now_ms())
         }
 
         /// Hand `draw` the thread with `peer`, if a conversation is open:
@@ -368,15 +498,14 @@ mod imp {
             let Some(peer) = peer else {
                 return draw(None);
             };
-            let messages = &self.station.messages;
-            let entries = messages.entries(&peer, now_ms());
-            let thread = messages.thread(&peer, &self.station.peers, &entries);
+            let entries = self.station.entries(&peer, now_ms());
+            let thread = self.station.thread(&peer, &entries);
             draw(Some(&thread))
         }
 
         /// The panel has shown a conversation this far.
         pub fn read(&mut self, read: Read) {
-            let marked = self.station.messages.read(read);
+            let marked = self.station.read(read, now_ms());
             if marked > 0 {
                 defmt::info!(
                     "node: {=usize} read from {=[u8]:02x}; {=usize} unread",
@@ -416,6 +545,8 @@ mod imp {
             if !self.running() {
                 return;
             }
+            // One slow thing a quiet pass: a heard packet first, then what
+            // the board's own messages need.
             if radio_quiet {
                 if let (Some(node), Some(inbound)) = (self.node.as_mut(), self.inbox.pop()) {
                     let mut out =
@@ -425,6 +556,21 @@ mod imp {
                             .take(node, &mut out, inbound.at_ms, &mut self.entropy);
                     self.learn(&events);
                     self.report(out);
+                } else if self.ready.is_none() {
+                    if let Some(node) = self.node.as_mut() {
+                        let mut events = Vec::new();
+                        let step =
+                            self.station
+                                .step(node, now_ms(), &mut self.entropy, &mut events);
+                        self.learn(&events);
+                        match step {
+                            Some(Step::Packet(packet)) => self.sending.push(packet, None),
+                            Some(Step::Attempt { hash, attempt }) => {
+                                self.ready = Some((hash, attempt))
+                            }
+                            None => {}
+                        }
+                    }
                 }
             }
             let now = now_ms();
@@ -498,6 +644,28 @@ mod imp {
                         source,
                         arrival,
                     } => self.log_message(hash, source, *arrival),
+                    Event::Delivered { hash, to } => defmt::info!(
+                        "node: message {=[u8]:02x} to {=[u8]:02x} delivered: its proof holds; {=u32} delivered in all",
+                        &hash[..8],
+                        &to[..],
+                        self.station.outbox.delivered()
+                    ),
+                    Event::Unclaimed => defmt::info!(
+                        "node: a proof for no packet of the board's, or not signed by its recipient"
+                    ),
+                    Event::Asked { to } => defmt::info!(
+                        "node: no key for {=[u8]:02x}; its path asked for, to send to it",
+                        &to[..]
+                    ),
+                    Event::Failed { hash, to, why } => defmt::warn!(
+                        "node: message {=[u8]:02x} to {=[u8]:02x} failed: {=str}",
+                        &hash[..8],
+                        &to[..],
+                        match why {
+                            Failure::NoPath => "no path came",
+                            Failure::NoProof => "no proof came after every try",
+                        }
+                    ),
                     Event::Unreadable(why) => match why {
                         Unreadable::NotOpportunistic {
                             packet_type,
@@ -599,7 +767,27 @@ mod imp {
     /// A packet of the node's on its way to the air.
     pub struct Outgoing {
         packet: Vec<u8>,
-        kind: Option<Kind>,
+        kind: Source,
+    }
+
+    /// Whose a packet on its way is, to say what became of it.
+    enum Source {
+        /// The engine's, an answer, or an announce of this kind.
+        Node(Option<Kind>),
+        /// An attempt at one of the board's messages.
+        Message {
+            hash: [u8; 32],
+            packet_hash: [u8; 32],
+        },
+    }
+
+    /// What the GPS says the time is, in Unix seconds, if it has said.
+    fn gps_seconds() -> Option<u64> {
+        let position = crate::gps::position();
+        match (position.date, position.time) {
+            (Some(date), Some(time)) => date.unix_seconds(time),
+            _ => None,
+        }
     }
 
     impl Outgoing {
@@ -798,5 +986,15 @@ impl Listener {
     #[inline(always)]
     pub fn arrived(&self) -> u32 {
         0
+    }
+
+    #[inline(always)]
+    pub fn reply(&mut self, _peer: [u8; 16], _content: &str) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn retry_failed(&mut self, _peer: [u8; 16]) -> Result<(), Refusal> {
+        Ok(())
     }
 }

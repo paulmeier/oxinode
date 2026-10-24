@@ -129,9 +129,11 @@ screens ([#62](https://github.com/paulmeier/oxinode/issues/62)) took the
 image from 583,280 bytes to 593,384 (RAM 122,580): 10,104 bytes for the
 thread's layout and wrapping, the windowed page, and the modem loop's part
 in opening a conversation and marking it read. It is now 608 KiB, about
-29 KB over that, which is room for sending
-([#63](https://github.com/paulmeier/oxinode/issues/63)) and not much more;
-the store and text entry make their own case when they come.
+29 KB over that. Sending and the canned replies
+([#63](https://github.com/paulmeier/oxinode/issues/63),
+[#64](https://github.com/paulmeier/oxinode/issues/64)) took 22,096 bytes of
+it on 2026-10-24, to 615,480 (RAM 122,772), which leaves 7,112; the store and
+text entry make their own case when they come.
 
 ## How the layout is kept honest
 

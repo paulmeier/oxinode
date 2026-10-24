@@ -95,13 +95,36 @@ const HOME_MENU: [Item<Action>; 4] = [
     Item::new("Announce Now", Action::Announce),
 ];
 
-/// What a conversation offers: nothing yet but the way out. The replies
-/// arrive with sending, and are not listed before they do anything.
-const REPLY_MENU: [Item<Action>; 1] = [Item::BACK];
+/// The lines a conversation's menu sends as they are: short, and the ones
+/// a person answers with most, before there is a keyboard. Fixed in the
+/// firmware; each fits a menu line and a packet many times over.
+pub const REPLIES: [&str; 6] = [
+    "OK",
+    "Yes",
+    "No",
+    "On my way",
+    "Can't talk now",
+    "Where are you?",
+];
 
-/// What [`Screen::Peers`] offers: nothing yet but the way out. Messaging a
-/// peer arrives with conversations, and is not listed before it does
-/// anything.
+/// What a conversation offers: the replies, sent at once to the peer whose
+/// conversation it is; the board's position, written when it is sent; and
+/// another go for whatever in the conversation failed.
+const REPLY_MENU: [Item<Action>; 9] = [
+    Item::BACK,
+    Item::new(REPLIES[0], Action::Reply(0)),
+    Item::new(REPLIES[1], Action::Reply(1)),
+    Item::new(REPLIES[2], Action::Reply(2)),
+    Item::new(REPLIES[3], Action::Reply(3)),
+    Item::new(REPLIES[4], Action::Reply(4)),
+    Item::new(REPLIES[5], Action::Reply(5)),
+    Item::new("Send Position", Action::SendPosition),
+    Item::new("Retry Failed", Action::RetryFailed),
+];
+
+/// What [`Screen::Peers`] offers: nothing yet but the way out. Writing to a
+/// peer from here is not there yet, and is not listed before it does
+/// anything; a conversation starts when the peer writes first.
 #[cfg(feature = "node")]
 const PEERS_MENU: [Item<Action>; 1] = [Item::BACK];
 
@@ -321,9 +344,24 @@ pub enum Action {
     /// screen. The caller answers with [`NavExt::open_conversation`]; see
     /// the module docs.
     Open,
+    /// Send [`REPLIES`]`[n]` to the peer whose conversation is open.
+    Reply(u8),
+    /// Send the board's position, as [`crate::screens::position_text`]
+    /// writes it, to the peer whose conversation is open; or say why not.
+    SendPosition,
+    /// Queue again the messages that failed in the open conversation.
+    RetryFailed,
 }
 
 impl Action {
+    /// The text a canned reply sends; `None` for every other action.
+    pub fn reply(self) -> Option<&'static str> {
+        match self {
+            Action::Reply(n) => REPLIES.get(usize::from(n)).copied(),
+            _ => None,
+        }
+    }
+
     /// Its name, for a log.
     pub const fn name(self) -> &'static str {
         match self {
@@ -340,6 +378,10 @@ impl Action {
             Action::Bootloader => "bootloader",
             Action::Announce => "announce now",
             Action::Open => "open conversation",
+            Action::Reply(n) if (n as usize) < REPLIES.len() => REPLIES[n as usize],
+            Action::Reply(_) => "reply",
+            Action::SendPosition => "send position",
+            Action::RetryFailed => "retry failed",
         }
     }
 
@@ -349,7 +391,9 @@ impl Action {
     ///
     /// This is the host-ownership rule in one place. A caller with a host on
     /// the line refuses these and does the rest; see
-    /// `docs/architecture/interface.md`.
+    /// `docs/architecture/interface.md`. A message is not one of them: it is
+    /// written under a host and held until the host has gone, and the
+    /// thread says so.
     pub const fn changes_the_radio(self) -> bool {
         matches!(
             self,
@@ -369,6 +413,54 @@ pub enum Overlay {
     Editor(Editor),
     /// A notice saying why the value cannot be edited. Any key closes it.
     Notice(Lock),
+    /// A notice saying why a message was not sent. Any key closes it.
+    Refused(Refusal),
+}
+
+/// Why a message was not written, from a conversation's menu.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Refusal {
+    /// *Send Position* with no fix: no position is sent rather than a wrong
+    /// one.
+    NoFix,
+    /// Every message the board keeps is still on its way.
+    Full,
+    /// It does not fit in one packet. Never a canned line or the position,
+    /// which are a few dozen bytes; a typed message (#66) is held to the
+    /// limit as it is typed.
+    TooLong,
+    /// *Retry Failed* in a conversation where nothing has failed.
+    NothingFailed,
+}
+
+impl Refusal {
+    /// The word over the notice.
+    pub const fn title(self) -> &'static str {
+        match self {
+            Refusal::NoFix | Refusal::Full | Refusal::TooLong => "Not Sent",
+            Refusal::NothingFailed => "Retry",
+        }
+    }
+
+    /// The first line of the notice.
+    pub const fn headline(self) -> &'static str {
+        match self {
+            Refusal::NoFix => "No position to send.",
+            Refusal::Full => "Too many on the way.",
+            Refusal::TooLong => "Too long to send.",
+            Refusal::NothingFailed => "Nothing has failed.",
+        }
+    }
+
+    /// What it means, and what to do about it.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Refusal::NoFix => "The GPS has no fix yet. See the Position screen.",
+            Refusal::Full => "Wait for one to be delivered or to fail.",
+            Refusal::TooLong => "A message goes in one packet, which this would not fit.",
+            Refusal::NothingFailed => "Every message here is delivered or on its way.",
+        }
+    }
 }
 
 impl Modal<Action> for Overlay {
@@ -377,6 +469,7 @@ impl Modal<Action> for Overlay {
         match self {
             Overlay::Editor(editor) => editor.field().title(),
             Overlay::Notice(_) => "Locked",
+            Overlay::Refused(refusal) => refusal.title(),
         }
     }
 
@@ -424,6 +517,8 @@ pub struct Conversation {
     stops: [u16; THREAD],
     count: u8,
     placed: bool,
+    /// Go to the end when next drawn: something was just written there.
+    to_end: bool,
 }
 
 impl Conversation {
@@ -434,6 +529,7 @@ impl Conversation {
             stops: [0; THREAD],
             count: 0,
             placed: false,
+            to_end: false,
         }
     }
 
@@ -447,11 +543,24 @@ impl Conversation {
         self.placed
     }
 
+    /// Whether it is to be drawn at its end, as [`Conversation::show_end`]
+    /// asked.
+    pub const fn wants_end(&self) -> bool {
+        self.to_end
+    }
+
+    /// Draw it at its end next time: the caller has just written a reply,
+    /// which is there, and which the thread as last drawn did not have.
+    pub fn show_end(&mut self) {
+        self.to_end = true;
+    }
+
     /// Learn where the thread's messages start, from the thread as it is
     /// drawn now, and that it has been placed.
     pub fn lay_out(&mut self, thread: &Thread<'_>) {
         self.count = thread.stops(&mut self.stops) as u8;
         self.placed = true;
+        self.to_end = false;
     }
 
     fn stops(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
@@ -504,6 +613,11 @@ pub trait NavExt {
     fn editor(&self) -> Option<&Editor>;
     /// The notice, while one is showing.
     fn notice_shown(&self) -> Option<Lock>;
+    /// Why a message was not sent, while that is showing.
+    fn refusal_shown(&self) -> Option<Refusal>;
+    /// Say why a message was not sent. The caller's answer to a reply it
+    /// cannot write.
+    fn refuse(&mut self, refusal: Refusal);
     /// Whether an editor or a notice has replaced the screen's content.
     fn is_editing(&self) -> bool;
     /// Open an editor. The caller's answer to [`Action::Edit`] when nobody
@@ -539,6 +653,17 @@ impl NavExt for Nav {
             Some(Overlay::Notice(lock)) => Some(*lock),
             _ => None,
         }
+    }
+
+    fn refusal_shown(&self) -> Option<Refusal> {
+        match self.modal() {
+            Some(Overlay::Refused(refusal)) => Some(*refusal),
+            _ => None,
+        }
+    }
+
+    fn refuse(&mut self, refusal: Refusal) {
+        self.open(Overlay::Refused(refusal));
     }
 
     fn is_editing(&self) -> bool {
@@ -740,10 +865,76 @@ mod tests {
         assert_eq!(nav.current(), Screen::Messages);
         nav.handle(Input::Select);
         assert_eq!(nav.menu(), ("Reply", &REPLY_MENU[..]));
-        assert_eq!(nav.handle(Input::Select), None, "Back only, for now");
+        assert_eq!(nav.handle(Input::Select), None, "Back is not an action");
         nav.handle(Input::Back);
         assert_eq!(nav.conversation(), None);
         assert_eq!(nav.selected(), Some(1), "back on the line it opened");
+    }
+
+    /// The reply menu: Back, every canned line in order, the position and
+    /// the retry. Each line is sent as it reads, and fits the menu.
+    #[test]
+    fn the_reply_menu_sends_each_line_as_it_reads() {
+        assert_eq!(REPLY_MENU[0], Item::BACK);
+        for (n, reply) in REPLIES.iter().enumerate() {
+            let item = REPLY_MENU[1 + n];
+            assert_eq!(item.label, *reply);
+            assert_eq!(item.action, Some(Action::Reply(n as u8)));
+            assert_eq!(item.action.unwrap().reply(), Some(*reply));
+            assert!(reply.len() <= crate::screens::LINE_CHARS - 2, "{reply}");
+        }
+        assert_eq!(REPLY_MENU[7].action, Some(Action::SendPosition));
+        assert_eq!(REPLY_MENU[8].action, Some(Action::RetryFailed));
+        assert_eq!(Action::Reply(REPLIES.len() as u8).reply(), None);
+        assert_eq!(Action::SendPosition.reply(), None);
+        // Writing a message is not taking the radio from a host: it waits.
+        for item in &REPLY_MENU[1..] {
+            assert!(!item.action.unwrap().changes_the_radio(), "{}", item.label);
+        }
+        // And every action has a name of its own, the screens' included.
+        let mut names: Vec<&str> = Screen::ALL
+            .iter()
+            .flat_map(|s| s.menu())
+            .chain(&REPLY_MENU)
+            .filter_map(|i| i.action.map(Action::name))
+            .collect();
+        let all = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), all);
+    }
+
+    /// The reply menu's nine items fit the panel with whichever is
+    /// highlighted in view, as the Radio menu's ten do.
+    #[test]
+    fn the_reply_menu_draws_inside_the_content_area() {
+        for selected in 0..REPLY_MENU.len() {
+            let mut frame = Frame::new();
+            monopanel::menu_of(&mut frame, "Reply", &REPLY_MENU, selected);
+            for x in 0..sh1107::WIDTH {
+                for y in (0..LAYOUT.content_top).chain(LAYOUT.content_bottom..sh1107::HEIGHT) {
+                    assert!(!frame.pixel(x, y), "item {selected} drew at ({x}, {y})");
+                }
+            }
+            let window = monopanel::menu_window(&LAYOUT, REPLY_MENU.len(), selected);
+            assert!(window.contains(&selected), "{selected}");
+        }
+    }
+
+    /// A refusal is a notice: titled for what was refused, closed by any
+    /// key, with nothing done.
+    #[test]
+    fn a_refusal_is_shown_and_any_key_closes_it() {
+        for input in [Input::Up, Input::Left, Input::Select, Input::Back] {
+            let mut nav = nav();
+            nav.refuse(Refusal::NoFix);
+            assert_eq!(nav.refusal_shown(), Some(Refusal::NoFix));
+            assert_eq!(nav.title(), "Not Sent");
+            assert!(nav.is_editing() && nav.notice_shown().is_none());
+            assert_eq!(nav.handle(input), None);
+            assert_eq!(nav.refusal_shown(), None, "{input:?}");
+        }
+        assert_eq!(Overlay::Refused(Refusal::NothingFailed).title(), "Retry");
     }
 
     /// Every title clears both corners of the title bar with a cell to

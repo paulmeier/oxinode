@@ -15,8 +15,11 @@
 //! confirmed `Set` lands in the scene's own state, so the screen after an
 //! edit shows the value that was set. An `Open` opens the conversation on
 //! the highlighted line, drawn from the scene's [`Recorded`] conversations,
-//! and what a thread shows is marked read in them as the node would. Nothing
-//! else is acted on; the actions are collected for the caller to look at.
+//! and what a thread shows is marked read in them as the node would. A reply
+//! from a conversation's menu lands at the end of its thread, queued -- held
+//! under a host -- and one the board would refuse opens the refusal, as on
+//! the board; *Retry Failed* queues the failed ones again. Nothing else is
+//! acted on; the actions are collected for the caller to look at.
 
 use monopanel::Canvas;
 use oxinode_core::battery;
@@ -26,8 +29,8 @@ use oxinode_core::lr1121::config::{ConfigError, RadioConfig, BENCH_2G4, DEFAULT}
 use oxinode_core::rnode::air::Signal;
 use oxinode_core::rnode::hosts::Transport;
 use oxinode_core::screens::{
-    self, Air, BluetoothScreen, ConversationRow, Home, Host, Identity, Mode, NodeHashes, PeerName,
-    PeerRow, Peers, Position, Radio, State, System, PEERS,
+    self, Air, BluetoothScreen, ConversationRow, Delivery, Direction, Home, Host, Identity, Mode,
+    NodeHashes, PeerName, PeerRow, Peers, Position, Radio, State, System, Wait, PEERS,
 };
 use oxinode_core::sh1107::Frame;
 use oxinode_core::status::Bluetooth;
@@ -509,8 +512,70 @@ impl Scene {
                     self.nav.open_conversation(row.peer);
                 }
             }
+            (Action::Reply(_) | Action::SendPosition | Action::RetryFailed, _) => {
+                match self.write(action) {
+                    Err(refusal) => self.nav.refuse(refusal),
+                    // What was written is at the end of the thread: shown.
+                    Ok(()) if action != Action::RetryFailed => {
+                        if let Some(open) = self.nav.conversation_mut() {
+                            open.show_end();
+                        }
+                    }
+                    Ok(()) => {}
+                }
+            }
             _ => {}
         }
+    }
+
+    /// A reply, or a retry, in the open conversation: what the node does to
+    /// the thread, as far as a recording can show it.
+    fn write(&mut self, action: Action) -> Result<(), ui::Refusal> {
+        let Some(peer) = self.nav.conversation().map(|c| c.peer()) else {
+            return Ok(());
+        };
+        let held = if self.state.home.host.lock().is_some() {
+            Wait::Host
+        } else if self.state.home.mode == Some(Mode::Idle) {
+            Wait::Idle
+        } else {
+            Wait::Turn
+        };
+        let Some(recorded) = self.recorded.iter_mut().find(|r| r.peer == peer) else {
+            return Ok(());
+        };
+        let content = match action {
+            Action::RetryFailed => {
+                let failed = recorded
+                    .messages
+                    .iter_mut()
+                    .filter(|m| matches!(m.direction, Direction::Sent(Delivery::Failed(_))));
+                let mut any = false;
+                for m in failed {
+                    m.direction = Direction::Sent(Delivery::Queued(held));
+                    any = true;
+                }
+                return if any {
+                    Ok(())
+                } else {
+                    Err(ui::Refusal::NothingFailed)
+                };
+            }
+            Action::SendPosition => {
+                let mut text = String::new();
+                screens::position_text(&self.state.position, &mut text)?;
+                text
+            }
+            _ => action.reply().unwrap_or_default().to_string(),
+        };
+        recorded.messages.push(conversation::Message {
+            direction: Direction::Sent(Delivery::Queued(held)),
+            age_s: Some(0),
+            content,
+            attachment: false,
+            unread: false,
+        });
+        Ok(())
     }
 
     /// Press every key in a script, in order, returning the actions chosen.

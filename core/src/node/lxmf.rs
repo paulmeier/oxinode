@@ -1,11 +1,12 @@
-//! The part of LXMF the board reads: a message that arrived in one packet.
+//! The part of LXMF the board speaks: a message in one packet, either way.
 //!
 //! `rns-core` has no LXMF, so this is written here, from LXMF 1.1.1's
-//! `LXMessage.unpack_from_bytes`, and tested against messages LXMF itself
-//! packed (`tools/lxmf_vectors.py`). It is the opportunistic subset: a message
-//! small enough for one packet, encrypted to the board's `lxmf.delivery`
-//! destination, with no link. Links, resources and propagation nodes are
-//! later work (#67), and a message that needs them never reaches this.
+//! `LXMessage.unpack_from_bytes` and `LXMessage.pack`, and tested against
+//! messages LXMF itself packed (`tools/lxmf_vectors.py`). It is the
+//! opportunistic subset: a message small enough for one packet, encrypted to
+//! an `lxmf.delivery` destination, with no link. Links, resources and
+//! propagation nodes are later work (#67), and a message that needs them
+//! never reaches this, nor leaves it: [`pack`] refuses one.
 //!
 //! # The wire format
 //!
@@ -47,6 +48,20 @@
 //! the board does not show ([`Message::attachment`]). The fields themselves
 //! are not kept. The board cannot show an image, a file or a voice message,
 //! and saying one came is more honest than saying nothing.
+//!
+//! # What the board sends
+//!
+//! What LXMF packs, as LXMF packs it: the timestamp as a double, the title
+//! and the content as bytes, and an empty map of fields. The board writes no
+//! title, as the phones write none. It is signed once, by [`pack`], and
+//! encrypted afresh for every attempt, as LXMF encrypts a retry.
+//!
+//! One packet carries [`ENCRYPTED_MDU`] bytes of what is encrypted, which is
+//! [`MAX_CONTENT`] bytes of text with no title. That is a little less than
+//! LXMF's own limit for one packet, 295 bytes: LXMF sizes its limit for a
+//! packet with one address, and one sent through a transport node carries a
+//! second, which past 287 bytes makes the packet longer than Reticulum
+//! sends. The board's limit is the one that always fits.
 
 extern crate alloc;
 
@@ -81,6 +96,107 @@ pub const DESCRIPTIVE_FIELDS: [u64; 5] = [
     0x0f, // FIELD_RENDERER
     0x30, // FIELD_REPLY_TO
 ];
+
+/// The most one packet to a single destination carries encrypted, with two
+/// addresses in its header: Reticulum's `Packet.ENCRYPTED_MDU`.
+pub const ENCRYPTED_MDU: usize = rns_core::constants::ENCRYPTED_MDU;
+
+/// The most text a message the board sends can carry, in bytes of UTF-8,
+/// with no title: what makes [`ENCRYPTED_MDU`] exactly. A source, a
+/// signature, then the payload: an array header, a double, an empty title,
+/// the content as bin16 and an empty map.
+pub const MAX_CONTENT: usize = ENCRYPTED_MDU - (HASH_LEN + SIGNATURE_LEN + 1 + 9 + 2 + 3 + 1);
+
+/// A message the board would send that does not fit in one packet, by this
+/// many bytes. It is refused, never cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLong {
+    pub over: usize,
+}
+
+/// A message the board has packed and signed: what is encrypted for every
+/// attempt, and the hash its proofs and its retries are known by.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Outbound {
+    /// The message hash: the same for every attempt.
+    pub hash: [u8; 32],
+    /// The recipient's `lxmf.delivery` address.
+    pub destination: [u8; HASH_LEN],
+    /// The source, the signature and the payload: what LXMF encrypts, with
+    /// the destination stripped as it is on the air.
+    plaintext: Vec<u8>,
+}
+
+impl core::fmt::Debug for Outbound {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Outbound")
+            .field("hash", &self.hash)
+            .field("destination", &self.destination)
+            .field("len", &self.plaintext.len())
+            .finish()
+    }
+}
+
+impl Outbound {
+    /// What is encrypted to the recipient.
+    pub fn plaintext(&self) -> &[u8] {
+        &self.plaintext
+    }
+}
+
+/// A message from `identity`, whose `lxmf.delivery` address is `source`, to
+/// `destination`: `content`, no title, no fields, stamped `timestamp_s` Unix
+/// seconds. Packed and signed as LXMF's `LXMessage.pack` does.
+pub fn pack(
+    identity: &Identity,
+    source: &[u8; HASH_LEN],
+    destination: &[u8; HASH_LEN],
+    timestamp_s: u64,
+    content: &str,
+) -> Result<Outbound, TooLong> {
+    if content.len() > MAX_CONTENT {
+        return Err(TooLong {
+            over: content.len() - MAX_CONTENT,
+        });
+    }
+    let mut payload = Vec::with_capacity(content.len() + 16);
+    payload.push(0x94);
+    // The one float the board writes, made here from whole seconds and
+    // written straight out: LXMF stamps every message with `time.time()`.
+    payload.push(0xcb);
+    payload.extend_from_slice(&(timestamp_s as f64).to_be_bytes());
+    payload.extend_from_slice(&[0xc4, 0x00]);
+    let len = content.len();
+    if len <= usize::from(u8::MAX) {
+        payload.extend_from_slice(&[0xc4, len as u8]);
+    } else {
+        payload.push(0xc5);
+        payload.extend_from_slice(&(len as u16).to_be_bytes());
+    }
+    payload.extend_from_slice(content.as_bytes());
+    payload.push(0x80);
+
+    let mut signed = Vec::with_capacity(2 * HASH_LEN + payload.len() + 32);
+    signed.extend_from_slice(destination);
+    signed.extend_from_slice(source);
+    signed.extend_from_slice(&payload);
+    let hash = sha256(&signed);
+    signed.extend_from_slice(&hash);
+    // A key that cannot sign is a board with no private key, which a node
+    // never is; an empty signature would be refused by the recipient.
+    let signature = identity.sign(&signed).unwrap_or([0; SIGNATURE_LEN]);
+
+    let mut plaintext = Vec::with_capacity(HASH_LEN + SIGNATURE_LEN + payload.len());
+    plaintext.extend_from_slice(source);
+    plaintext.extend_from_slice(&signature);
+    plaintext.extend_from_slice(&payload);
+    debug_assert!(plaintext.len() <= ENCRYPTED_MDU);
+    Ok(Outbound {
+        hash,
+        destination: *destination,
+        plaintext,
+    })
+}
 
 /// Why a message could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,6 +833,83 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(skip(&[0xc1], 0, 0), None);
+    }
+
+    /// The board's message to the bench peer, read back by the code that
+    /// reads the peer's messages to the board, with the addresses swapped.
+    fn packed(content: &str) -> Outbound {
+        let key = board();
+        pack(
+            &key.identity(),
+            &key.hashes().lxmf,
+            &hash16("sender"),
+            1_792_800_000,
+            content,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn what_the_board_packs_reads_and_verifies_as_what_it_receives() {
+        let out = packed("Hello from the board");
+        let back = Message::unpack(&hash16("sender"), out.plaintext()).unwrap();
+        assert_eq!(back.hash, out.hash);
+        assert_eq!(back.source, board().hashes().lxmf);
+        assert_eq!(back.sent_s, Some(1_792_800_000));
+        assert_eq!(
+            (back.title.as_str(), back.content.as_str()),
+            ("", "Hello from the board")
+        );
+        assert!(!back.attachment && !back.stamped);
+        let key = board().identity().get_public_key().unwrap();
+        assert!(back.verify(&key), "signed by the board's key");
+        assert!(!back.verify(&sender_key()));
+        // Addressed to somebody else, the hash and the signature are another.
+        let elsewhere = Message::unpack(&hash16("stranger"), out.plaintext()).unwrap();
+        assert!(!elsewhere.verify(&key));
+    }
+
+    #[test]
+    fn the_payload_is_lxmfs_layout() {
+        let out = packed("hi");
+        let payload = &out.plaintext()[HASH_LEN + SIGNATURE_LEN..];
+        let mut want = alloc::vec![0x94, 0xcb];
+        want.extend_from_slice(&1_792_800_000f64.to_be_bytes());
+        want.extend_from_slice(&[0xc4, 0, 0xc4, 2, b'h', b'i', 0x80]);
+        assert_eq!(payload, want);
+        // Signing is deterministic: the same message is the same bytes.
+        assert_eq!(packed("hi"), out);
+    }
+
+    #[test]
+    fn the_longest_message_fills_a_packet_and_one_byte_more_is_refused() {
+        assert_eq!(MAX_CONTENT, 287);
+        let longest = "x".repeat(MAX_CONTENT);
+        assert_eq!(packed(&longest).plaintext().len(), ENCRYPTED_MDU);
+        // Past 255 bytes the content is bin16, and still read back.
+        let back = Message::unpack(&hash16("sender"), packed(&longest).plaintext()).unwrap();
+        assert_eq!(back.content, longest);
+        let key = board();
+        let over = pack(
+            &key.identity(),
+            &key.hashes().lxmf,
+            &hash16("sender"),
+            0,
+            &"x".repeat(MAX_CONTENT + 3),
+        );
+        assert_eq!(over.err(), Some(TooLong { over: 3 }));
+        // A byte is a byte: a character the font lacks counts its UTF-8.
+        let wide = "é".repeat(MAX_CONTENT / 2 + 1);
+        assert!(matches!(
+            pack(
+                &key.identity(),
+                &key.hashes().lxmf,
+                &hash16("sender"),
+                0,
+                &wide
+            ),
+            Err(TooLong { over: 1 })
+        ));
     }
 
     #[test]

@@ -66,11 +66,24 @@ message `(bad signature)`. An attachment shows as `(attachment)`. Up and
 down scroll a line; left and right jump to the previous or next message;
 back returns to Messages on the line it was opened from. A message is read
 once the lit panel has shown its last line, and Home's count and the `*`
-on Messages follow. OK opens the reply menu, which has only *Back* until
-the board can send
-([#63](https://github.com/paulmeier/oxinode/issues/63),
-[#64](https://github.com/paulmeier/oxinode/issues/64)). Under a host the
-screens read the same way: they only show what the board has.
+on Messages follow. OK opens the reply menu.
+
+**Replying.** The reply menu has six lines that are sent as they read --
+*OK*, *Yes*, *No*, *On my way*, *Can't talk now*, *Where are you?* -- then
+*Send Position* and *Retry Failed*. Choosing a line sends it at once to the
+peer whose conversation it is, and the thread moves to its end, where the
+reply now is, `queued`. It becomes `sent` when it has gone on the air and
+`delivered` when the recipient's proof comes back. A message the recipient
+does not prove goes again, three times in all, and is then `failed (no proof
+came back)`; one to a peer whose key the board has not heard is `queued
+(finding a path)` while it asks, and `failed (no path found)` after a
+minute. *Retry Failed* sends this conversation's failed messages again.
+*Send Position* sends the GPS fix as `My position: 47.376887, 8.541694`,
+with `(fix 12 min old)` after it if the receiver has lost the fix since; with
+no fix at all it is not sent, and a notice says so. Under a host a reply is
+written and kept, `queued (held for the host)`, and goes when the host has
+gone; with no radio configuration stored it is `queued (no radio config)`.
+Any key closes a notice.
 
 **Peers**, in an image with the node only, after Messages. Who else is
 around: every Sideband, MeshChat or oxinode the board has heard announce an
@@ -82,8 +95,8 @@ shows the start of its address in angle brackets, `<3b079e41d2>`, and a
 character the font cannot draw shows as a box. The board keeps sixteen
 peers, in RAM until a reboot; when a seventeenth is heard, the one heard
 longest ago goes, unless every peer has sent the board a message, in which
-case the newcomer is not kept. Menu: only *Back* for now; writing to a peer
-comes with sending ([#63](https://github.com/paulmeier/oxinode/issues/63)).
+case the newcomer is not kept. Menu: only *Back* for now. A conversation
+starts when a peer writes first; writing to one from here is not there yet.
 
 **A message arriving** lights the panel if it was out, and keeps it lit for
 the same minute a press would. The first press after that acts as usual;

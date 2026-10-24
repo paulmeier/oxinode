@@ -64,11 +64,32 @@ has to rediscover it.
   when a seventeenth comes the oldest one read goes, or the oldest if none
   has been; a conversation whose messages have all gone leaves the Messages
   screen.
-- **A thread shows only what the board received.** The board cannot send
-  yet, so the reply menu is *Back* alone and no message in a thread is the
-  board's own ([#63](https://github.com/paulmeier/oxinode/issues/63),
-  [#64](https://github.com/paulmeier/oxinode/issues/64)). The thread draws
-  the four states a sent message will have; the simulator shows them.
+- **The board answers with six fixed lines and its position.** *OK*,
+  *Yes*, *No*, *On my way*, *Can't talk now* and *Where are you?* are in the
+  firmware, and cannot be changed from the panel or a host; anything else
+  waits for text entry
+  ([#66](https://github.com/paulmeier/oxinode/issues/66)). A conversation
+  starts when a peer writes first: the Peers screen cannot open one yet.
+- **What the board sends is one packet: 287 bytes of text, no title, no
+  fields.** That is a little under LXMF's 295, so it fits through a
+  transport node too. Longer is refused, never cut; links and resources are
+  [#67](https://github.com/paulmeier/oxinode/issues/67).
+- **Messages the board sends are held in RAM, eight of them**, and lost on a
+  reboot ([#65](https://github.com/paulmeier/oxinode/issues/65)). A ninth
+  lets the oldest delivered one go, then the oldest failed one; with all
+  eight still on their way, it is refused.
+- **A message is encrypted to the recipient's identity key, not to a
+  ratchet** it may have announced. Sideband and Python LXMF accept both by
+  default; a peer that enforces ratchets will not read the board's messages.
+- **With no GPS fix the board's clock is borrowed.** A message is stamped
+  with the GPS's time; with no fix, with the newest time a message arrived
+  stamped with, run on since; with neither, zero, which a phone shows as
+  1970.
+- **A message to a peer that is switched off takes minutes to fail**: three
+  attempts, the waits doubling from 50 times the airtime, about three and a
+  half minutes for a short reply at the default settings and longer at
+  SF12. One to a peer whose key the board never heard fails after a minute
+  of asking for its path.
 - **What a message carries beyond its title and text is not shown.** An
   image, a file, a voice message or telemetry is recorded as "has an
   attachment", and the attachment itself is not kept. Formatted content

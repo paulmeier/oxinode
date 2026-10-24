@@ -339,10 +339,56 @@ as having an attachment. Fields that only describe the message (its icon,
 thread, ticket, renderer, what it replies to) do not count. A new message
 lights the panel and the Home screen's unread count.
 
+### What the node sends a peer
+
+A message the board writes is LXMF's opportunistic kind too
+(`node::lxmf::pack`): the timestamp as a double, an empty title, the text as
+bytes and no fields, signed once by the board's key, and encrypted to the
+recipient's key afresh for every attempt, as LXMF encrypts a retry. The
+engine routes each attempt, so a peer heard through a transport node is sent
+to through it, with the second address in the header. One packet carries 383
+bytes encrypted, which is 287 bytes of text: a little under LXMF's own 295,
+which is sized for a packet with one address and overflows the MTU with two.
+Longer is refused, never cut. The timestamp is the GPS's time; with no fix,
+the newest time a message arrived stamped with, run on since; with neither,
+zero.
+
+The outbox (`node::outbox`, eight messages) follows each one:
+
+| State | What it is waiting for, or why it stopped | The thread says |
+|---|---|---|
+| queued | its turn on the channel | `queued` |
+| queued | the recipient's key: its path is asked for every 20 s | `queued`, `(finding a path)` |
+| queued | a host to leave, or a configuration to be stored | `queued`, `(held for the host)` or `(no radio config)` |
+| sent | the recipient's proof | `sent`, then `(sent twice)`, `(sent again)` |
+| delivered | nothing: a proof signed by the recipient's key came back | `delivered` |
+| failed | no path within 60 s, or no proof after three attempts | `failed`, `(no path found)` or `(no proof came back)` |
+
+The wait after an attempt is the quiet the announce budget would ask after
+a packet that long, 50 times its airtime, and never less than 20 s; it
+doubles after each. At the default settings (SF8, 125 kHz) a canned reply is
+0.6 s on the air, so it waits about 30, 59 and 119 s, and a message to a
+peer that is switched off fails three and a half minutes after it first
+went; the longest message fails after eight. At SF12 it is longer in
+proportion. Every attempt
+waits for a clear channel like any packet the node sends. A proof is matched
+to the packets of every attempt, so a late one still delivers the message,
+and one signed by any key but the recipient's delivers nothing.
+
+Encrypting takes about a tenth of a second, so an attempt is built on a
+modem-loop pass when the radio is quiet, like looking at a heard packet, and
+then waits behind the node's other packets. When a host arrives everything on
+its way is held, and an attempt built or handed to the radio and not sent is
+not counted; when the host has gone the held messages are queued again. A
+message can be written under a host: it is held from the start and says so,
+because writing is not taking the radio. *Retry Failed* in a conversation's
+menu queues its failed messages again with every attempt still to come.
+
 ### Conversations on the panel
 
-The messages from one sender are a conversation. The Messages screen is a
-list of them (`Messages::conversations`, newest first, named from the peer
+The messages from one sender, and the ones the board sent it, are a
+conversation. The Messages screen is a list of them
+(`Station::conversations`, newest first either way, named from the peer
 table), copied into `State` once per redraw like everything else on a
 screen. Choosing one hands back `Action::Open`; the modem loop answers it
 with `NavExt::open_conversation` for the peer on that line of the list as
@@ -352,7 +398,8 @@ cannot change which conversation opens.
 A thread is not copied: sixteen messages of up to 295 bytes would be a
 State five kilobytes larger on every redraw. `screens::render_with` takes
 the open conversation's `Thread` instead, borrowed from the store
-(`Messages::entries`) for the length of one drawing. The thread is laid out
+(`Station::entries`, both ways in the order written) for the length of one
+drawing. The thread is laid out
 by one function, `Thread::each`, a header per message, a note about an
 unverified sender, the text wrapped by `wrap_drawn` (which measures in
 characters as the panel draws them, keeps line breaks and never cuts a
@@ -361,11 +408,20 @@ message starts, and the window of lines on the panel are all taken from it,
 so they cannot disagree. Only the window is formatted, and `page_of` is
 handed it with the total. The `Conversation` detail keeps where each message
 starts, for left and right, and whether it has been placed: the first
-drawing puts the view at the first unread message.
+drawing puts the view at the first unread message, and a reply just written
+puts it at the end, where the reply is.
+
+The thread's menu is the reply menu: six canned lines (`ui::REPLIES`), each
+sent as it reads; *Send Position*, which writes the GPS fix as decimal
+degrees when it is sent, with its age if the receiver no longer confirms it,
+and is refused with no fix rather than sent as zeros; and *Retry Failed*.
+The modem loop answers each for the open conversation's peer. What the board
+will not write -- no fix, a full outbox, nothing failed -- opens a notice
+saying why (`Overlay::Refused`), which any key closes.
 
 `render_with` returns how many of the thread's messages have had their last
 line in view (`Thread::read_through`), and the loop marks those read
-(`Messages::read`), but only when the panel is lit: the page is drawn into
+(`Station::read`, counting both ways), but only when the panel is lit: the page is drawn into
 the frame while the panel is out too, and nobody read that. Under a menu
 nothing is counted, because the menu covers the middle of the thread.
 

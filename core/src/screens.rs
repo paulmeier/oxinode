@@ -44,7 +44,7 @@ pub use crate::mode::Mode;
 use crate::rnode::command::{FW_VERSION_MAJOR, FW_VERSION_MINOR};
 use crate::rnode::store::MAX_BONDS;
 use crate::status::{Bluetooth as Link, Text};
-use crate::ui::{self, Nav, NavExt, Screen};
+use crate::ui::{self, Nav, NavExt, Refusal, Screen};
 
 /// Characters that fit on one content line of this board's panel.
 ///
@@ -399,24 +399,77 @@ pub enum Trust {
 /// Where a message the board sends has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
-    /// Waiting to go: for a path, for the channel, or for a host to leave.
-    Queued,
-    /// On the air, and not yet proved.
-    Sent,
+    /// Waiting to go, and what for.
+    Queued(Wait),
+    /// On the air this many times, and not yet proved.
+    Sent(u8),
     /// The recipient's proof came back.
     Delivered,
-    /// It never was, after every retry.
-    Failed,
+    /// It was not delivered, and why.
+    Failed(Failure),
+}
+
+/// What a queued message waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// Its turn on the channel: nothing else.
+    Turn,
+    /// The recipient's key, which its path brings; it has been asked for.
+    Path,
+    /// A host has the radio, and the board sends nothing of its own under
+    /// one.
+    Host,
+    /// No host, and no configuration stored for the board to be a node on.
+    Idle,
+}
+
+/// Why a message the board sent was not delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// No answer to asking for the recipient's path, so no key to encrypt to.
+    NoPath,
+    /// Sent every time it may be, and no proof came back.
+    NoProof,
 }
 
 impl Delivery {
+    /// Every state, with every reason: what the golden images cover.
+    pub const EVERY: [Delivery; 10] = [
+        Delivery::Queued(Wait::Turn),
+        Delivery::Queued(Wait::Path),
+        Delivery::Queued(Wait::Host),
+        Delivery::Queued(Wait::Idle),
+        Delivery::Sent(1),
+        Delivery::Sent(2),
+        Delivery::Sent(3),
+        Delivery::Delivered,
+        Delivery::Failed(Failure::NoPath),
+        Delivery::Failed(Failure::NoProof),
+    ];
+
     /// The word on the screen.
     pub const fn word(self) -> &'static str {
         match self {
-            Delivery::Queued => "queued",
-            Delivery::Sent => "sent",
+            Delivery::Queued(_) => "queued",
+            Delivery::Sent(_) => "sent",
             Delivery::Delivered => "delivered",
-            Delivery::Failed => "failed",
+            Delivery::Failed(_) => "failed",
+        }
+    }
+
+    /// What the thread says under the header, when the word is not all of
+    /// it: what a queued one waits for, how often one has gone, and why one
+    /// failed.
+    pub const fn note(self) -> Option<&'static str> {
+        match self {
+            Delivery::Queued(Wait::Turn) | Delivery::Sent(0 | 1) | Delivery::Delivered => None,
+            Delivery::Queued(Wait::Path) => Some("(finding a path)"),
+            Delivery::Queued(Wait::Host) => Some("(held for the host)"),
+            Delivery::Queued(Wait::Idle) => Some("(no radio config)"),
+            Delivery::Sent(2) => Some("(sent twice)"),
+            Delivery::Sent(_) => Some("(sent again)"),
+            Delivery::Failed(Failure::NoPath) => Some("(no path found)"),
+            Delivery::Failed(Failure::NoProof) => Some("(no proof came back)"),
         }
     }
 }
@@ -999,13 +1052,15 @@ impl Entry<'_> {
         let _ = write!(out, "{who}{:>width$}", right.as_str());
     }
 
-    /// What the board says about the sender under the header, if anything:
-    /// a sender is trusted only once its signature has been checked.
+    /// What the board says under the header, if anything: about the sender,
+    /// who is trusted only once its signature has been checked; or, for one
+    /// the board sent, what its state does not say in a word.
     fn note(&self) -> Option<&'static str> {
         match self.direction {
             Direction::Received(Trust::Unverified) => Some("(unverified sender)"),
             Direction::Received(Trust::Failed) => Some("(bad signature)"),
-            _ => None,
+            Direction::Received(Trust::Verified) => None,
+            Direction::Sent(delivery) => delivery.note(),
         }
     }
 
@@ -1626,6 +1681,50 @@ impl Lock {
     }
 }
 
+impl Refusal {
+    /// The notice as lines: what was not sent, and why.
+    pub fn lines(self, out: &mut Lines) {
+        self.lines_in(out, MAX_LINES);
+    }
+
+    /// The notice in at most `rows` lines.
+    pub fn lines_in(self, out: &mut Lines, rows: usize) {
+        let mut fit = Fit::new();
+        fit.line(Fit::VALUE, self.headline());
+        fit.line(Fit::SPACING, "");
+        fit.wrapped(Fit::REASON, self.reason());
+        fit.emit(out, rows);
+    }
+}
+
+/// How old a fix may be and still be sent as where the board is, with no
+/// age beside it: what the receiver itself calls a fix ([`gps::Status::Fix`]).
+///
+/// [`gps::Status::Fix`]: crate::gps::Status::Fix
+const FRESH: gps::Status = gps::Status::Fix;
+
+/// The board's position as a message: `My position: 47.376887, 8.541694`,
+/// in decimal degrees to six places, as a phone's map takes them. A fix the
+/// receiver no longer confirms is sent with its age, `(fix 12 min old)`;
+/// with no fix at all there is nothing to send, and it is refused rather
+/// than sent as zeros.
+pub fn position_text(position: &gps::Position, out: &mut impl Write) -> Result<(), Refusal> {
+    let fix = position.fix.ok_or(Refusal::NoFix)?;
+    let mut lat = Text::<LINE_CHARS>::new();
+    let mut lon = Text::<LINE_CHARS>::new();
+    degrees(&mut lat, fix.lat_udeg);
+    degrees(&mut lon, fix.lon_udeg);
+    let _ = write!(out, "My position: {}, {}", lat.as_str(), lon.as_str());
+    if position.status != FRESH {
+        let _ = write!(
+            out,
+            " (fix {} old)",
+            age_or_dash(position.fix_age_s).as_str()
+        );
+    }
+    Ok(())
+}
+
 /// A modal's lines, each in a group with a priority, cut to the rows a panel
 /// has by dropping whole groups, least important first.
 ///
@@ -1808,6 +1907,10 @@ pub fn render_with(
         lock.lines_in(&mut lines, rows);
         let strs = lines.as_strs();
         page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
+    } else if let Some(refusal) = nav.refusal_shown() {
+        refusal.lines_in(&mut lines, rows);
+        let strs = lines.as_strs();
+        page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
     } else if let Some(open) = nav.conversation().copied() {
         let none = Thread {
             peer: open.peer(),
@@ -1819,6 +1922,8 @@ pub fn render_with(
         nav.set_content(total, rows);
         if !open.placed() {
             nav.set_scroll(thread.first_unread().unwrap_or(usize::MAX));
+        } else if open.wants_end() {
+            nav.set_scroll(usize::MAX);
         }
         if let Some(open) = nav.conversation_mut() {
             open.lay_out(thread);
@@ -2329,23 +2434,28 @@ mod tests {
     fn every_outgoing_state_has_its_word() {
         let mut e = entries();
         let mut seen = Vec::new();
-        for delivery in [
-            Delivery::Queued,
-            Delivery::Sent,
-            Delivery::Delivered,
-            Delivery::Failed,
-        ] {
+        for delivery in Delivery::EVERY {
             e[1].direction = Direction::Sent(delivery);
-            let header = thread_lines(&thread(&e))[4].clone();
+            let lines = thread_lines(&thread(&e));
+            let header = lines[4].clone();
             assert!(header.starts_with("You "), "{header}");
             assert!(
                 header.ends_with(&format!("{} 5 min", delivery.word())),
                 "{header}"
             );
-            seen.push(header);
+            // The reason, if any, under the header; then the text.
+            match delivery.note() {
+                Some(note) => {
+                    assert_eq!(lines[5], note);
+                    assert!(note.len() <= LINE_CHARS, "{note}");
+                }
+                None => assert_eq!(lines[5], "  On my way"),
+            }
+            seen.push(lines[4..6].join("|"));
         }
+        seen.sort();
         seen.dedup();
-        assert_eq!(seen.len(), 4);
+        assert_eq!(seen.len(), Delivery::EVERY.len(), "{seen:?}");
         // At the widest age, the state outlasts the name.
         e[1].direction = Direction::Sent(Delivery::Delivered);
         e[1].age_s = Some(u32::MAX);
@@ -2449,10 +2559,10 @@ mod tests {
                 e[2].direction = Direction::Received(Trust::Verified)
             }),
             ("delivery", |e| {
-                e[1].direction = Direction::Sent(Delivery::Queued)
+                e[1].direction = Direction::Sent(Delivery::Queued(Wait::Turn))
             }),
             ("direction", |e| {
-                e[0].direction = Direction::Sent(Delivery::Sent)
+                e[0].direction = Direction::Sent(Delivery::Sent(1))
             }),
             ("age", |e| e[0].age_s = Some(421 + 60)),
             ("no age", |e| e[0].age_s = None),
@@ -2531,6 +2641,44 @@ mod tests {
         let mut nav = in_conversation();
         draw_thread(&mut nav, Some(&t));
         assert_eq!(nav.scroll(), t.len() - LAYOUT.visible_lines(), "the end");
+    }
+
+    /// A reply just written is at the end of a thread that was drawn
+    /// without it: the next drawing shows it, once, then the thread stays
+    /// where it is put again.
+    #[cfg(feature = "node")]
+    #[test]
+    fn a_reply_written_is_shown_at_the_end() {
+        let long: String = (0..30).map(|n| format!("word{n} ")).collect();
+        let mut e = entries().to_vec();
+        e[0].content = &long;
+        for entry in &mut e {
+            entry.unread = false;
+        }
+        let mut nav = in_conversation();
+        draw_thread(&mut nav, Some(&thread(&e)));
+        nav.handle(Input::Left);
+        nav.handle(Input::Left);
+        let before = nav.scroll();
+        let mut more = e.clone();
+        more.push(Entry {
+            direction: Direction::Sent(Delivery::Queued(Wait::Turn)),
+            age_s: Some(0),
+            title: "",
+            content: "Yes",
+            attachment: false,
+            unread: false,
+        });
+        let t = thread(&more);
+        nav.conversation_mut().unwrap().show_end();
+        draw_thread(&mut nav, Some(&t));
+        assert_eq!(nav.scroll(), t.len() - LAYOUT.visible_lines());
+        assert!(nav.scroll() > before);
+        assert!(!nav.conversation().unwrap().wants_end(), "once");
+        nav.handle(Input::Up);
+        let at = nav.scroll();
+        draw_thread(&mut nav, Some(&t));
+        assert_eq!(nav.scroll(), at);
     }
 
     /// Sideways moves by message, landing on each header in turn.
@@ -3369,7 +3517,29 @@ mod tests {
                 .join(" ");
             assert!(shown.contains("settings here."), "{lock:?}: {shown}");
         }
+        // A refusal keeps what was not sent and the whole of why.
+        for refusal in REFUSALS {
+            let mut out = Lines::new();
+            refusal.lines_in(&mut out, short);
+            assert!(out.len() <= short, "{refusal:?}");
+            let shown = (0..out.len())
+                .map(|n| out.get(n).unwrap())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                shown.starts_with(refusal.headline()),
+                "{refusal:?}: {shown}"
+            );
+            assert!(shown.ends_with(refusal.reason()), "{refusal:?}: {shown}");
+        }
     }
+
+    const REFUSALS: [Refusal; 4] = [
+        Refusal::NoFix,
+        Refusal::Full,
+        Refusal::TooLong,
+        Refusal::NothingFailed,
+    ];
 
     /// Whole groups go, lowest priority first, the later of a tie first,
     /// and what stays keeps its order.
@@ -3470,6 +3640,87 @@ mod tests {
                 assert!(out.get(n).unwrap().len() <= LINE_CHARS);
             }
         }
+        for refusal in REFUSALS {
+            let mut out = Lines::new();
+            refusal.lines(&mut out);
+            assert!(!out.overflowed(), "{refusal:?}: a line was cut");
+            assert!(out.len() <= LAYOUT.visible_lines());
+            assert!(refusal.headline().len() <= LINE_CHARS, "{refusal:?}");
+        }
+    }
+
+    // ---- the position reply -----------------------------------------------
+
+    fn position_reply(position: &gps::Position) -> Result<String, Refusal> {
+        let mut out = String::new();
+        position_text(position, &mut out).map(|()| out)
+    }
+
+    fn with_fix(status: gps::Status, fix_age_s: Option<u32>) -> gps::Position {
+        gps::Position {
+            status,
+            fix: Some(gps::Fix {
+                lat_udeg: 47_376_887,
+                lon_udeg: -6_505_620,
+                alt_dm: Some(4_080),
+            }),
+            fix_age_s,
+            ..gps::Position::OFF
+        }
+    }
+
+    #[test]
+    fn a_fresh_fix_is_sent_as_where_the_board_is() {
+        assert_eq!(
+            position_reply(&with_fix(gps::Status::Fix, Some(0))),
+            Ok("My position: 47.376887, -6.505620".into())
+        );
+    }
+
+    #[test]
+    fn a_stale_fix_is_sent_with_its_age() {
+        assert_eq!(
+            position_reply(&with_fix(gps::Status::Searching, Some(12 * 60 + 5))),
+            Ok("My position: 47.376887, -6.505620 (fix 12 min old)".into())
+        );
+        // The receiver switched off keeps the fix, aged; an unknown age is a
+        // dash, never a zero.
+        assert_eq!(
+            position_reply(&with_fix(gps::Status::Off, None)),
+            Ok("My position: 47.376887, -6.505620 (fix - old)".into())
+        );
+    }
+
+    #[test]
+    fn no_fix_is_refused_never_sent_as_zeros() {
+        for status in [
+            gps::Status::Off,
+            gps::Status::Silent,
+            gps::Status::Searching,
+        ] {
+            let none = gps::Position {
+                status,
+                ..gps::Position::OFF
+            };
+            assert_eq!(position_reply(&none), Err(Refusal::NoFix));
+        }
+    }
+
+    #[test]
+    fn the_position_reply_always_fits_a_packet() {
+        // The widest coordinates and the widest age.
+        let mut far = with_fix(gps::Status::Silent, Some(u32::MAX));
+        far.fix = Some(gps::Fix {
+            lat_udeg: -90_000_000,
+            lon_udeg: -180_000_000,
+            alt_dm: None,
+        });
+        let text = position_reply(&far).unwrap();
+        assert_eq!(
+            text,
+            "My position: -90.000000, -180.000000 (fix 1193046 h old)"
+        );
+        assert!(text.len() < 64);
     }
 
     /// The editor says what the value was and what it is now, in the same

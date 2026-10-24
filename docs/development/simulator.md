@@ -83,7 +83,9 @@ has the bench peer's message from the node's test vectors, a reply in every
 state a sent message can be in, a sender not yet verified, a long message,
 a long thread and characters the font lacks. The scene opens the
 highlighted conversation as the board does, and marks read what the thread
-shows. `--conversation FILE` puts another file's conversations on the
+shows. A reply chosen from a thread's menu lands at its end, queued, or held
+under a host; *Send Position* writes the fixture's fix, or opens the notice
+with none; *Retry Failed* queues the failed ones again. `--conversation FILE` puts another file's conversations on the
 standalone board instead, so one seen on the bench can be written down and
 looked at again:
 

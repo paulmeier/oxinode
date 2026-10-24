@@ -15,8 +15,9 @@
 //! itself within a budget ([`announce`]) and answers path requests for its
 //! address. It receives LXMF messages that come in one packet ([`lxmf`]),
 //! proves each one so its sender shows it delivered, and keeps them
-//! ([`messages`]); what it does with each is [`Station::take`]'s. Sending
-//! is next.
+//! ([`messages`]); what it does with each is [`Station::take`]'s. It sends
+//! messages of one packet too, and follows each until its proof comes back
+//! or it fails ([`outbox`]); what is due is [`Station::step`]'s.
 //!
 //! # One interface, and no transport
 //!
@@ -73,10 +74,16 @@ pub mod announce;
 pub mod key;
 pub mod lxmf;
 pub mod messages;
+pub mod outbox;
 pub mod peers;
 use key::{Hashes, NodeKey};
 use messages::{Arrival, Messages, Settled};
+use outbox::{Due, Outbox};
 use peers::{Learned, Table};
+
+use crate::screens::{
+    ConversationRow, Conversations, Entry, Failure, Read, Thread, Wait, CONVERSATIONS,
+};
 
 /// Where the engine's randomness comes from: ChaCha20, seeded once.
 ///
@@ -157,6 +164,25 @@ pub struct Delivery {
     pub packet_hash: [u8; 32],
 }
 
+/// A delivery proof heard on the air. Proofs are addressed to the first
+/// sixteen bytes of the hash of the packet they prove, so anyone can send
+/// one for anything; it means something only once the signature in it is
+/// checked against the key of the peer the packet went to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proof {
+    /// The truncated hash of the packet it says was delivered.
+    pub packet: [u8; 16],
+    /// The signature, with the full packet hash in front if it is explicit.
+    pub data: Vec<u8>,
+}
+
+/// A message's packet, ready for the air, and the hash its proof will sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    pub packet: Vec<u8>,
+    pub packet_hash: [u8; 32],
+}
+
 /// A packet for the board's address that is not a message it can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unreadable {
@@ -184,6 +210,9 @@ pub struct Outcome {
     pub messages: Vec<Delivery>,
     /// Packets for the board's address that it could not read.
     pub unreadable: Vec<Unreadable>,
+    /// Delivery proofs, any of which may be for a message the board sent:
+    /// which one, and whether it holds, is [`Station::take`]'s to say.
+    pub proofs: Vec<Proof>,
     /// Actions the node had no use for, counted so a log can say so.
     pub ignored: u32,
 }
@@ -296,7 +325,29 @@ impl Node {
         let mut answers = Vec::new();
         let mut messages = Vec::new();
         let mut unreadable = Vec::new();
+        let mut proofs = Vec::new();
         actions.retain(|action| match action {
+            // A proof is delivered locally whoever it is for: the engine
+            // keeps no receipts, so the board matches it to what it sent.
+            TransportAction::DeliverLocal {
+                destination_hash,
+                raw,
+                ..
+            } if raw.get(..1).is_some_and(|f| {
+                rns_core::packet::PacketFlags::unpack(f[0]).packet_type
+                    == constants::PACKET_TYPE_PROOF
+            }) =>
+            {
+                if let Ok(proof) = RawPacket::unpack(raw) {
+                    if proof.context == constants::CONTEXT_NONE {
+                        proofs.push(Proof {
+                            packet: *destination_hash,
+                            data: proof.data().to_vec(),
+                        });
+                    }
+                }
+                false
+            }
             TransportAction::DeliverLocal {
                 destination_hash,
                 raw,
@@ -326,6 +377,7 @@ impl Node {
         let mut out = route(actions);
         out.messages = messages;
         out.unreadable = unreadable;
+        out.proofs = proofs;
         // The board's own announce, relayed back by somebody, is not a peer;
         // Reticulum ignores announces for its own destinations as well.
         let ours = self.hashes.lxmf;
@@ -383,6 +435,66 @@ impl Node {
             .map(|p| p.raw)
     }
 
+    /// A message from the board to `destination`, packed and signed: see
+    /// [`lxmf::pack`].
+    pub fn pack(
+        &self,
+        destination: &[u8; 16],
+        timestamp_s: u64,
+        content: &str,
+    ) -> Result<lxmf::Outbound, lxmf::TooLong> {
+        lxmf::pack(
+            &self.identity,
+            &self.hashes.lxmf,
+            destination,
+            timestamp_s,
+            content,
+        )
+    }
+
+    /// One attempt at sending `message` to the peer whose key is
+    /// `public_key`: encrypted afresh, as LXMF encrypts every retry, and
+    /// routed by the engine, which sends it through a transport node when
+    /// that is how the peer was heard. Each attempt is another packet, with
+    /// a hash of its own for its proof.
+    pub fn attempt(
+        &mut self,
+        message: &lxmf::Outbound,
+        public_key: &[u8; 64],
+        now_ms: u64,
+        rng: &mut dyn Rng,
+    ) -> Option<Attempt> {
+        let recipient = rns_crypto::identity::Identity::from_public_key(public_key).ok()?;
+        let token = recipient.encrypt(message.plaintext(), rng).ok()?;
+        let flags = rns_core::packet::PacketFlags {
+            header_type: constants::HEADER_1,
+            context_flag: constants::FLAG_UNSET,
+            transport_type: constants::TRANSPORT_BROADCAST,
+            destination_type: constants::DESTINATION_SINGLE,
+            packet_type: constants::PACKET_TYPE_DATA,
+        };
+        let packet = RawPacket::pack(
+            flags,
+            0,
+            &message.destination,
+            None,
+            constants::CONTEXT_NONE,
+            &token,
+        )
+        .ok()?;
+        let actions = self.engine.handle_outbound(
+            &packet,
+            constants::DESTINATION_SINGLE,
+            None,
+            seconds(now_ms),
+        );
+        let raw = route(actions).air.into_iter().next()?;
+        (raw.len() <= constants::MTU).then_some(Attempt {
+            packet: raw,
+            packet_hash: packet.packet_hash,
+        })
+    }
+
     /// A path request for `destination`, as an endpoint makes one: its
     /// address and a random tag of sixteen bytes (`Identity.get_random_hash`
     /// in Python's `Transport.request_path`), broadcast to
@@ -423,15 +535,20 @@ impl Node {
     }
 }
 
-/// What the board knows of the others: the peers it has heard and the
-/// messages it has had from them.
+/// What the board knows of the others: the peers it has heard, the
+/// messages it has had from them, and the ones it has sent them.
 #[derive(Debug, Default)]
 pub struct Station {
     pub peers: Table,
     pub messages: Messages,
+    pub outbox: Outbox,
+    /// The newest time a message was stamped with, and when it came: the
+    /// board's clock when the GPS has none. See [`Station::clock_s`].
+    told: Option<(u64, u64)>,
 }
 
-/// What [`Station::take`] did, one thing at a time, for a log to say.
+/// What [`Station::take`] and [`Station::step`] did, one thing at a time,
+/// for a log to say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// An announce, and what the peer table made of it.
@@ -449,6 +566,37 @@ pub enum Event {
     },
     /// A packet for the board's address it could not read.
     Unreadable(Unreadable),
+    /// A message the board sent was proved by its recipient.
+    Delivered { hash: [u8; 32], to: [u8; 16] },
+    /// A proof for none of the board's packets, or one that does not hold.
+    Unclaimed,
+    /// The board asked for a path, to send a message.
+    Asked { to: [u8; 16] },
+    /// A message the board sent has failed.
+    Failed {
+        hash: [u8; 32],
+        to: [u8; 16],
+        why: Failure,
+    },
+}
+
+/// Why [`Station::compose`] did not queue a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsent {
+    /// It does not fit in one packet, by this many bytes.
+    TooLong(usize),
+    /// Every message kept is still on its way.
+    Full,
+}
+
+/// What [`Station::step`] has for the air.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// A packet the board needs, a path request: like the engine's own.
+    Packet(Vec<u8>),
+    /// An attempt at the message with this hash. What became of it goes to
+    /// [`Outbox::went`].
+    Attempt { hash: [u8; 32], attempt: Attempt },
 }
 
 impl Station {
@@ -457,9 +605,10 @@ impl Station {
     }
 
     /// Take what the engine produced at `at_ms`: peers into the table, keys
-    /// to the messages waiting for them, and messages into the store. What
-    /// that calls for -- a proof, or a path request to learn a sender's key
-    /// -- is added to `out.air`, after the engine's own packets.
+    /// to the messages waiting for them, messages into the store, and
+    /// proofs to the messages the board sent. What that calls for -- a
+    /// proof, or a path request to learn a sender's key -- is added to
+    /// `out.air`, after the engine's own packets.
     pub fn take(
         &mut self,
         node: &Node,
@@ -484,6 +633,7 @@ impl Station {
         }
         for delivery in core::mem::take(&mut out.messages) {
             let (hash, source) = (delivery.message.hash, delivery.message.source);
+            let sent_s = delivery.message.sent_s;
             let arrival = self
                 .messages
                 .receive(delivery.message, &mut self.peers, at_ms);
@@ -493,6 +643,11 @@ impl Station {
             if arrival.ask_for_key() {
                 out.air.extend(node.path_request(&source, rng));
             }
+            if let (Arrival::New(_), Some(sent_s)) = (arrival, sent_s) {
+                if self.told.is_none_or(|(s, _)| sent_s > s) {
+                    self.told = Some((sent_s, at_ms));
+                }
+            }
             events.push(Event::Message {
                 hash,
                 source,
@@ -500,7 +655,160 @@ impl Station {
             });
         }
         events.extend(out.unreadable.drain(..).map(Event::Unreadable));
+        for proof in core::mem::take(&mut out.proofs) {
+            events.push(match self.outbox.proved(&proof, &self.peers) {
+                Some((hash, to)) => Event::Delivered { hash, to },
+                None => Event::Unclaimed,
+            });
+        }
         events
+    }
+
+    /// What time it is, in Unix seconds, for a message's timestamp: the
+    /// GPS's, when it has said (`gps_s`); with no fix, the newest stamp a
+    /// message has arrived with, run on by the board's own clock since; and
+    /// with neither, zero, which is what the board then sends. The stamp is
+    /// the sender's word, which is why the GPS comes first.
+    pub fn clock_s(&self, gps_s: Option<u64>, now_ms: u64) -> u64 {
+        gps_s
+            .or_else(|| {
+                self.told
+                    .map(|(s, at)| s + now_ms.saturating_sub(at) / 1_000)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Write `content` to `to` at `now_ms`: packed, signed and queued; held,
+    /// and why, if the node is not running. The peer has a conversation from
+    /// now on. Says the message's hash.
+    pub fn compose(
+        &mut self,
+        node: &Node,
+        to: &[u8; 16],
+        content: &str,
+        timestamp_s: u64,
+        now_ms: u64,
+        held: Option<Wait>,
+    ) -> Result<[u8; 32], Unsent> {
+        let message = node
+            .pack(to, timestamp_s, content)
+            .map_err(|e| Unsent::TooLong(e.over))?;
+        let hash = message.hash;
+        self.outbox
+            .queue(message, String::from(content), now_ms, held)
+            .map_err(|_| Unsent::Full)?;
+        self.peers.set_conversation(to, true);
+        Ok(hash)
+    }
+
+    /// What the board's messages need on the air at `now_ms`, if anything:
+    /// a path request, or an attempt at one, built here -- encrypting is the
+    /// slow part, about a tenth of a second. A message that fails says so in
+    /// `events`.
+    pub fn step(
+        &mut self,
+        node: &mut Node,
+        now_ms: u64,
+        rng: &mut dyn Rng,
+        events: &mut Vec<Event>,
+    ) -> Option<Step> {
+        loop {
+            match self.outbox.due(now_ms, &self.peers)? {
+                Due::Ask(to) => {
+                    events.push(Event::Asked { to });
+                    return node.path_request(&to, rng).map(Step::Packet);
+                }
+                Due::Failed { hash, to, why } => events.push(Event::Failed { hash, to, why }),
+                Due::Send { hash, to } => {
+                    let key = self.peers.get(&to).map(|p| p.public_key);
+                    let message = self.outbox.get(&hash).map(|s| s.message.clone());
+                    let attempt = key
+                        .zip(message)
+                        .and_then(|(key, m)| node.attempt(&m, &key, now_ms, rng));
+                    match attempt {
+                        Some(attempt) => return Some(Step::Attempt { hash, attempt }),
+                        None => {
+                            self.outbox.unbuildable(&hash);
+                            events.push(Event::Failed {
+                                hash,
+                                to,
+                                why: Failure::NoPath,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The conversations, newest first, as the Messages screen lists them
+    /// at `now_ms`: one for each peer with a message kept, either way.
+    pub fn conversations(&self, now_ms: u64) -> Conversations {
+        // (peer, newest, unread), newest first.
+        let mut all: Vec<([u8; 16], u64, bool)> = Vec::new();
+        let mut note = |peer: [u8; 16], at_ms: u64, unread: bool| match all
+            .iter_mut()
+            .find(|(p, _, _)| *p == peer)
+        {
+            Some(row) => {
+                row.1 = row.1.max(at_ms);
+                row.2 |= unread;
+            }
+            None => all.push((peer, at_ms, unread)),
+        };
+        for r in self.messages.iter() {
+            note(r.message.source, r.at_ms, r.unread);
+        }
+        for s in self.outbox.iter() {
+            note(s.message.destination, s.at_ms, false);
+        }
+        // Stable: of two as new as each other, the one received first.
+        all.sort_by_key(|row| core::cmp::Reverse(row.1));
+        let mut out = Conversations::default();
+        for (slot, (peer, at_ms, unread)) in out.rows.iter_mut().zip(all.iter().take(CONVERSATIONS))
+        {
+            *slot = Some(ConversationRow {
+                peer: *peer,
+                name: messages::name_of(&self.peers, peer),
+                unread: *unread,
+                age_s: messages::age_s(*at_ms, now_ms),
+            });
+        }
+        out
+    }
+
+    /// The conversation with `peer`, oldest first, both ways, as the thread
+    /// draws it at `now_ms`. [`Station::read`] counts in the same order.
+    pub fn entries(&self, peer: &[u8; 16], now_ms: u64) -> Vec<Entry<'_>> {
+        let mut all: Vec<(u64, Entry<'_>)> = self
+            .messages
+            .entries(peer, now_ms)
+            .chain(self.outbox.entries(peer, now_ms))
+            .collect();
+        // Stable: a reply written in the same millisecond comes after.
+        all.sort_by_key(|(at, _)| *at);
+        all.into_iter().map(|(_, e)| e).collect()
+    }
+
+    /// The thread with `peer`, over `entries` from [`Station::entries`].
+    pub fn thread<'a>(&self, peer: &[u8; 16], entries: &'a [Entry<'a>]) -> Thread<'a> {
+        self.messages.thread(peer, &self.peers, entries)
+    }
+
+    /// The panel has shown a conversation this far, counting both ways:
+    /// the messages received among its first `through` are read. Says how
+    /// many that made read.
+    pub fn read(&mut self, read: Read, now_ms: u64) -> usize {
+        let received = self
+            .entries(&read.peer, now_ms)
+            .iter()
+            .take(read.through)
+            .filter(|e| matches!(e.direction, crate::screens::Direction::Received(_)))
+            .count();
+        self.messages.read(Read {
+            peer: read.peer,
+            through: received,
+        })
     }
 }
 
@@ -1726,5 +2034,449 @@ mod receiving {
             assert!(air.is_empty(), "{len} bytes");
             assert!(station.messages.is_empty(), "{len} bytes");
         }
+    }
+}
+
+#[cfg(test)]
+mod sending {
+    use super::announce::Kind;
+    use super::lxmf::tests::board;
+    use super::outbox::wait_ms;
+    use super::*;
+    use crate::screens::{Delivery, Direction, Wait};
+    use rns_crypto::FixedRng;
+
+    const ANNOUNCE: &[u8] = include_bytes!("node/vectors/announce.bin");
+    const BOARD_MESSAGE: &[u8] = include_bytes!("node/vectors/board_message.bin");
+
+    fn rng() -> FixedRng {
+        FixedRng::new(&[0x5a; 64])
+    }
+
+    /// The bench peer's key: the one whose announce is in the vectors.
+    fn peer_key() -> NodeKey {
+        NodeKey::from_private(core::array::from_fn(|i| i as u8))
+    }
+
+    /// The board and the bench peer, each having heard the other announce.
+    struct Bench {
+        board: Node,
+        station: Station,
+        peer: Node,
+        peers_station: Station,
+        /// One stream for the whole bench, as the board has one: so two
+        /// attempts are encrypted with different keys, and the run is the
+        /// same every time.
+        rng: Entropy,
+    }
+
+    fn bench() -> Bench {
+        let mut b = Bench {
+            board: Node::new(1757, 0, &board()),
+            station: Station::new(),
+            peer: Node::new(1757, 0, &peer_key()),
+            peers_station: Station::new(),
+            rng: Entropy::from_seed([0x0d; 32]),
+        };
+        let mut out = b.board.heard(ANNOUNCE, None, 1_000, &mut rng());
+        b.station.take(&b.board, &mut out, 1_000, &mut rng());
+        let ours = b
+            .board
+            .announce(
+                Kind::Announce,
+                &lxmf_app_data("oxinode 7F23"),
+                0,
+                &mut rng(),
+            )
+            .unwrap();
+        let mut out = b.peer.heard(&ours, None, 1_000, &mut rng());
+        b.peers_station.take(&b.peer, &mut out, 1_000, &mut rng());
+        b
+    }
+
+    fn to() -> [u8; 16] {
+        peer_key().hashes().lxmf
+    }
+
+    fn attempt(b: &mut Bench, now: u64) -> ([u8; 32], Attempt) {
+        let mut events = Vec::new();
+        match b.station.step(&mut b.board, now, &mut b.rng, &mut events) {
+            Some(Step::Attempt { hash, attempt }) => (hash, attempt),
+            other => panic!("expected an attempt at {now} ms, got {other:?} and {events:?}"),
+        }
+    }
+
+    /// The peer hears a packet: what it sends back, and what it made of it.
+    fn peer_hears(b: &mut Bench, packet: &[u8], now: u64) -> (Vec<Vec<u8>>, Vec<Event>) {
+        let mut out = b.peer.heard(packet, None, now, &mut rng());
+        let events = b.peers_station.take(&b.peer, &mut out, now, &mut rng());
+        (out.air, events)
+    }
+
+    fn board_hears(b: &mut Bench, packet: &[u8], now: u64) -> Vec<Event> {
+        let mut out = b.board.heard(packet, None, now, &mut rng());
+        b.station.take(&b.board, &mut out, now, &mut rng())
+    }
+
+    fn delivery(b: &Bench) -> Delivery {
+        b.station.outbox.iter().next().unwrap().delivery
+    }
+
+    #[test]
+    fn a_message_goes_out_is_read_and_verified_and_its_proof_delivers_it() {
+        let mut b = bench();
+        let hash = b
+            .station
+            .compose(&b.board, &to(), "Yes", 1_792_800_000, 5_000, None)
+            .unwrap();
+        assert!(b.station.peers.get(&to()).unwrap().conversation);
+        let (h, attempt) = attempt(&mut b, 5_000);
+        assert_eq!(h, hash);
+        b.station
+            .outbox
+            .went(&hash, &attempt.packet_hash, Some(400_000), 5_500);
+        assert_eq!(delivery(&b), Delivery::Sent(1));
+
+        let (air, events) = peer_hears(&mut b, &attempt.packet, 6_000);
+        let source = board().hashes().lxmf;
+        assert_eq!(
+            events,
+            [Event::Message {
+                hash,
+                source,
+                arrival: Arrival::New(messages::Trust::Verified)
+            }],
+            "the peer reads it, signed by the key the board announced"
+        );
+        let got = b.peers_station.messages.get(&hash).unwrap();
+        assert_eq!(got.message.content, "Yes");
+        assert_eq!(got.message.sent_s, Some(1_792_800_000));
+        let [proof] = air.as_slice() else {
+            panic!("{air:?}")
+        };
+        assert_eq!(
+            board_hears(&mut b, proof, 7_000),
+            [Event::Delivered { hash, to: to() }]
+        );
+        assert_eq!(delivery(&b), Delivery::Delivered);
+        assert_eq!(b.station.outbox.delivered(), 1);
+        // Heard twice, relayed, it is the engine's duplicate and nothing.
+        assert!(board_hears(&mut b, proof, 8_000).is_empty());
+        let mut events = Vec::new();
+        assert_eq!(
+            b.station
+                .step(&mut b.board, 1 << 40, &mut rng(), &mut events),
+            None
+        );
+    }
+
+    #[test]
+    fn a_retry_is_a_new_packet_with_the_same_message_and_either_proof_counts() {
+        let mut b = bench();
+        let hash = b
+            .station
+            .compose(&b.board, &to(), "Yes", 0, 0, None)
+            .unwrap();
+        let (_, first) = attempt(&mut b, 0);
+        b.station
+            .outbox
+            .went(&hash, &first.packet_hash, Some(400_000), 0);
+        let (_, second) = attempt(&mut b, wait_ms(1, 400_000));
+        assert_ne!(first.packet, second.packet, "encrypted afresh");
+        assert_ne!(first.packet_hash, second.packet_hash);
+        b.station
+            .outbox
+            .went(&hash, &second.packet_hash, Some(400_000), 20_000);
+        assert_eq!(delivery(&b), Delivery::Sent(2));
+
+        let (_, events) = peer_hears(&mut b, &second.packet, 21_000);
+        assert!(matches!(
+            events[..],
+            [Event::Message {
+                arrival: Arrival::New(_),
+                ..
+            }]
+        ));
+        // The first went astray and arrives late: the same message, proved.
+        let (air, events) = peer_hears(&mut b, &first.packet, 22_000);
+        assert!(matches!(
+            events[..],
+            [Event::Message {
+                arrival: Arrival::Duplicate(_),
+                ..
+            }]
+        ));
+        assert_eq!(
+            board_hears(&mut b, &air[0], 23_000),
+            [Event::Delivered { hash, to: to() }],
+            "a proof of the first attempt"
+        );
+    }
+
+    #[test]
+    fn a_proof_somebody_else_signed_delivers_nothing() {
+        let mut b = bench();
+        let hash = b
+            .station
+            .compose(&b.board, &to(), "Yes", 0, 0, None)
+            .unwrap();
+        let (_, attempt) = attempt(&mut b, 0);
+        b.station
+            .outbox
+            .went(&hash, &attempt.packet_hash, Some(400_000), 0);
+        // A node that is not the recipient proves the board's packet.
+        let other = Node::new(1757, 0, &NodeKey::from_private([7; 64]));
+        let forged = other.prove(&attempt.packet_hash).unwrap();
+        assert_eq!(board_hears(&mut b, &forged, 1_000), [Event::Unclaimed]);
+        assert_eq!(delivery(&b), Delivery::Sent(1));
+        // And a proof of a packet the board never sent is nobody's.
+        let stray = b.peer.prove(&[3; 32]).unwrap();
+        assert_eq!(board_hears(&mut b, &stray, 2_000), [Event::Unclaimed]);
+    }
+
+    #[test]
+    fn to_a_peer_never_heard_it_asks_for_the_path_and_goes_when_the_key_comes() {
+        let mut b = bench();
+        b.board = Node::new(1757, 0, &board());
+        b.station = Station::new();
+        b.station
+            .compose(&b.board, &to(), "Yes", 0, 0, None)
+            .unwrap();
+        let mut events = Vec::new();
+        let step = b.station.step(&mut b.board, 0, &mut rng(), &mut events);
+        assert_eq!(events, [Event::Asked { to: to() }]);
+        let Some(Step::Packet(request)) = step else {
+            panic!("{step:?}")
+        };
+        // The peer hears the request as one for its own address.
+        assert_eq!(
+            b.peer.heard(&request, None, 100, &mut rng()).path_requests,
+            [to()]
+        );
+        assert_eq!(delivery(&b), Delivery::Queued(Wait::Path));
+        // Its answer is its announce; the next step is the message.
+        board_hears(&mut b, ANNOUNCE, 3_000);
+        attempt(&mut b, 3_000);
+    }
+
+    #[test]
+    fn written_under_a_host_it_is_held_and_says_so() {
+        let mut b = bench();
+        b.station
+            .compose(&b.board, &to(), "Yes", 0, 0, Some(Wait::Host))
+            .unwrap();
+        let mut events = Vec::new();
+        assert_eq!(
+            b.station.step(&mut b.board, 0, &mut rng(), &mut events),
+            None
+        );
+        let entries = b.station.entries(&to(), 1_000);
+        assert_eq!(
+            entries[0].direction,
+            Direction::Sent(Delivery::Queued(Wait::Host))
+        );
+        b.station.outbox.resume(5_000);
+        attempt(&mut b, 5_000);
+    }
+
+    #[test]
+    fn a_message_that_does_not_fit_is_refused_not_cut() {
+        let b = bench();
+        let mut station = Station::new();
+        let long = "x".repeat(lxmf::MAX_CONTENT + 1);
+        assert_eq!(
+            station.compose(&b.board, &to(), &long, 0, 0, None),
+            Err(Unsent::TooLong(1))
+        );
+        assert!(station.outbox.is_empty());
+        assert!(station.peers.get(&to()).is_none());
+    }
+
+    #[test]
+    fn the_longest_message_fits_even_through_a_transport_node() {
+        let mut b = bench();
+        b.board = Node::new(1757, 0, &board());
+        b.station = Station::new();
+        // The peer heard through one relay: two addresses in the header,
+        // the relay's first, and marked as in transport.
+        let mut relayed = ANNOUNCE.to_vec();
+        relayed[1] = 1;
+        relayed[0] |= 0x50;
+        let mut header2 = alloc::vec![relayed[0], relayed[1]];
+        header2.extend_from_slice(&[0xab; 16]);
+        header2.extend_from_slice(&relayed[2..]);
+        board_hears(&mut b, &header2, 1_000);
+        assert!(
+            b.station.peers.get(&to()).is_some(),
+            "heard through the relay"
+        );
+        let longest = "x".repeat(lxmf::MAX_CONTENT);
+        b.station
+            .compose(&b.board, &to(), &longest, 0, 2_000, None)
+            .unwrap();
+        let (_, attempt) = attempt(&mut b, 2_000);
+        let packet = RawPacket::unpack(&attempt.packet).unwrap();
+        assert_eq!(packet.flags.header_type, constants::HEADER_2);
+        assert_eq!(packet.transport_id, Some([0xab; 16]));
+        assert!(attempt.packet.len() <= constants::MTU);
+        assert_eq!(attempt.packet.len(), constants::MTU - 1);
+        assert_eq!(
+            packet.packet_hash, attempt.packet_hash,
+            "the hash is the same either way"
+        );
+    }
+
+    #[test]
+    fn a_thread_is_both_ways_in_the_order_written_and_reading_counts_both() {
+        let mut b = bench();
+        // The peer writes; the board answers.
+        let incoming =
+            b.peers_station
+                .compose(&b.peer, &board().hashes().lxmf, "Where?", 0, 2_000, None);
+        assert!(incoming.is_ok());
+        let mut events = Vec::new();
+        let Some(Step::Attempt { attempt, .. }) =
+            b.peers_station
+                .step(&mut b.peer, 2_000, &mut rng(), &mut events)
+        else {
+            panic!("{events:?}")
+        };
+        board_hears(&mut b, &attempt.packet, 3_000);
+        b.station
+            .compose(&b.board, &to(), "Here", 0, 4_000, None)
+            .unwrap();
+
+        let entries = b.station.entries(&to(), 10_000);
+        let texts: Vec<&str> = entries.iter().map(|e| e.content).collect();
+        assert_eq!(texts, ["Where?", "Here"]);
+        assert!(matches!(entries[0].direction, Direction::Received(_)));
+        assert!(matches!(entries[1].direction, Direction::Sent(_)));
+        let list = b.station.conversations(10_000);
+        assert_eq!(list.rows[0].unwrap().age_s, Some(6), "aged by the reply");
+        assert!(list.rows[0].unwrap().unread);
+        assert!(list.rows[1].is_none(), "one conversation, both ways");
+        assert_eq!(
+            b.station.read(
+                crate::screens::Read {
+                    peer: to(),
+                    through: 2
+                },
+                10_000
+            ),
+            1
+        );
+        assert!(!b.station.conversations(10_000).rows[0].unwrap().unread);
+    }
+
+    #[test]
+    fn the_clock_is_the_gps_then_the_newest_stamp_heard_then_zero() {
+        let mut b = bench();
+        assert_eq!(b.station.clock_s(None, 5_000), 0);
+        assert_eq!(b.station.clock_s(Some(1_800_000_000), 5_000), 1_800_000_000);
+        b.peers_station
+            .compose(
+                &b.peer,
+                &board().hashes().lxmf,
+                "hi",
+                1_792_800_000,
+                0,
+                None,
+            )
+            .unwrap();
+        let mut events = Vec::new();
+        let Some(Step::Attempt { attempt, .. }) =
+            b.peers_station
+                .step(&mut b.peer, 0, &mut rng(), &mut events)
+        else {
+            panic!()
+        };
+        board_hears(&mut b, &attempt.packet, 10_000);
+        assert_eq!(b.station.clock_s(None, 10_000), 1_792_800_000);
+        assert_eq!(
+            b.station.clock_s(None, 75_500),
+            1_792_800_065,
+            "run on since"
+        );
+        assert_eq!(b.station.clock_s(Some(5), 75_500), 5, "the GPS first");
+    }
+
+    #[test]
+    fn a_failure_is_an_event() {
+        let mut b = bench();
+        b.station = Station::new();
+        b.station
+            .compose(&b.board, &to(), "Yes", 0, 0, None)
+            .unwrap();
+        let mut events = Vec::new();
+        b.station.step(&mut b.board, 0, &mut rng(), &mut events);
+        events.clear();
+        let mut now = 0;
+        while events.is_empty() {
+            now += 10_000;
+            b.station.step(&mut b.board, now, &mut rng(), &mut events);
+            events.retain(|e| !matches!(e, Event::Asked { .. }));
+        }
+        assert_eq!(now, outbox::PATH_TIMEOUT_MS);
+        assert!(matches!(
+            events[..],
+            [Event::Failed {
+                why: Failure::NoPath,
+                ..
+            }]
+        ));
+        assert!(b.station.outbox.due(now, &b.station.peers).is_none());
+    }
+
+    /// From the gestures to the packet: open the conversation, open its
+    /// menu, go down to *Yes*, press OK -- what the modem loop does with the
+    /// action -- and the peer reads "Yes" from the board.
+    #[test]
+    fn a_reply_chosen_on_the_pad_is_the_message_the_peer_reads() {
+        use crate::ui::{self, Input, NavExt};
+        let mut b = bench();
+        let mut nav = ui::nav();
+        nav.open_conversation(to());
+        nav.handle(Input::Select);
+        nav.handle(Input::Down); // OK
+        nav.handle(Input::Down); // Yes
+        let action = nav.handle(Input::Select).unwrap();
+        assert_eq!(action, ui::Action::Reply(1));
+        let peer = nav.conversation().unwrap().peer();
+        let text = action.reply().unwrap();
+        let hash = b
+            .station
+            .compose(&b.board, &peer, text, 0, 0, None)
+            .unwrap();
+        let (_, attempt) = attempt(&mut b, 0);
+        let (air, _) = peer_hears(&mut b, &attempt.packet, 500);
+        let got = b.peers_station.messages.get(&hash).unwrap();
+        assert_eq!(got.message.content, "Yes");
+        assert_eq!(got.message.source, board().hashes().lxmf);
+        assert_eq!(air.len(), 1, "and proves it");
+    }
+
+    #[test]
+    fn the_vector_is_what_the_board_sends() {
+        // The board's message to the bench peer, for tools/test_peer.py to
+        // read with the peer's code and with LXMF. Deterministic: the
+        // signature always is, and the encryption is with a fixed RNG.
+        let mut b = bench();
+        b.station
+            .compose(
+                &b.board,
+                &to(),
+                "Yes \u{2013} from the board",
+                1_792_800_000,
+                0,
+                None,
+            )
+            .unwrap();
+        let (_, attempt) = attempt(&mut b, 0);
+        if std::env::var_os("OXINODE_WRITE_VECTORS").is_some() {
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/node/vectors");
+            std::fs::write(format!("{dir}/board_message.bin"), &attempt.packet).unwrap();
+            return;
+        }
+        assert_eq!(attempt.packet, BOARD_MESSAGE);
     }
 }
