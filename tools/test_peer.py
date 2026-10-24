@@ -312,6 +312,14 @@ class Verdicts(unittest.TestCase):
         # Long enough for a proof's channel wait and the board's log line.
         self.assertGreaterEqual(peer.LINGER_S, 5.0)
 
+    def test_the_path_is_asked_for_a_named_board_until_its_key_is_known(self):
+        board = b"\x01" * 16
+        self.assertTrue(peer.ask_due(board, False, 10.0, 10.0))
+        self.assertFalse(peer.ask_due(board, False, 9.9, 10.0), "not before it is due")
+        self.assertFalse(peer.ask_due(board, True, 100.0, 10.0), "not once the key is known")
+        self.assertFalse(peer.ask_due(None, False, 100.0, 10.0), "not for a board not named")
+        self.assertGreaterEqual(peer.ASK_EVERY_S, 10.0)
+
     def test_a_bad_announce_fails_a_run_that_expected_none(self):
         self.assertEqual(len(peer.shortfalls(peer.Expect(0, 0, 0), peer.Seen(0, 1, 0, 0, 0))), 1)
 

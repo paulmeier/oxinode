@@ -162,6 +162,7 @@ regression run as well as something to watch. Everything goes to
 | `--announce-every` | seconds between the peer's own announces, beyond the two above (default 0, none) |
 | `--seconds` | the longest the run lasts (default 120) |
 | `--listen` | run all of `--seconds` even once everything expected has happened |
+| `--ask-path` | with `--board`: ask for the board's path every 15 s until its key is known, so a board that announced before the peer started need not announce again; pass `--expect-announces 0` with it |
 | `--linger` | seconds to go on after the last message from the board, so its proof goes out and the board logs it delivered (default 8) |
 | `--name`, `--identity` | the peer's display name and where its identity is kept |
 | `--frequency`, `--bandwidth`, `--txpower`, `--spreadingfactor`, `--codingrate` | the radio configuration, which must be the board under test's stored one |
