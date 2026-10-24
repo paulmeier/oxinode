@@ -207,6 +207,16 @@ impl Identity {
     }
 }
 
+/// What the board is called on the network, when it is a node of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeHashes {
+    /// The identity's own hash.
+    pub identity: [u8; 16],
+    /// `lxmf.delivery` for this identity: the address a peer sends to, and
+    /// what Sideband and MeshChat show as its LXMF address.
+    pub lxmf: [u8; 16],
+}
+
 /// What [`Screen::System`] knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct System {
@@ -221,6 +231,10 @@ pub struct System {
     /// the chip's factory ID.
     pub serial: Option<[u8; 16]>,
     pub identity: Identity,
+    /// The board's own address and identity, in an image with the node.
+    /// `None` is an image without one, and draws no rows at all rather than
+    /// dashes: a dash says "not known yet", and an RNode has nothing to know.
+    pub node: Option<NodeHashes>,
     /// Bytes between the top of static data and the stack pointer.
     pub free_ram: Option<u32>,
 }
@@ -232,6 +246,7 @@ impl Default for System {
             build: "-",
             serial: None,
             identity: Identity::None,
+            node: None,
             free_ram: None,
         }
     }
@@ -741,6 +756,12 @@ impl System {
             None => out.row("Serial", "-"),
         }
         out.row("Identity", self.identity.word());
+        if let Some(node) = &self.node {
+            // Thirty-two hex digits each, as Reticulum writes a hash, two
+            // rows of sixteen under the label, as the serial is.
+            hash(out, "LXMF address", &node.lxmf);
+            hash(out, "RNS identity", &node.identity);
+        }
         v.clear();
         match self.free_ram {
             Some(bytes) => {
@@ -751,6 +772,19 @@ impl System {
             }
         }
         out.row("RAM free", v.as_str());
+    }
+}
+
+/// A 16-byte hash under its label: two rows of sixteen lowercase hex digits,
+/// so it can be read against a phone that shows it on one line.
+fn hash(out: &mut Lines, label: &str, bytes: &[u8; 16]) {
+    out.line(label);
+    for half in bytes.chunks(8) {
+        let mut v = Text::<LINE_CHARS>::new();
+        for b in half {
+            let _ = write!(v, "{b:02x}");
+        }
+        out.line(v.as_str());
     }
 }
 
@@ -1144,6 +1178,10 @@ mod tests {
                 build: "0000000",
                 serial: Some(*b"0123456789ABCDEF"),
                 identity: Identity::Signed,
+                node: Some(NodeHashes {
+                    identity: [0xa1; 16],
+                    lxmf: core::array::from_fn(|i| 0x10 + i as u8),
+                }),
                 free_ram: Some(123_456),
             },
         }
@@ -1273,6 +1311,31 @@ mod tests {
         let bt = lines_of(&State::default(), Screen::Bluetooth);
         assert!(bt.iter().any(|l| l.starts_with("Name") && l.ends_with('-')));
         assert!(bt.iter().any(|l| l.ends_with("absent")));
+    }
+
+    /// **The node's address is on the System screen exactly as a phone
+    /// shows it**, in two rows of sixteen, and an image without a node shows
+    /// no row for it at all.
+    #[test]
+    fn the_system_screen_shows_the_node_address_or_nothing() {
+        let mut state = populated();
+        let lines = lines_of(&state, Screen::System);
+        let at = lines.iter().position(|l| l == "LXMF address").unwrap();
+        assert_eq!(lines[at + 1], "1011121314151617");
+        assert_eq!(lines[at + 2], "18191a1b1c1d1e1f");
+        assert_eq!(lines[at + 3], "RNS identity");
+        assert_eq!(lines[at + 4], "a1".repeat(8));
+        assert_eq!(lines[at + 5], "a1".repeat(8));
+
+        state.system.node = None;
+        let rnode = lines_of(&state, Screen::System);
+        assert!(
+            !rnode
+                .iter()
+                .any(|l| l.contains("LXMF") || l.contains("RNS")),
+            "{rnode:?}"
+        );
+        assert_eq!(rnode.len(), lines.len() - 6);
     }
 
     /// **The position screen with no fix says so, and shows no coordinate.**
@@ -1459,11 +1522,18 @@ mod tests {
             assert_ne!(all(&changed), reference, "changing {name} changed no line");
         }
         // And the rest, which change the picture rather than a line.
-        let system: [Mutation; 5] = [
+        let system: [Mutation; 8] = [
             ("version", |s| s.system.version = "9.9.9"),
             ("build", |s| s.system.build = "fffffff-dirty"),
             ("serial", |s| s.system.serial = None),
             ("identity", |s| s.system.identity = Identity::Unsigned),
+            ("node", |s| s.system.node = None),
+            ("lxmf address", |s| {
+                s.system.node.as_mut().unwrap().lxmf[15] ^= 1
+            }),
+            ("rns identity", |s| {
+                s.system.node.as_mut().unwrap().identity[0] ^= 1
+            }),
             ("ram", |s| s.system.free_ram = Some(1)),
         ];
         for (name, mutate) in system {

@@ -29,7 +29,9 @@
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::Peri;
 use oxinode_core::rnode::air::Signal;
-use oxinode_core::screens::Host;
+use oxinode_core::screens::{Host, NodeHashes};
+
+use crate::store::{RecordFlash, Storage};
 
 #[cfg(feature = "node")]
 pub use imp::*;
@@ -42,6 +44,7 @@ mod imp {
     use embassy_nrf::rng::Rng;
     use embassy_time::Instant;
     use embedded_alloc::LlffHeap as Heap;
+    use oxinode_core::node::key::{NodeKey, Stored};
     use oxinode_core::node::{Entropy, Node, Outcome, TICK_MS};
 
     use super::*;
@@ -65,16 +68,18 @@ mod imp {
     /// How much more heap than the last report it takes to report again.
     const PEAK_STEP: usize = 1024;
 
-    /// The node, and when it last ran its housekeeping.
+    /// The node, once it has its identity, and when it last ran its
+    /// housekeeping.
     pub struct Listener {
-        node: Node,
+        node: Option<Node>,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
     }
 
     impl Listener {
-        /// The heap, the log and the seed, and an engine listening on the air.
+        /// The heap, the log and the seed. The engine comes with the identity,
+        /// in [`Listener::adopt`], once the flash it is kept in can be read.
         ///
         /// Takes the RNG before the Bluetooth controller does, which is why it
         /// is built before Bluetooth is brought up, and why it is built at most
@@ -102,37 +107,88 @@ mod imp {
                 seed
             };
 
+            Self {
+                node: None,
+                entropy: Entropy::from_seed(seed),
+                last_tick_ms: now_ms(),
+                reported_peak: 0,
+            }
+        }
+
+        /// The board's identity, from its page, or a new one written there if
+        /// it has none; then the engine, listening as that identity.
+        ///
+        /// A new identity is made only when the page holds no key: never
+        /// written, which is a board's first boot with a node, or written and
+        /// damaged, which the log says apart. One that cannot be stored is
+        /// still used, and the log says that the next boot will make another.
+        pub async fn adopt<F: RecordFlash>(&mut self, storage: &mut Storage<F>) {
+            let key = match storage.load_key() {
+                Stored::Key(key) => {
+                    let hashes = key.hashes();
+                    defmt::info!(
+                        "node: identity {=[u8]:02x}, LXMF address {=[u8]:02x}",
+                        &hashes.identity[..],
+                        &hashes.lxmf[..]
+                    );
+                    key
+                }
+                found => {
+                    if found == Stored::Damaged {
+                        defmt::warn!("node: the identity page does not hold a key it can trust");
+                    }
+                    let key = NodeKey::generate(&mut self.entropy);
+                    let hashes = key.hashes();
+                    match storage.save_key(&key).await {
+                        Ok(()) => defmt::info!(
+                            "node: a new identity {=[u8]:02x}, LXMF address {=[u8]:02x}, stored",
+                            &hashes.identity[..],
+                            &hashes.lxmf[..]
+                        ),
+                        Err(e) => defmt::error!(
+                            "node: a new identity {=[u8]:02x} could not be stored ({}); the next boot makes another",
+                            &hashes.identity[..],
+                            e
+                        ),
+                    }
+                    key
+                }
+            };
             let now = now_ms();
             // No bitrate yet: it is what the engine budgets our own announces
             // against, and the board does not announce.
-            let node = Node::new(0, now);
+            self.node = Some(Node::new(0, now, &key));
+            self.last_tick_ms = now;
             defmt::info!(
                 "node: listening while no host is attached; heap {=usize} of {=usize} bytes",
                 HEAP.used(),
                 HEAP_SIZE
             );
-            Self {
-                node,
-                entropy: Entropy::from_seed(seed),
-                last_tick_ms: now,
-                reported_peak: 0,
-            }
+        }
+
+        /// What the System screen shows of the node.
+        pub fn hashes(&self) -> Option<NodeHashes> {
+            self.node.as_ref().map(Node::hashes)
         }
 
         /// A packet came off the air and went wherever it goes.
         pub fn heard(&mut self, packet: &[u8], signal: Signal, host: impl FnOnce() -> Host) {
+            let Some(node) = self.node.as_mut() else {
+                return;
+            };
             if host() != Host::None {
                 return;
             }
-            let out = self
-                .node
-                .heard(packet, Some(signal), now_ms(), &mut self.entropy);
+            let out = node.heard(packet, Some(signal), now_ms(), &mut self.entropy);
             self.report(out);
         }
 
         /// Called on every pass of the modem loop; runs the engine's
         /// housekeeping as often as it asks for it.
         pub fn tick(&mut self, host: impl FnOnce() -> Host) {
+            let Some(node) = self.node.as_mut() else {
+                return;
+            };
             if host() != Host::None {
                 return;
             }
@@ -141,7 +197,7 @@ mod imp {
                 return;
             }
             self.last_tick_ms = now;
-            let out = self.node.tick(now, &mut self.entropy);
+            let out = node.tick(now, &mut self.entropy);
             self.report(out);
         }
 
@@ -173,7 +229,7 @@ mod imp {
                     "node: heap peak {=usize} of {=usize} bytes, {=usize} paths",
                     used,
                     HEAP_SIZE,
-                    self.node.paths()
+                    self.node.as_ref().map_or(0, Node::paths)
                 );
             }
         }
@@ -249,6 +305,14 @@ pub struct Listener;
 impl Listener {
     pub fn new(_rng: Peri<'_, RNG>) -> Self {
         Listener
+    }
+
+    #[inline(always)]
+    pub async fn adopt<F: RecordFlash>(&mut self, _storage: &mut Storage<F>) {}
+
+    #[inline(always)]
+    pub fn hashes(&self) -> Option<NodeHashes> {
+        None
     }
 
     #[inline(always)]

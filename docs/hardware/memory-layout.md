@@ -14,8 +14,8 @@ the single source of truth for it.
 0x00026000 ├────────────────────────────────┤ ◄── oxinode is linked here
            │ application                    │ 784 KB
 0x000EA000 ├────────────────────────────────┤ ◄── the bootloader writes no higher
-           │ app data reserved by the       │  40 KB   device record at 0xEA000
-           │ bootloader (DFU_APP_DATA_...)  │
+           │ app data reserved by the       │  40 KB   device record at 0xEA000,
+           │ bootloader (DFU_APP_DATA_...)  │          node identity at 0xEB000
 0x000F4000 ├────────────────────────────────┤
            │ Adafruit UF2 bootloader        │  38 KB
 0x000FD800 ├────────────────────────────────┤
@@ -79,7 +79,9 @@ first page of it. The address is derived, not written twice: `build.rs`
 exports `APP_FLASH_END` from `memory.x`, and the end of the application region
 is the start of the reserved one by definition. Growing the application region
 would relocate the record and lose every provisioned board's identity, so do
-not move `FLASH`'s length without moving the record. See
+not move `FLASH`'s length without moving the record. An image with the node
+keeps its Reticulum identity on the next page, `0xEB000`, apart from the
+record so that neither can cost the other. See
 [Provisioning and storage](../architecture/provisioning.md).
 
 ## RAM
@@ -109,10 +111,12 @@ rather than when the 784 KB runs out. Measured on 2026-10-23, `rns-core`
 | | flash | RAM |
 |---|---:|---:|
 | `rnode` | 333,708 | 54,364 |
-| `rnode` with `node` | 533,336 | 120,756 |
+| `rnode` with `node` | 541,720 | 120,828 |
 | ceiling in `tools/test.sh` | 589,824 (576 KiB) | 131,072 (128 KiB) |
 
-The 199,628 bytes of flash the stack adds come mostly from `alloc`
+Measured again on 2026-10-23 with the board's identity, which added 8,384
+bytes of flash, most of it key generation. The roughly 200 KB the stack
+itself adds come mostly from `alloc`
 (67 KB, the maps and vectors monomorphised for the engine), `rns-core`
 itself (51 KB), `sha2` (35 KB, SHA-256 for hashes and SHA-512 inside Ed25519)
 and the curve arithmetic. The RAM is the heap and a little more. The ceilings

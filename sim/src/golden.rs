@@ -110,6 +110,13 @@ pub fn cases() -> Vec<Case> {
             size: square,
         });
     }
+    // The system screen is long too, with a node's address on it.
+    cases.push(Case {
+        name: "system-scrolled-bottom".to_string(),
+        script: format!("right*{} down*100", Screen::System.index()),
+        state: populated,
+        size: square,
+    });
     cases.push(Case {
         name: "bluetooth-pairing".to_string(),
         script: format!("right*{}", Screen::Bluetooth.index()),
@@ -407,15 +414,15 @@ mod tests {
         let names: HashSet<&str> = cases.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names.len(), cases.len(), "a name repeats");
         let items: usize = Screen::ALL.iter().map(|s| s.menu().len()).sum();
-        // Screens twice, every menu item, three scroll positions, pairing
-        // and refused, then five editors, three refusals, the cursor, the
+        // Screens twice, every menu item, three scroll positions, the system
+        // screen scrolled, pairing and refused, then five editors, three refusals, the cursor, the
         // screen after an edit, and two notices. Then every screen, three
         // menu windows, a scroll, every editor, three refusals, a notice and
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
         // confirmed.
         let square =
-            2 * Screen::COUNT + items + 3 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2 + 2;
+            2 * Screen::COUNT + items + 3 + 1 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2 + 2;
         let wide = Screen::COUNT + 3 + 1 + Field::ALL.len() + 3 + 1 + 1;
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
@@ -428,6 +435,7 @@ mod tests {
         assert!(names.contains("radio-edit-frequency-2g4"));
         assert!(names.contains("radio-edit-band-changed"));
         assert!(names.contains("radio-after-band"));
+        assert!(names.contains("system-scrolled-bottom"));
         for screen in Screen::ALL {
             let title = slug(screen.title());
             assert!(names.contains(title.as_str()), "{screen:?}");

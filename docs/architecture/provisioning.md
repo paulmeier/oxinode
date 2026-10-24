@@ -3,7 +3,8 @@
 `rnodeconf` gives an RNode an identity, a signature, and a configuration it
 remembers. oxinode stores all three, plus its Bluetooth bonds, in a device
 record in the flash the bootloader reserves and never touches, so provisioning
-survives a reflash.
+survives a reflash. An image with the node keeps the node's own Reticulum
+identity there too, on a page of its own.
 
 ## What a provisioned RNode is
 
@@ -118,6 +119,51 @@ takes about 420 ms to reach a configured radio with no host attached.
 From the panel, *Save Config* stores the live configuration and makes the
 board a TNC; in TNC mode a confirmed panel edit goes into the stored
 configuration too. See [The interface](interface.md).
+
+## The node's identity
+
+An image built with `node` is also a Reticulum node of its own when no host
+is attached, and a node needs an identity that lasts: every destination it
+has is derived from it, and `lxmf.delivery` is the address peers keep
+conversations with. It is made once, on the first boot of an image with the
+node, from the node's ChaCha20 stream seeded from the chip's hardware RNG,
+and kept on **its own page**, the next one up:
+
+```
+0xEB000 ┌──────────────────────────────────────────┐
+        │ magic "OXK1" · version 1                 │
+        │ CRC-32 over everything but itself        │
+        │ private key (X25519 + Ed25519, 64 bytes) │
+        └──────────────────────────────────────────┘
+```
+
+Not in the device record, for three reasons. An older release reads a device
+record it knows; a new version of that record would be one it did not, and
+flashing it would make a provisioned board come up unprovisioned and then
+write the identity away with its next save. `rnodeconf --eeprom-wipe`, which
+is how a provisioned RNode is re-provisioned and which takes the EEPROM, the
+signature and the bonds, does not touch it: the identity is what peers know
+the board by, not part of the modem, and re-provisioning the modem is not a
+reason for every conversation with it to end. And an image without the node
+never reads or writes the page, so it cannot lose it.
+
+A page that was never written is a first boot. One that was written and does
+not check out (magic, version, CRC) is reported in the log as damaged, and a
+new identity is made and written over it, since the old key is gone either
+way. A test flips every byte of the record and asserts none of them reads
+back as a key. If the write of a new identity fails, the board still runs as
+that identity until it reboots, and the log says the next boot makes another.
+
+The System screen shows the LXMF address and the identity hash, as two rows
+of sixteen hex digits each, the way Reticulum writes a hash, so they can be
+read against a phone. The private key leaves its page in no other form:
+`NodeKey`'s `Debug` prints nothing of it, and `tools/test_secrets.py` holds
+the source to the key being written in one place and logged in none.
+
+There is no way yet to give a board a **new** identity on purpose, short of
+erasing the page with a probe. A panel action for it belongs with the stored
+conversations, behind a confirmation, when there is something to lose; see
+[Known limitations](../reference/limitations.md).
 
 ## Bluetooth bonds
 

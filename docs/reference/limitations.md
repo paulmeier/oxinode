@@ -48,6 +48,11 @@ has to rediscover it.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
+- **A board cannot be given a new Reticulum identity** without erasing its
+  identity page with a probe. `rnodeconf --eeprom-wipe` leaves it alone on
+  purpose (see [Provisioning and storage](../architecture/provisioning.md#the-nodes-identity)).
+  A panel action for it, behind a confirmation, goes with the stored
+  conversations ([#65](https://github.com/paulmeier/oxinode/issues/65)).
 - **The 2.4 GHz path is accepted and held, and not yet good.** The product
   image validates for both bands, the panel shows the band, switches it in
   one step and edits a 2.4 GHz frequency in place, and a stored 2.4 GHz

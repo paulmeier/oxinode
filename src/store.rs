@@ -52,6 +52,8 @@ use embassy_nrf::peripherals::NVMC;
 use embassy_nrf::Peri;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
+#[cfg(feature = "node")]
+use oxinode_core::node::key::{NodeKey, Stored, RECORD_LEN as KEY_RECORD_LEN};
 use oxinode_core::rnode::store::{DeviceStore, RECORD_LEN};
 
 use crate::boot;
@@ -348,6 +350,68 @@ impl<F: RecordFlash> Storage<F> {
         Ok(())
     }
 }
+
+/// The page the node's identity lives in: the second of the reserved forty
+/// kilobytes, next to the device record and apart from it. Why apart is in
+/// `oxinode_core::node::key`.
+#[cfg(feature = "node")]
+pub const KEY_ADDR: u32 = RECORD_ADDR + PAGE_SIZE as u32;
+
+#[cfg(feature = "node")]
+impl<F: RecordFlash> Storage<F> {
+    /// The node's identity: the key, nothing ever written, or a page that
+    /// could not be trusted.
+    pub fn load_key(&mut self) -> Stored {
+        let mut buf = [0u8; KEY_RECORD_LEN];
+        if self.flash.read(KEY_ADDR, &mut buf).is_err() {
+            return Stored::Damaged;
+        }
+        NodeKey::read(&buf)
+    }
+
+    /// Write the node's identity to its page, retried and read back as the
+    /// device record is.
+    pub async fn save_key(&mut self, key: &NodeKey) -> Result<(), StoreError> {
+        let record = key.record();
+        let mut attempt = 1;
+        loop {
+            match self.write_key(&record).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < ATTEMPTS => {
+                    defmt::warn!(
+                        "store: identity attempt {=u8} of {=u8} failed: {}; retrying",
+                        attempt,
+                        ATTEMPTS,
+                        e
+                    );
+                    attempt += 1;
+                    Timer::after(RETRY_AFTER).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn write_key(&mut self, record: &[u8; KEY_RECORD_LEN]) -> Result<(), StoreError> {
+        self.flash.erase_page(KEY_ADDR).await?;
+        self.flash.write(KEY_ADDR, record).await?;
+        let mut check = [0u8; KEY_RECORD_LEN];
+        self.flash.read(KEY_ADDR, &mut check)?;
+        if &check != record {
+            return Err(StoreError::Verify);
+        }
+        Ok(())
+    }
+}
+
+// The key page obeys the record page's rules: aligned, inside the reserved
+// region, clear of the bootloader, and holding a whole record of whole words.
+#[cfg(feature = "node")]
+const _: () = assert!(KEY_ADDR as usize % PAGE_SIZE == 0);
+#[cfg(feature = "node")]
+const _: () = assert!(KEY_ADDR + PAGE_SIZE as u32 <= BOOTLOADER_START);
+#[cfg(feature = "node")]
+const _: () = assert!(KEY_RECORD_LEN <= PAGE_SIZE && KEY_RECORD_LEN % 4 == 0);
 
 // The record page must be page-aligned, because that is the unit of erase, and
 // a misaligned erase would take out the top of the application instead.
