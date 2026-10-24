@@ -53,6 +53,25 @@ has to rediscover it.
   nothing over the air directly; a receiver holding a path to the board
   through another node keeps that path until it expires rather than taking
   the newer one.
+- **The node receives only messages that fit in one packet.** LXMF's
+  opportunistic delivery, up to 295 bytes of content, is the whole of it: a
+  sender that opens a link first, or sends something longer as a resource,
+  or leaves it with a propagation node, reaches nothing on the board, and the
+  log says a packet came that the board does not read. That is
+  [#67](https://github.com/paulmeier/oxinode/issues/67).
+- **Received messages are held in RAM, sixteen of them, and not yet shown.**
+  A reboot loses them ([#65](https://github.com/paulmeier/oxinode/issues/65)),
+  and when a seventeenth comes the oldest one read goes, or the oldest if
+  none has been. The Home screen counts the unread; reading them, and with
+  that marking them read, is the conversation screens' ([#62](https://github.com/paulmeier/oxinode/issues/62)).
+- **What a message carries beyond its title and text is not shown.** An
+  image, a file, a voice message or telemetry is recorded as "has an
+  attachment", and the attachment itself is not kept. Formatted content
+  (Micron, Markdown) is kept as the sender wrote it, markup and all.
+- **A message from a sender the board has not heard stays unverified** until
+  the sender's announce arrives; the board asks for it once when the message
+  comes and again on each retry. One whose key never arrives is never shown
+  as verified. Stamps are neither asked for nor checked.
 - **A board cannot be given a new Reticulum identity** without erasing its
   identity page with a probe. `rnodeconf --eeprom-wipe` leaves it alone on
   purpose (see [Provisioning and storage](../architecture/provisioning.md#the-nodes-identity)).

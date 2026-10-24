@@ -81,6 +81,9 @@ pub fn populated() -> State {
         home: Home {
             host: Host::Usb,
             mode: Some(Mode::Rnode(Transport::Usb)),
+            // Only an image with the node has messages. None unread draws
+            // no row; `unread` is the fixture with some.
+            unread: cfg!(feature = "node").then_some(0),
             talking: true,
             air: Air::Receiving,
             rx_count: 42,
@@ -288,6 +291,13 @@ pub fn standalone() -> State {
     state.home.talking = false;
     state.home.mode = Some(Mode::Node);
     state.radio.tnc = true;
+    state
+}
+
+/// The standalone board with two messages it has not shown anyone yet.
+pub fn unread() -> State {
+    let mut state = standalone();
+    state.home.unread = Some(2);
     state
 }
 

@@ -169,6 +169,14 @@ pub fn cases() -> Vec<Case> {
         state: scene::standalone(),
         size: square,
     });
+    // Messages waiting: the row that lights on Home, which then scrolls.
+    #[cfg(feature = "node")]
+    cases.push(Case {
+        name: "home-unread".to_string(),
+        script: String::new(),
+        state: scene::unread(),
+        size: square,
+    });
     cases.push(Case {
         name: "position-searching".to_string(),
         script: format!("right*{}", Screen::Position.index()),
@@ -476,8 +484,9 @@ mod tests {
         // menu windows, a scroll, every editor, three refusals, a notice and
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
-        // confirmed. With the node, four more of the Peers screen.
-        let peers = if cfg!(feature = "node") { 4 } else { 0 };
+        // confirmed. With the node, four more of the Peers screen and Home
+        // with messages unread.
+        let peers = if cfg!(feature = "node") { 4 + 1 } else { 0 };
         let square = peers
             + 2 * Screen::COUNT
             + items

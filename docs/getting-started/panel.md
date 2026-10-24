@@ -30,7 +30,9 @@ gesture, and the next gesture wakes it (and is otherwise swallowed).
 **Home.** Which host has the line (`USB`, `Bluetooth`, or `none`); in an image
 with the node, whether the board is that host's `RNode`, a `node` of its own,
 or neither for want of a stored configuration (`no radio config`; *Save
-Config* on the Radio screen is the cure); whether anything
+Config* on the Radio screen is the cure); while messages have arrived that
+nobody has read, how many (`Unread 2`), a row that is there only then, so
+Home scrolls by a line while it is; whether anything
 has been said in the last ten seconds, what the radio is doing, packets in and
 out, the last packet's RSSI and SNR, uptime, the battery, and what the charger
 is doing (`charging`, `full`, `unplugged`, `fault`, `latched off`). The
@@ -49,8 +51,22 @@ hops it came if it was relayed (`2 hops`). A peer that announced no name
 shows the start of its address in angle brackets, `<3b079e41d2>`, and a
 character the font cannot draw shows as a box. The board keeps sixteen
 peers, in RAM until a reboot; when a seventeenth is heard, the one heard
-longest ago goes. Menu: only *Back* for now; messaging a peer comes with
-conversations.
+longest ago goes, unless every peer has sent the board a message, in which
+case the newcomer is not kept. Menu: only *Back* for now; messaging a peer
+comes with conversations.
+
+**A message arriving** lights the panel if it was out, and keeps it lit for
+the same minute a press would. The first press after that acts as usual;
+only a press made while the panel is out is taken as waking it. The
+messages themselves are shown by the conversation screens, which come next
+([#62](https://github.com/paulmeier/oxinode/issues/62)).
+
+The punctuation a phone types in place of plain ASCII is drawn as the ASCII
+it stands for: curly quotes as `'`, dashes and the minus sign as `-`, an
+ellipsis as `...`, and the no-break and thin spaces as spaces. Double quotes
+of every kind are drawn as `'`, because the font has no `"`. Only the
+drawing is folded; a name or a message is kept as it came. Anything else
+outside the font is a box.
 
 **Radio.** The band first (`sub-GHz` on the SMA or `2.4 GHz` on the u.FL,
 decided by the frequency; a dash for a frequency in neither), then the

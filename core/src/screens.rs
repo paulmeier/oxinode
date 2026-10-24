@@ -124,6 +124,11 @@ pub struct Home {
     /// with the node. `None` is an image without one, which is always an
     /// RNode and draws no row for it.
     pub mode: Option<Mode>,
+    /// Messages received and not yet read, in an image with the node. The
+    /// row is drawn while there are some: it is what lights when a message
+    /// comes, and Home has room for it then by scrolling a line rather than
+    /// always. `None` is an image without the node.
+    pub unread: Option<u16>,
     /// A frame passed between the modem and its host in the last few seconds.
     /// Meaningless with no host, and not drawn then.
     pub talking: bool,
@@ -266,10 +271,40 @@ impl Default for System {
     }
 }
 
-/// A peer's display name as the panel can draw it: printable ASCII as it
-/// is, and every other character as one byte the font has no glyph for, so
-/// it draws as one hollow box. Cut at a row's width; a name is never wider
-/// than the row it sits in.
+/// What stands in for a character the panel cannot draw: a byte the font
+/// has no glyph for, so it draws as one hollow box.
+pub const UNDRAWABLE: u8 = 0x7f;
+
+/// Text as the panel can draw it, one byte per cell: printable ASCII as it
+/// is, the punctuation phones type in place of ASCII folded to what the font
+/// draws, and every other character as [`UNDRAWABLE`].
+///
+/// The fold is for what people send without meaning anything by it: a
+/// phone's keyboard turns `'` into `’` and `--` into `–` on its own. So
+/// curly single quotes and primes become `'`; dashes and the minus sign
+/// become `-`; an ellipsis becomes `...`; and the no-break and thin spaces
+/// become a space. Double quotes of every kind, the straight one included,
+/// become `'`, because the font has `'` and no `"`: a quotation that reads
+/// is better than one in two boxes. Only what is drawn is folded; the text
+/// a message carries is kept as it came.
+pub fn drawable(text: &str) -> impl Iterator<Item = u8> + '_ {
+    text.chars().flat_map(|c| {
+        let one = |b: u8| ([b, 0, 0], 1);
+        let (bytes, len) = match c {
+            '"' | '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' | '\u{2033}' => one(b'\''),
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{2032}' => one(b'\''),
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => one(b'-'),
+            '\u{00a0}' | '\u{2009}' | '\u{202f}' => one(b' '),
+            '\u{2026}' => (*b"...", 3),
+            ' '..='~' => one(c as u8),
+            _ => one(UNDRAWABLE),
+        };
+        bytes.into_iter().take(len)
+    })
+}
+
+/// A peer's display name as the panel can draw it ([`drawable`]), cut at a
+/// row's width; a name is never wider than the row it sits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerName {
     bytes: [u8; LINE_CHARS],
@@ -278,18 +313,15 @@ pub struct PeerName {
 
 impl PeerName {
     /// What stands in for a character the panel cannot draw.
-    pub const UNDRAWABLE: u8 = 0x7f;
+    pub const UNDRAWABLE: u8 = UNDRAWABLE;
 
     pub fn new(name: &str) -> Self {
         let mut out = PeerName {
             bytes: [0; LINE_CHARS],
             len: 0,
         };
-        for (slot, c) in out.bytes.iter_mut().zip(name.chars()) {
-            *slot = match c {
-                ' '..='~' => c as u8,
-                _ => Self::UNDRAWABLE,
-            };
+        for (slot, b) in out.bytes.iter_mut().zip(drawable(name)) {
+            *slot = b;
             out.len += 1;
         }
         out
@@ -567,6 +599,11 @@ impl Home {
         );
         if let Some(mode) = self.mode {
             out.row("Mode", mode.word());
+        }
+        if let Some(unread) = self.unread.filter(|&n| n > 0) {
+            let _ = write!(v, "{unread}");
+            out.row("Unread", v.as_str());
+            v.clear();
         }
         out.row(
             "Link",
@@ -1316,6 +1353,7 @@ mod tests {
             home: Home {
                 host: Host::Usb,
                 mode: Some(Mode::Rnode(Transport::Usb)),
+                unread: Some(2),
                 talking: true,
                 air: Air::Receiving,
                 rx_count: 42,
@@ -1477,6 +1515,45 @@ mod tests {
         );
         assert_eq!(monopanel::font::glyph(PeerName::UNDRAWABLE), None, "a box");
         assert_eq!(PeerName::new(&"x".repeat(40)).as_str().len(), LINE_CHARS);
+    }
+
+    fn drawn(text: &str) -> String {
+        drawable(text).map(char::from).collect()
+    }
+
+    #[test]
+    fn what_a_phone_types_for_punctuation_is_folded_to_what_the_font_draws() {
+        // The text of the message Python LXMF sent in the node's vectors.
+        let sent = "Hello from the bench \u{2013} it\u{2019}s \u{201c}Python\u{201d}\u{2026}";
+        let shown = drawn(sent);
+        assert_eq!(shown, "Hello from the bench - it's 'Python'...");
+        for c in shown.bytes() {
+            assert!(
+                monopanel::font::glyph(c).is_some(),
+                "{:?} draws as a box",
+                c as char
+            );
+        }
+        assert_eq!(drawn("\u{2018}a\u{2019} \u{2032}"), "'a' '");
+        assert_eq!(
+            drawn("\"\u{201e}\u{201f}\u{2033}"),
+            "''''",
+            "the font has no \""
+        );
+        assert_eq!(
+            drawn("\u{2010}\u{2011}\u{2012}\u{2013}\u{2014}\u{2015}\u{2212}"),
+            "-------"
+        );
+        assert_eq!(drawn("a\u{00a0}b\u{2009}c\u{202f}d"), "a b c d");
+        // What is not punctuation stays a box: it is not a guess at a letter.
+        assert_eq!(drawn("\u{00e9}\u{2016}\u{2027}"), "\x7f\x7f\x7f");
+    }
+
+    #[test]
+    fn a_folded_name_is_still_cut_at_the_row() {
+        let name = PeerName::new(&"\u{2026}".repeat(LINE_CHARS));
+        assert_eq!(name.as_str(), ".".repeat(LINE_CHARS));
+        assert_eq!(PeerName::new("it\u{2019}s").as_str(), "it's");
     }
 
     #[test]
@@ -1641,6 +1718,30 @@ mod tests {
         assert!(bt.iter().any(|l| l.ends_with("absent")));
     }
 
+    /// **Unread messages are counted on Home**, under the mode, while there
+    /// are any; none, or an image without the node, draws no row.
+    #[test]
+    fn home_counts_unread_messages_while_there_are_any() {
+        let mut state = populated();
+        let lines = lines_of(&state, Screen::Home);
+        let mode = lines.iter().position(|l| l.starts_with("Mode")).unwrap();
+        assert_eq!(
+            lines[mode + 1],
+            format!("Unread{:>w$}", "2", w = LINE_CHARS - 6)
+        );
+        let no_row = |state: &State| {
+            !lines_of(state, Screen::Home)
+                .iter()
+                .any(|l| l.starts_with("Unread"))
+        };
+        state.home.unread = Some(0);
+        assert!(no_row(&state), "nothing unread");
+        state.home.unread = None;
+        assert!(no_row(&state), "no node");
+        // With none unread, Home fits the panel without scrolling.
+        assert!(lines_of(&state, Screen::Home).len() <= LAYOUT.visible_lines());
+    }
+
     /// **The node's address is on the System screen exactly as a phone
     /// shows it**, in two rows of sixteen, and an image without a node shows
     /// no row for it at all.
@@ -1800,10 +1901,12 @@ mod tests {
     #[test]
     fn changing_any_field_changes_a_line() {
         type Mutation = (&'static str, fn(&mut State));
-        let mutations: [Mutation; 35] = [
+        let mutations: [Mutation; 37] = [
             ("host", |s| s.home.host = Host::Bluetooth),
             ("mode", |s| s.home.mode = Some(Mode::Node)),
             ("no node", |s| s.home.mode = None),
+            ("unread", |s| s.home.unread = Some(3)),
+            ("no messages", |s| s.home.unread = None),
             ("talking", |s| s.home.talking = false),
             ("home air", |s| s.home.air = Air::Off),
             ("rx", |s| s.home.rx_count += 1),

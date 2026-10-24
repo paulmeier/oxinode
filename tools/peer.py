@@ -13,12 +13,19 @@ what says whether it said the right thing.
     signal it came with.
   * It sends opportunistic LXMF messages to the board once it has heard the
     board announce, one at a time, and reports the delivery proof and how
-    long it took to come back.
+    long it took to come back. With `--repeat`, each message delivered is
+    sent once more as a new packet, as LXMF retries one whose proof was
+    lost: the same message hash, which the board must prove again and not
+    keep twice.
   * It prints every LXMF message the board sends it, with LXMF's own
     signature check, and checks the framing of each against its own reading.
   * It announces its own `lxmf.delivery` destination, under one identity that
     is kept between runs, when it starts and again when it first hears the
     board, so a board that came up later still learns it and can answer.
+    With `--no-announce` it never does, so its messages come from a sender
+    the board has not heard -- give it an `--identity` the board has not met
+    either -- and the board must ask for its path to learn its key.
+    Reticulum answers that path request on its own.
   * With `--flood N`, it then announces N more `lxmf.delivery` destinations
     under throwaway identities, named `flood 01` and on, as fast as the
     RNode will send them: more peers than the board keeps, and more packets
@@ -475,6 +482,8 @@ class Expect(NamedTuple):
     announces: int
     proofs: int
     messages: int
+    # Proofs for messages sent a second time (`--repeat`).
+    repeat_proofs: int = 0
 
 
 class Seen(NamedTuple):
@@ -483,6 +492,7 @@ class Seen(NamedTuple):
     proofs: int
     messages: int
     bad_messages: int
+    repeat_proofs: int = 0
 
 
 def shortfalls(expect: Expect, seen: Seen) -> List[str]:
@@ -494,6 +504,8 @@ def shortfalls(expect: Expect, seen: Seen) -> List[str]:
         out.append(f"{seen.bad_announces} announces from the board that did not check out")
     if seen.proofs < expect.proofs:
         out.append(f"{seen.proofs} of {expect.proofs} delivery proofs")
+    if seen.repeat_proofs < expect.repeat_proofs:
+        out.append(f"{seen.repeat_proofs} of {expect.repeat_proofs} proofs for messages sent again")
     if seen.messages < expect.messages:
         out.append(f"{seen.messages} of {expect.messages} messages from the board")
     if seen.bad_messages:
@@ -532,6 +544,8 @@ class Run:
         # The messages proved, by number: LXMF reports a message delivered
         # once per proof, and a message sent twice can be proved twice.
         self.proved = set()
+        # The same, for each message sent a second time as a new packet.
+        self.proved_again = set()
         self.messages = 0
         self.bad_messages = 0
         # When to announce again, in answer to the board's first announce.
@@ -551,9 +565,23 @@ class Run:
             self.proved.add(number)
             return first
 
+    def prove_again(self, number: int) -> bool:
+        """Note a proof for message `number` sent again; whether it is the first."""
+        with self.lock:
+            first = number not in self.proved_again
+            self.proved_again.add(number)
+            return first
+
     def seen(self) -> Seen:
         with self.lock:
-            return Seen(self.announces, self.bad_announces, len(self.proved), self.messages, self.bad_messages)
+            return Seen(
+                self.announces,
+                self.bad_announces,
+                len(self.proved),
+                self.messages,
+                self.bad_messages,
+                len(self.proved_again),
+            )
 
 
 def hexrep(b: bytes) -> str:
@@ -564,7 +592,12 @@ def peer_main(args, out_dir: str) -> int:
     import RNS
     import LXMF
 
-    expect = Expect(args.expect_announces, args.send if args.expect_proofs is None else args.expect_proofs, args.expect_messages)
+    expect = Expect(
+        args.expect_announces,
+        args.send if args.expect_proofs is None else args.expect_proofs,
+        args.expect_messages,
+        args.send if args.repeat else 0,
+    )
     run = Run(out_dir, parse_hash(args.board) if args.board else None)
 
     configdir = os.path.join(out_dir, "reticulum")
@@ -708,6 +741,7 @@ def peer_main(args, out_dir: str) -> int:
 
     sent = 0
     in_flight = None  # (message, time it was handed to the router, number)
+    again = None  # (message, number, when to send it again), with --repeat
     next_send: Optional[float] = None  # set once the board can be sent to
     next_announce = time.time()
     deadline = time.time() + args.seconds
@@ -725,6 +759,8 @@ def peer_main(args, out_dir: str) -> int:
     try:
         while time.time() < deadline:
             now = time.time()
+            if args.no_announce:
+                next_announce = float("inf")
             if now >= next_announce:
                 router.announce(delivery.hash)
                 run.say(f"announced {hexrep(delivery.hash)}")
@@ -738,7 +774,7 @@ def peer_main(args, out_dir: str) -> int:
                 answer, board_identity = run.answer_at is not None and now >= run.answer_at, run.board_identity
                 if answer:
                     run.answer_at = None
-            if answer:
+            if answer and not args.no_announce:
                 router.announce(delivery.hash)
                 run.say(f"announced {hexrep(delivery.hash)} in answer to the board's first announce")
             if board_identity is not None and next_send is None:
@@ -746,7 +782,24 @@ def peer_main(args, out_dir: str) -> int:
                 # about to send again, and the two would meet on the air.
                 next_send = now + args.settle
             if in_flight and in_flight[0].state in (LXMF.LXMessage.DELIVERED, LXMF.LXMessage.FAILED, LXMF.LXMessage.REJECTED, LXMF.LXMessage.CANCELLED):
+                if args.repeat and in_flight[0].state == LXMF.LXMessage.DELIVERED:
+                    again = (in_flight[0], in_flight[2], now + args.gap)
                 in_flight = None
+                next_send = now + args.gap
+            if again is not None and now >= again[2]:
+                # What LXMF does when a proof is lost: the packed message in a
+                # new packet, encrypted afresh, with the same message hash.
+                message, number, _ = again
+                again = None
+                receipt = message._LXMessage__as_packet().send()
+
+                def proved_again(_receipt, number=number, start=now):
+                    what = "proof" if run.prove_again(number) else "proved again"
+                    run.say(f"message {number} sent again: {what} after {time.time() - start:.3f} s")
+
+                if receipt:
+                    receipt.set_delivery_callback(proved_again)
+                run.say(f"message {number} sent again as a new packet, id {message.hash.hex()}")
                 next_send = now + args.gap
             if sent < args.send and in_flight is None and next_send is not None and now >= next_send:
                 sent += 1
@@ -760,7 +813,7 @@ def peer_main(args, out_dir: str) -> int:
                 run.say(f"message {sent} sent to {hexrep(destination.hash)}: {text!r}, {message.packed_size} bytes packed, id {message.hash.hex()}")
                 in_flight = (message, now, sent)
             met = not shortfalls(expect, run.seen())
-            if met and not args.listen and sent >= args.send and in_flight is None:
+            if met and not args.listen and sent >= args.send and in_flight is None and again is None:
                 break
             time.sleep(0.1)
     except KeyboardInterrupt:
@@ -773,7 +826,8 @@ def peer_main(args, out_dir: str) -> int:
         f"rnode: {args.rnode}; radio: " + ", ".join(f"{k} {v}" for k, v in radio.items()),
         f"peer: {hexrep(delivery.hash)}; board: {hexrep(run.board) if run.board else 'not heard'}",
         f"announces from the board: {seen.announces} (expected {expect.announces}), {seen.bad_announces} bad",
-        f"messages sent: {sent}; proofs: {seen.proofs} (expected {expect.proofs})",
+        f"messages sent: {sent}; proofs: {seen.proofs} (expected {expect.proofs})"
+        + (f"; sent again: proofs {seen.repeat_proofs} (expected {expect.repeat_proofs})" if args.repeat else ""),
         f"messages from the board: {seen.messages} (expected {expect.messages}), {seen.bad_messages} bad",
         "result: " + ("pass" if not missing else "FAIL: " + "; ".join(missing)),
     ]
@@ -800,6 +854,8 @@ def main() -> int:
     ap.add_argument("--expect-announces", type=int, default=1, help="announces from the board to see (default 1)")
     ap.add_argument("--send", type=int, default=0, help="opportunistic messages to send the board, one at a time (default 0)")
     ap.add_argument("--expect-proofs", type=int, help="delivery proofs to see (default: one per message sent)")
+    ap.add_argument("--repeat", action="store_true", help="send each delivered message again as a new packet, and expect a proof for that too")
+    ap.add_argument("--no-announce", action="store_true", help="never announce: the board has to ask for the peer's key")
     ap.add_argument("--expect-messages", type=int, default=0, help="messages from the board to see (default 0)")
     ap.add_argument("--text", default="message {n} from the bench peer at {time}", help="what to send; {n} and {time} are filled in")
     ap.add_argument("--title", default="", help="the messages' title (default none)")

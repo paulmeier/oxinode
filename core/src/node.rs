@@ -13,7 +13,10 @@
 //! life, and an `lxmf.delivery` destination derived from it. It hears
 //! announces and keeps the `lxmf.delivery` ones as [`peers`]; it announces
 //! itself within a budget ([`announce`]) and answers path requests for its
-//! address. Messages are next.
+//! address. It receives LXMF messages that come in one packet ([`lxmf`]),
+//! proves each one so its sender shows it delivered, and keeps them
+//! ([`messages`]); what it does with each is [`Station::take`]'s. Sending
+//! is next.
 //!
 //! # One interface, and no transport
 //!
@@ -68,8 +71,12 @@ pub use rns_crypto::Rng;
 
 pub mod announce;
 pub mod key;
+pub mod lxmf;
+pub mod messages;
 pub mod peers;
 use key::{Hashes, NodeKey};
+use messages::{Arrival, Messages, Settled};
+use peers::{Learned, Table};
 
 /// Where the engine's randomness comes from: ChaCha20, seeded once.
 ///
@@ -142,6 +149,26 @@ pub struct Heard {
     pub signal: Option<Signal>,
 }
 
+/// An LXMF message delivered to the board, and the packet it came in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    pub message: lxmf::Message,
+    /// The hash of the packet, which is what a delivery proof signs.
+    pub packet_hash: [u8; 32],
+}
+
+/// A packet for the board's address that is not a message it can read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unreadable {
+    /// Not a single opportunistic packet: a link request, or a packet with
+    /// a context the board does not read. Links are later work (#67).
+    NotOpportunistic { packet_type: u8, context: u8 },
+    /// It did not decrypt with the board's key.
+    Undecryptable,
+    /// It decrypted, and is not an LXMF message.
+    Malformed(lxmf::Malformed),
+}
+
 /// What one call into the node produced.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
@@ -152,6 +179,11 @@ pub struct Outcome {
     /// Our own destinations someone asked for a path to. Answering one is an
     /// announce, which needs the keys, so it is the caller's to send.
     pub path_requests: Vec<[u8; 16]>,
+    /// Messages delivered to the board, not yet proved: whether to prove one
+    /// depends on what the board knows of its sender ([`Station::take`]).
+    pub messages: Vec<Delivery>,
+    /// Packets for the board's address that it could not read.
+    pub unreadable: Vec<Unreadable>,
     /// Actions the node had no use for, counted so a log can say so.
     pub ignored: u32,
 }
@@ -259,8 +291,11 @@ impl Node {
         let frame = InboundFrame::new(packet, AIR, now).with_rx(rx);
         let mut actions = self.engine.handle_inbound(frame, rng);
         // A path request is delivered to us like any packet for a local
-        // destination, and goes back into the engine as a path request.
+        // destination, and goes back into the engine as a path request. A
+        // packet for our own address is a message, or something that is not.
         let mut answers = Vec::new();
+        let mut messages = Vec::new();
+        let mut unreadable = Vec::new();
         actions.retain(|action| match action {
             TransportAction::DeliverLocal {
                 destination_hash,
@@ -273,10 +308,24 @@ impl Node {
                 }
                 false
             }
+            TransportAction::DeliverLocal {
+                destination_hash,
+                raw,
+                packet_hash,
+                ..
+            } if *destination_hash == self.hashes.lxmf => {
+                match self.open(raw, packet_hash) {
+                    Ok(delivery) => messages.push(delivery),
+                    Err(why) => unreadable.push(why),
+                }
+                false
+            }
             _ => true,
         });
         actions.append(&mut answers);
         let mut out = route(actions);
+        out.messages = messages;
+        out.unreadable = unreadable;
         // The board's own announce, relayed back by somebody, is not a peer;
         // Reticulum ignores announces for its own destinations as well.
         let ours = self.hashes.lxmf;
@@ -285,6 +334,81 @@ impl Node {
             heard.signal = signal.filter(|_| heard.hops == 1);
         }
         out
+    }
+
+    /// A packet for the board's address, as a message: one opportunistic
+    /// packet, decrypted with the board's key and read as LXMF. Reticulum
+    /// proves a packet as soon as it decrypts; the board waits to know what
+    /// it believes of the sender, so the proof is [`Node::prove`]'s.
+    fn open(&self, raw: &[u8], packet_hash: &[u8; 32]) -> Result<Delivery, Unreadable> {
+        let packet = RawPacket::unpack(raw).map_err(|_| Unreadable::Undecryptable)?;
+        if packet.flags.packet_type != constants::PACKET_TYPE_DATA
+            || packet.flags.destination_type != constants::DESTINATION_SINGLE
+            || packet.context != constants::CONTEXT_NONE
+        {
+            return Err(Unreadable::NotOpportunistic {
+                packet_type: packet.flags.packet_type,
+                context: packet.context,
+            });
+        }
+        let plaintext = self
+            .identity
+            .decrypt(packet.data())
+            .map_err(|_| Unreadable::Undecryptable)?;
+        let message =
+            lxmf::Message::unpack(&self.hashes.lxmf, &plaintext).map_err(Unreadable::Malformed)?;
+        Ok(Delivery {
+            message,
+            packet_hash: *packet_hash,
+        })
+    }
+
+    /// The delivery proof for the packet with this hash, as Reticulum's
+    /// `Identity.prove` makes it: the board's signature over the hash and
+    /// nothing else (an implicit proof), addressed to the packet's own
+    /// truncated hash, which is where the sender waits for it.
+    pub fn prove(&self, packet_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        let signature = self.identity.sign(packet_hash).ok()?;
+        let flags = rns_core::packet::PacketFlags {
+            header_type: constants::HEADER_1,
+            context_flag: constants::FLAG_UNSET,
+            transport_type: constants::TRANSPORT_BROADCAST,
+            destination_type: constants::DESTINATION_SINGLE,
+            packet_type: constants::PACKET_TYPE_PROOF,
+        };
+        let mut to = [0u8; 16];
+        to.copy_from_slice(&packet_hash[..16]);
+        RawPacket::pack(flags, 0, &to, None, constants::CONTEXT_NONE, &signature)
+            .ok()
+            .map(|p| p.raw)
+    }
+
+    /// A path request for `destination`, as an endpoint makes one: its
+    /// address and a random tag of sixteen bytes (`Identity.get_random_hash`
+    /// in Python's `Transport.request_path`), broadcast to
+    /// `rnstransport.path.request`. The answer is the destination's
+    /// announce, which carries its key.
+    pub fn path_request(&self, destination: &[u8; 16], rng: &mut dyn Rng) -> Option<Vec<u8>> {
+        let mut data = [0u8; 16 + 16];
+        data[..16].copy_from_slice(destination);
+        rng.fill_bytes(&mut data[16..]);
+        let flags = rns_core::packet::PacketFlags {
+            header_type: constants::HEADER_1,
+            context_flag: constants::FLAG_UNSET,
+            transport_type: constants::TRANSPORT_BROADCAST,
+            destination_type: constants::DESTINATION_PLAIN,
+            packet_type: constants::PACKET_TYPE_DATA,
+        };
+        RawPacket::pack(
+            flags,
+            0,
+            &self.path_request,
+            None,
+            constants::CONTEXT_NONE,
+            &data,
+        )
+        .ok()
+        .map(|p| p.raw)
     }
 
     /// Housekeeping: timeouts, queued announces, table culls. The engine
@@ -296,6 +420,87 @@ impl Node {
     /// How many destinations the engine holds a path to.
     pub fn paths(&self) -> usize {
         self.engine.path_table_count()
+    }
+}
+
+/// What the board knows of the others: the peers it has heard and the
+/// messages it has had from them.
+#[derive(Debug, Default)]
+pub struct Station {
+    pub peers: Table,
+    pub messages: Messages,
+}
+
+/// What [`Station::take`] did, one thing at a time, for a log to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// An announce, and what the peer table made of it.
+    Peer {
+        destination: [u8; 16],
+        learned: Learned,
+    },
+    /// A sender's key arrived, and settled messages that were waiting for it.
+    Settled { source: [u8; 16], settled: Settled },
+    /// A message, and what the store made of it.
+    Message {
+        hash: [u8; 32],
+        source: [u8; 16],
+        arrival: Arrival,
+    },
+    /// A packet for the board's address it could not read.
+    Unreadable(Unreadable),
+}
+
+impl Station {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take what the engine produced at `at_ms`: peers into the table, keys
+    /// to the messages waiting for them, and messages into the store. What
+    /// that calls for -- a proof, or a path request to learn a sender's key
+    /// -- is added to `out.air`, after the engine's own packets.
+    pub fn take(
+        &mut self,
+        node: &Node,
+        out: &mut Outcome,
+        at_ms: u64,
+        rng: &mut dyn Rng,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        for heard in &out.heard {
+            let learned = self.peers.heard(heard, at_ms);
+            events.push(Event::Peer {
+                destination: heard.destination,
+                learned,
+            });
+            let settled = self.messages.heard(heard, &mut self.peers);
+            if settled != Settled::default() {
+                events.push(Event::Settled {
+                    source: heard.destination,
+                    settled,
+                });
+            }
+        }
+        for delivery in core::mem::take(&mut out.messages) {
+            let (hash, source) = (delivery.message.hash, delivery.message.source);
+            let arrival = self
+                .messages
+                .receive(delivery.message, &mut self.peers, at_ms);
+            if arrival.prove() {
+                out.air.extend(node.prove(&delivery.packet_hash));
+            }
+            if arrival.ask_for_key() {
+                out.air.extend(node.path_request(&source, rng));
+            }
+            events.push(Event::Message {
+                hash,
+                source,
+                arrival,
+            });
+        }
+        events.extend(out.unreadable.drain(..).map(Event::Unreadable));
+        events
     }
 }
 
@@ -1317,5 +1522,209 @@ mod announcing {
         assert_eq!(q.clear(), Queue::CAPACITY - 1);
         assert!(q.is_empty());
         assert_eq!(q.dropped(), 2 + Queue::CAPACITY as u32 - 1);
+    }
+}
+
+#[cfg(test)]
+mod receiving {
+    use super::lxmf::tests::{board, vector};
+    use super::messages::Trust;
+    use super::*;
+    use rns_core::receipt::{validate_proof, ProofResult};
+    use rns_crypto::FixedRng;
+
+    const ANNOUNCE: &[u8] = include_bytes!("node/vectors/announce.bin");
+    const MESSAGE: &[u8] = include_bytes!("node/vectors/message.bin");
+    const RETRY: &[u8] = include_bytes!("node/vectors/message_retry.bin");
+    const STRANGER: &[u8] = include_bytes!("node/vectors/stranger_message.bin");
+    const STRANGER_ANNOUNCE: &[u8] = include_bytes!("node/vectors/stranger_announce.bin");
+    const PROOF: &[u8] = include_bytes!("node/vectors/proof.bin");
+    const PATH_REQUEST: &[u8] = include_bytes!("node/vectors/path_request.bin");
+
+    fn rng() -> FixedRng {
+        FixedRng::new(&[0x5a; 64])
+    }
+
+    /// The board, and what it knows, having heard nobody.
+    fn fresh() -> (Node, Station) {
+        (Node::new(1757, 0, &board()), Station::new())
+    }
+
+    /// The board, having heard the bench peer announce.
+    fn knowing_the_peer() -> (Node, Station) {
+        let (mut node, mut station) = fresh();
+        hear(&mut node, &mut station, ANNOUNCE, 1_000);
+        (node, station)
+    }
+
+    /// A packet off the air, all the way through: what went on the air in
+    /// answer, and what the station made of it.
+    fn hear(
+        node: &mut Node,
+        station: &mut Station,
+        packet: &[u8],
+        at_ms: u64,
+    ) -> (Vec<Vec<u8>>, Vec<Event>) {
+        let mut out = node.heard(packet, None, at_ms, &mut rng());
+        let events = station.take(node, &mut out, at_ms, &mut rng());
+        (out.air, events)
+    }
+
+    fn board_identity() -> rns_crypto::identity::Identity {
+        let public = board().identity().get_public_key().unwrap();
+        rns_crypto::identity::Identity::from_public_key(&public).unwrap()
+    }
+
+    #[test]
+    fn a_message_from_a_peer_is_proved_with_the_proof_python_makes() {
+        let (mut node, mut station) = knowing_the_peer();
+        let (air, events) = hear(&mut node, &mut station, MESSAGE, 5_000);
+        let hash: [u8; 32] = vector("message_hash").try_into().unwrap();
+        assert_eq!(
+            events,
+            [Event::Message {
+                hash,
+                source: vector("sender").try_into().unwrap(),
+                arrival: Arrival::New(Trust::Verified),
+            }]
+        );
+        assert_eq!(air, [PROOF.to_vec()], "Reticulum's own proof, to the byte");
+        let packet_hash: [u8; 32] = vector("packet_hash").try_into().unwrap();
+        assert_eq!(
+            validate_proof(&air[0][19..], &packet_hash, &board_identity()),
+            ProofResult::Valid
+        );
+        assert_eq!(station.messages.unread(), 1);
+        assert_eq!(
+            station
+                .messages
+                .get(&hash)
+                .unwrap()
+                .message
+                .content
+                .as_bytes(),
+            vector("content")
+        );
+    }
+
+    #[test]
+    fn a_retry_gets_a_proof_of_its_own_and_is_not_a_second_message() {
+        let (mut node, mut station) = knowing_the_peer();
+        hear(&mut node, &mut station, MESSAGE, 5_000);
+        let (air, events) = hear(&mut node, &mut station, RETRY, 9_000);
+        assert!(matches!(
+            events[..],
+            [Event::Message {
+                arrival: Arrival::Duplicate(Some(Trust::Verified)),
+                ..
+            }]
+        ));
+        let [proof] = air.as_slice() else {
+            panic!("{air:?}")
+        };
+        assert_ne!(proof[..], PROOF[..], "another packet, another proof");
+        let retry = RawPacket::unpack(RETRY).unwrap();
+        assert_eq!(proof[2..18], retry.packet_hash[..16]);
+        assert_eq!(
+            validate_proof(&proof[19..], &retry.packet_hash, &board_identity()),
+            ProofResult::Valid
+        );
+        assert_eq!(station.messages.len(), 1);
+    }
+
+    #[test]
+    fn the_same_packet_twice_is_the_engines_duplicate_and_is_not_proved_again() {
+        // Heard twice, relayed by two neighbours: Reticulum's packet filter
+        // drops the second, and so the board does as Python does.
+        let (mut node, mut station) = knowing_the_peer();
+        assert_eq!(hear(&mut node, &mut station, MESSAGE, 5_000).0.len(), 1);
+        let (air, events) = hear(&mut node, &mut station, MESSAGE, 6_000);
+        assert!(air.is_empty() && events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_stranger_is_kept_proved_and_asked_for_and_its_announce_settles_it() {
+        let (mut node, mut station) = fresh();
+        let (air, events) = hear(&mut node, &mut station, STRANGER, 5_000);
+        let stranger: [u8; 16] = vector("stranger").try_into().unwrap();
+        assert!(matches!(
+            events[..],
+            [Event::Message {
+                arrival: Arrival::New(Trust::Unverified),
+                ..
+            }]
+        ));
+        let [proof, request] = air.as_slice() else {
+            panic!("{air:?}")
+        };
+        let packet = RawPacket::unpack(STRANGER).unwrap();
+        assert_eq!(
+            validate_proof(&proof[19..], &packet.packet_hash, &board_identity()),
+            ProofResult::Valid
+        );
+        // The request is Python's in all but its random tag.
+        assert_eq!(request.len(), PATH_REQUEST.len());
+        assert_eq!(request[..19], PATH_REQUEST[..19]);
+        assert_eq!(request[19..35], stranger);
+        // And the stranger's node hears it as a request for its address.
+        let stranger_key = key::NodeKey::from_private(core::array::from_fn(|i| 128 + i as u8));
+        assert_eq!(stranger_key.hashes().lxmf, stranger);
+        let asked = Node::new(1757, 0, &stranger_key).heard(request, None, 1_000, &mut rng());
+        assert_eq!(asked.path_requests, [stranger]);
+
+        // Its answer settles the message.
+        let (air, events) = hear(&mut node, &mut station, STRANGER_ANNOUNCE, 8_000);
+        assert!(air.is_empty());
+        assert_eq!(
+            events,
+            [
+                Event::Peer {
+                    destination: stranger,
+                    learned: Learned::New
+                },
+                Event::Settled {
+                    source: stranger,
+                    settled: Settled {
+                        verified: 1,
+                        failed: 0
+                    }
+                }
+            ]
+        );
+        assert!(station.peers.get(&stranger).unwrap().conversation);
+    }
+
+    #[test]
+    fn what_the_board_cannot_read_is_said_and_neither_kept_nor_proved() {
+        let (mut node, mut station) = knowing_the_peer();
+        // Its last byte changed: the token's HMAC no longer holds.
+        let mut damaged = MESSAGE.to_vec();
+        *damaged.last_mut().unwrap() ^= 1;
+        let (air, events) = hear(&mut node, &mut station, &damaged, 5_000);
+        assert!(air.is_empty());
+        assert_eq!(events, [Event::Unreadable(Unreadable::Undecryptable)]);
+        // A context the board does not read.
+        let mut other = MESSAGE.to_vec();
+        other[18] = 0x09;
+        let (air, events) = hear(&mut node, &mut station, &other, 6_000);
+        assert!(air.is_empty());
+        assert_eq!(
+            events,
+            [Event::Unreadable(Unreadable::NotOpportunistic {
+                packet_type: constants::PACKET_TYPE_DATA,
+                context: 0x09
+            })]
+        );
+        assert!(station.messages.is_empty());
+    }
+
+    #[test]
+    fn a_short_message_packet_is_nothing_and_not_a_panic() {
+        for len in 0..MESSAGE.len() {
+            let (mut node, mut station) = knowing_the_peer();
+            let (air, _) = hear(&mut node, &mut station, &MESSAGE[..len], 5_000);
+            assert!(air.is_empty(), "{len} bytes");
+            assert!(station.messages.is_empty(), "{len} bytes");
+        }
     }
 }

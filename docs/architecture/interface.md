@@ -279,6 +279,48 @@ every real Unix time there. The engine's own path table is its business; the
 Peers screen shows what the last announce said. Everything is in RAM until a
 reboot.
 
+### What the node receives
+
+A packet the engine delivers to the board's own `lxmf.delivery` address is a
+message, if it is one LXMF sent opportunistically: a single packet, decrypted
+with the board's key, read as LXMF 1.1.1 reads it (`node::lxmf`, written
+here, since `rns-core` has no LXMF). On the air the destination hash is not
+part of what is encrypted, because the packet is addressed to it already; it
+goes back on the front to compute the message hash, and a stamp, if the
+sender added one, is left out of it, as LXMF leaves it. The bytes are walked
+in place rather than decoded: a sender can encrypt to anyone who has
+announced, and `rns-core`'s msgpack decoder reserves room for every array it
+is told about before reading it, which 400 bytes of nested headers turn into
+368,544 bytes of heap on a board that has 64 KB.
+
+What happens to it then is `node::Station::take`'s, tested from end to end
+in `oxinode-core` against messages Python LXMF packed and the proof Python
+Reticulum makes:
+
+| The sender | The message | On the air |
+|---|---|---|
+| heard, and its key signed it | kept, verified | a delivery proof |
+| heard, and its key did not sign it | not kept; logged as forged | nothing |
+| not heard | kept, unverified | a delivery proof, and a path request for the sender |
+| sent it before (same message hash) | not kept twice | a delivery proof for this packet |
+
+The proof is Reticulum's implicit one: the board's signature over the
+packet's hash, addressed to that hash's first sixteen bytes, which is what
+the sender's receipt waits for. Reticulum proves a packet the moment it
+decrypts; the board waits to know what it believes of the sender, so a
+forgery is not acknowledged. The answer to a path request is the sender's
+announce, which carries its key; when it comes the waiting messages are
+checked and become verified, or fail for good. A retry of an unverified
+message asks again. The message hashes of the last 64 messages are
+remembered, so a retry is known after its message has gone from the store.
+
+The store keeps sixteen messages. Title and text are kept; the other LXMF
+fields are not, and a message with one that describes something the board
+cannot show (an image, a file, audio, telemetry, anything unknown) is marked
+as having an attachment. Fields that only describe the message (its icon,
+thread, ticket, renderer, what it replies to) do not count. A new message
+lights the panel and the Home screen's unread count.
+
 ## Redraw stays incremental
 
 The modem loop's `Ui` holds two frames: `live`, which is what the controller
