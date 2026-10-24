@@ -532,6 +532,17 @@ def may_end(met: bool, last_message_at: Optional[float], now: float, linger: flo
     return last_message_at is None or now - last_message_at >= linger
 
 
+# How often `--ask-path` asks for the board's path while it has no answer.
+ASK_EVERY_S = 15.0
+
+
+def ask_due(board: Optional[bytes], know_its_key: bool, now: float, next_at: float) -> bool:
+    """Whether to ask for the board's path now: only for a board named by
+    `--board`, only until its key is known, and not more often than
+    `ASK_EVERY_S`."""
+    return board is not None and not know_its_key and now >= next_at
+
+
 def parse_hash(text: str) -> bytes:
     """A destination hash as Reticulum prints it, with or without its brackets."""
     h = text.strip().strip("<>")
@@ -766,6 +777,7 @@ def peer_main(args, out_dir: str) -> int:
     again = None  # (message, number, when to send it again), with --repeat
     next_send: Optional[float] = None  # set once the board can be sent to
     next_announce = time.time()
+    next_ask = time.time() + args.settle
     deadline = time.time() + args.seconds
 
     def resolved(number, start):
@@ -792,6 +804,22 @@ def peer_main(args, out_dir: str) -> int:
                     throwaway.announce(app_data=lxmf_name_app_data(flood_name(n)))
                     run.say(f"flood: announced {hexrep(throwaway.hash)} as {flood_name(n)!r}")
                 args.flood = 0
+            if args.ask_path:
+                with run.lock:
+                    board, known = run.board, run.board_identity is not None
+                if not known and board is not None:
+                    # The path response puts the board's key where
+                    # Reticulum recalls it; no announce handler sees it.
+                    recalled = RNS.Identity.recall(board)
+                    if recalled is not None:
+                        with run.lock:
+                            run.board_identity = recalled
+                        run.say("the board's key, from its answer to a path request")
+                        known = True
+                if ask_due(board, known, now, next_ask):
+                    RNS.Transport.request_path(board)
+                    run.say(f"asked for the path to {hexrep(board)}")
+                    next_ask = now + ASK_EVERY_S
             with run.lock:
                 answer, board_identity = run.answer_at is not None and now >= run.answer_at, run.board_identity
                 if answer:
@@ -879,6 +907,7 @@ def main() -> int:
     ap.add_argument("--send", type=int, default=0, help="opportunistic messages to send the board, one at a time (default 0)")
     ap.add_argument("--expect-proofs", type=int, help="delivery proofs to see (default: one per message sent)")
     ap.add_argument("--repeat", action="store_true", help="send each delivered message again as a new packet, and expect a proof for that too")
+    ap.add_argument("--ask-path", action="store_true", help=f"with --board: ask for the board's path every {ASK_EVERY_S:g} s until its key is known, rather than wait for it to announce; its path response is not counted as an announce")
     ap.add_argument("--no-announce", action="store_true", help="never announce: the board has to ask for the peer's key")
     ap.add_argument("--expect-messages", type=int, default=0, help="messages from the board to see (default 0)")
     ap.add_argument("--text", default="message {n} from the bench peer at {time}", help="what to send; {n} and {time} are filled in")
@@ -903,6 +932,8 @@ def main() -> int:
             parse_hash(args.board)
         except ValueError as e:
             ap.error(str(e))
+    elif args.ask_path:
+        ap.error("--ask-path needs --board: the path to ask for is the board's")
     try:
         args.text.format(n=1, time="00:00:00")
     except (KeyError, IndexError, ValueError) as e:
