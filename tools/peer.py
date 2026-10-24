@@ -33,7 +33,9 @@ what says whether it said the right thing.
 
     python3.11 tools/peer.py --rnode /dev/cu.usbmodem3101 --board-log 65C11224153B1DFD
 
-The run ends when what it was asked to check has happened, or after
+The run ends when what it was asked to check has happened -- and, if the
+board sent it a message, `--linger` seconds after the last one, so that
+message's proof goes out and the board logs it delivered -- or after
 `--seconds`, and exits non-zero if anything is missing: an announce from the
 board, a proof for a message sent, or a message from the board. So it is a
 regression run as well as a tool to watch with.
@@ -513,6 +515,23 @@ def shortfalls(expect: Expect, seen: Seen) -> List[str]:
     return out
 
 
+# How long the run goes on after the last message from the board, by
+# default, before it may end: Reticulum proves a message as it arrives, but
+# the proof still has to wait for a clear channel and go out through the
+# RNode, and the board then has to hear it and say so in its log. A run that
+# ended on the message itself left the board's last reply unproved.
+LINGER_S = 8.0
+
+
+def may_end(met: bool, last_message_at: Optional[float], now: float, linger: float) -> bool:
+    """Whether a run that has seen everything it expected may end now: not
+    until `linger` seconds after the last message from the board, if any came,
+    so that message's proof goes out and is heard."""
+    if not met:
+        return False
+    return last_message_at is None or now - last_message_at >= linger
+
+
 def parse_hash(text: str) -> bytes:
     """A destination hash as Reticulum prints it, with or without its brackets."""
     h = text.strip().strip("<>")
@@ -548,6 +567,8 @@ class Run:
         self.proved_again = set()
         self.messages = 0
         self.bad_messages = 0
+        # When the last message from the board came, by the clock.
+        self.last_message_at: Optional[float] = None
         # When to announce again, in answer to the board's first announce.
         self.answer_at: Optional[float] = None
 
@@ -711,6 +732,7 @@ def peer_main(args, out_dir: str) -> int:
         with run.lock:
             ours = message.source_hash == run.board
             if ours:
+                run.last_message_at = time.time()
                 if problems:
                     run.bad_messages += 1
                 else:
@@ -812,8 +834,10 @@ def peer_main(args, out_dir: str) -> int:
                 router.handle_outbound(message)
                 run.say(f"message {sent} sent to {hexrep(destination.hash)}: {text!r}, {message.packed_size} bytes packed, id {message.hash.hex()}")
                 in_flight = (message, now, sent)
-            met = not shortfalls(expect, run.seen())
-            if met and not args.listen and sent >= args.send and in_flight is None and again is None:
+            met = not shortfalls(expect, run.seen()) and sent >= args.send and in_flight is None and again is None
+            with run.lock:
+                last_message_at = run.last_message_at
+            if not args.listen and may_end(met, last_message_at, now, args.linger):
                 break
             time.sleep(0.1)
     except KeyboardInterrupt:
@@ -865,6 +889,7 @@ def main() -> int:
     ap.add_argument("--announce-every", type=float, default=0.0, help="seconds between the peer's own announces (default 0: once, at the start)")
     ap.add_argument("--seconds", type=float, default=120.0, help="the longest the run lasts (default 120)")
     ap.add_argument("--listen", action="store_true", help="run all --seconds, even once everything expected has happened")
+    ap.add_argument("--linger", type=float, default=LINGER_S, help=f"seconds to go on after the last message from the board, so its proof goes out (default {LINGER_S:g})")
     ap.add_argument("--name", default=DISPLAY_NAME, help=f"the peer's display name (default {DISPLAY_NAME!r})")
     ap.add_argument("--identity", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".peer", "identity"), help="the peer's identity, made on first use and kept")
     ap.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for the RNode to come up (default 30)")

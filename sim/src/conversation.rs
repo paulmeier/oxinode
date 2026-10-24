@@ -10,8 +10,8 @@
 //! looked at again.
 
 use oxinode_core::screens::{
-    ConversationRow, Conversations, Delivery, Direction, Entry, PeerName, Read, Thread, Trust,
-    CONVERSATIONS,
+    ConversationRow, Conversations, Delivery, Direction, Entry, Failure, PeerName, Read, Thread,
+    Trust, Wait, CONVERSATIONS,
 };
 
 /// The bundled conversations: `sim/conversations/bench.txt`.
@@ -100,10 +100,16 @@ fn message(line: &str) -> Result<Message, String> {
         ("<", "verified") => Direction::Received(Trust::Verified),
         ("<", "unverified") => Direction::Received(Trust::Unverified),
         ("<", "bad") => Direction::Received(Trust::Failed),
-        (">", "queued") => Direction::Sent(Delivery::Queued),
-        (">", "sent") => Direction::Sent(Delivery::Sent),
+        (">", "queued") => Direction::Sent(Delivery::Queued(Wait::Turn)),
+        (">", "queued-path") => Direction::Sent(Delivery::Queued(Wait::Path)),
+        (">", "queued-host") => Direction::Sent(Delivery::Queued(Wait::Host)),
+        (">", "queued-idle") => Direction::Sent(Delivery::Queued(Wait::Idle)),
+        (">", "sent") => Direction::Sent(Delivery::Sent(1)),
+        (">", "sent2") => Direction::Sent(Delivery::Sent(2)),
+        (">", "sent3") => Direction::Sent(Delivery::Sent(3)),
         (">", "delivered") => Direction::Sent(Delivery::Delivered),
-        (">", "failed") => Direction::Sent(Delivery::Failed),
+        (">", "failed-path") => Direction::Sent(Delivery::Failed(Failure::NoPath)),
+        (">", "failed") => Direction::Sent(Delivery::Failed(Failure::NoProof)),
         (d, s) => return Err(format!("`{d} {s}` is not a direction and a state")),
     };
     let (mut unread, mut attachment) = (false, false);
@@ -203,12 +209,7 @@ mod tests {
         );
         assert_eq!(named("Galaxy S9").messages.len(), 1);
         let ana: Vec<Direction> = named("Ana").messages.iter().map(|m| m.direction).collect();
-        for delivery in [
-            Delivery::Queued,
-            Delivery::Sent,
-            Delivery::Delivered,
-            Delivery::Failed,
-        ] {
+        for delivery in Delivery::EVERY {
             assert!(ana.contains(&Direction::Sent(delivery)), "{delivery:?}");
         }
         let stranger = all.iter().find(|r| r.name.is_none()).unwrap();

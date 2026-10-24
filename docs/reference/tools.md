@@ -136,7 +136,9 @@ board, so a board that came up later still learns it.
   signature check, and the peer reads its framing itself and checks that the
   hash comes out as LXMF's.
 
-The run stops when everything asked for has happened, or after `--seconds`,
+The run stops when everything asked for has happened -- and, if the board
+sent it a message, `--linger` seconds after the last one, so its proof goes
+out -- or after `--seconds`,
 and exits non-zero if anything is missing or did not check out: so it is a
 regression run as well as something to watch. Everything goes to
 `target/peer/<time>/`: `events.log`, `summary.txt`, `reticulum.log`, and the
@@ -160,6 +162,7 @@ regression run as well as something to watch. Everything goes to
 | `--announce-every` | seconds between the peer's own announces, beyond the two above (default 0, none) |
 | `--seconds` | the longest the run lasts (default 120) |
 | `--listen` | run all of `--seconds` even once everything expected has happened |
+| `--linger` | seconds to go on after the last message from the board, so its proof goes out and the board logs it delivered (default 8) |
 | `--name`, `--identity` | the peer's display name and where its identity is kept |
 | `--frequency`, `--bandwidth`, `--txpower`, `--spreadingfactor`, `--codingrate` | the radio configuration, which must be the board under test's stored one |
 | `--timeout`, `--out` | as for `air_exchange.py` |

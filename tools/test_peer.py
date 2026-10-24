@@ -48,6 +48,19 @@ def message_bytes(payload, destination=b"\x11" * 16, source=b"\x22" * 16, signat
     return destination + source + signature + peer.packb(payload)
 
 
+class BoardMessage(unittest.TestCase):
+    """The message the board sends, as `oxinode_core::node`'s tests write it."""
+
+    def test_it_is_one_packet_to_the_bench_peer(self):
+        raw = vector_bytes("board_message.bin")
+        packet = peer.parse_packet(raw)
+        self.assertEqual(packet.destination, vectors()["destination"])
+        self.assertLessEqual(len(raw), peer.ax.MTU)
+        # Flags: header 1, single, data; no context.
+        self.assertEqual(raw[0], 0x00)
+        self.assertEqual(raw[18], 0x00)
+
+
 class Sizes(unittest.TestCase):
     def test_an_encrypted_packet_carries_383_bytes(self):
         # 464 less the 48 of the token and the 32 of the ephemeral key, in
@@ -285,6 +298,20 @@ class Verdicts(unittest.TestCase):
         self.assertIn("1 of 2 delivery proofs", missing)
         self.assertIn("0 of 1 messages from the board", missing)
 
+    def test_a_run_ends_only_once_the_last_messages_proof_has_had_time(self):
+        # Everything seen, the last message from the board a moment ago: the
+        # proof is still on its way, so the run goes on.
+        self.assertFalse(peer.may_end(True, 100.0, 100.1, peer.LINGER_S))
+        self.assertFalse(peer.may_end(True, 100.0, 100.0 + peer.LINGER_S - 0.01, peer.LINGER_S))
+        self.assertTrue(peer.may_end(True, 100.0, 100.0 + peer.LINGER_S, peer.LINGER_S))
+        # No message from the board: nothing to prove, nothing to wait for.
+        self.assertTrue(peer.may_end(True, None, 0.0, peer.LINGER_S))
+        # Not everything seen: never, however long ago the last message was.
+        self.assertFalse(peer.may_end(False, 100.0, 1e9, peer.LINGER_S))
+        self.assertFalse(peer.may_end(False, None, 0.0, peer.LINGER_S))
+        # Long enough for a proof's channel wait and the board's log line.
+        self.assertGreaterEqual(peer.LINGER_S, 5.0)
+
     def test_a_bad_announce_fails_a_run_that_expected_none(self):
         self.assertEqual(len(peer.shortfalls(peer.Expect(0, 0, 0), peer.Seen(0, 1, 0, 0, 0))), 1)
 
@@ -433,6 +460,48 @@ class AgainstReticulum(unittest.TestCase):
             m, _ = self._message(content="x" * n, title="")
             self.assertEqual(m.desired_method, method, n)
             self.assertEqual(peer.content_size(m.timestamp, b"", b"x" * n, {}), n)
+
+    def _board_message(self):
+        """The board's message to the bench peer, opened by the bench
+        peer's key, with the destination put back on as LXMF puts it."""
+        RNS = self.RNS
+        raw = vector_bytes("board_message.bin")
+        packet = peer.parse_packet(raw)
+        recipient = RNS.Identity.from_bytes(bytes(range(64)))
+        plaintext = recipient.decrypt(packet.data)
+        self.assertIsNotNone(plaintext, "it is encrypted to the bench peer")
+        return packet.destination + plaintext
+
+    def test_the_boards_message_reads_as_the_peer_reads_it(self):
+        lxmf = self._board_message()
+        parsed = peer.parse_lxmf(lxmf)
+        self.assertEqual(parsed.destination, vectors()["destination"])
+        board = self.RNS.Identity.from_bytes(bytes(range(64, 128)))
+        board_lxmf = self.RNS.Destination.hash(board, "lxmf", "delivery")
+        self.assertEqual(parsed.source, board_lxmf)
+        self.assertEqual(parsed.title, b"")
+        self.assertEqual(parsed.content, "Yes \u2013 from the board".encode())
+        self.assertEqual(parsed.fields, {})
+        self.assertIsNone(parsed.stamp)
+        self.assertEqual(parsed.timestamp, 1_792_800_000.0)
+        self.assertTrue(board.validate(parsed.signature, parsed.signed_part))
+
+    def test_lxmf_reads_and_validates_the_boards_message(self):
+        RNS, LXMF = self.RNS, self.LXMF
+        lxmf = self._board_message()
+        board = RNS.Identity.from_bytes(bytes(range(64, 128)))
+        board_lxmf = RNS.Destination.hash(board, "lxmf", "delivery")
+        # As if the board's announce had been heard: LXMF recalls the
+        # sender's key to check the signature.
+        RNS.Identity.remember(os.urandom(32), board_lxmf, board.get_public_key(), None)
+        m = LXMF.LXMessage.unpack_from_bytes(lxmf)
+        self.assertTrue(m.signature_validated)
+        self.assertEqual(m.content_as_string(), "Yes \u2013 from the board")
+        self.assertEqual(m.title_as_string(), "")
+        self.assertEqual(m.hash, peer.parse_lxmf(lxmf).message_hash)
+        # And signed by the board alone: another key's address is refused.
+        tampered = lxmf[:16] + bytes(16) + lxmf[32:]
+        self.assertFalse(LXMF.LXMessage.unpack_from_bytes(tampered).signature_validated)
 
 
 if __name__ == "__main__":

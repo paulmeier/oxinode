@@ -209,8 +209,12 @@ pub fn cases() -> Vec<Case> {
     // a screen full of them. Then a conversation open: the bench's, at its
     // first unread message; one with a single message; a long one opened
     // part-way down; a message longer than the screen, from its start; every
-    // state a sent message can be in; a sender not verified; characters the
-    // font lacks; and the reply menu.
+    // state a sent message can be in, at the end, the middle and the top of
+    // the thread; a sender not verified; characters the font lacks; and the
+    // reply menu, every item of it. Then what choosing them does: a reply
+    // queued, and held under a host; the position sent; the failed queued
+    // again; and the two refusals a fixture can reach, no fix and nothing
+    // failed.
     #[cfg(feature = "node")]
     {
         use crate::conversation;
@@ -238,9 +242,22 @@ pub fn cases() -> Vec<Case> {
             ("thread-scrolled", Some("Chatty"), ""),
             ("thread-long-message", Some("Long winded"), "left"),
             ("thread-outgoing", Some("Ana"), ""),
+            ("thread-outgoing-middle", Some("Ana"), "up*14"),
+            ("thread-outgoing-top", Some("Ana"), "up*99"),
             ("thread-unverified", None, ""),
             ("thread-undrawable", Some("Zo\u{eb} \u{1f642}"), ""),
-            ("thread-menu-back", Some("Bench peer"), "select"),
+            ("thread-replied", Some("Bench peer"), "select down*2 select"),
+            (
+                "thread-position",
+                Some("Bench peer"),
+                "select down*7 select",
+            ),
+            ("thread-retried", Some("Ana"), "select down*8 select up*99"),
+            (
+                "thread-refused-nothing-failed",
+                Some("Bench peer"),
+                "select down*8 select",
+            ),
         ] {
             cases.push(Case {
                 name: format!("messages-{name}"),
@@ -249,6 +266,36 @@ pub fn cases() -> Vec<Case> {
                 size: square,
             });
         }
+        use monopanel::Detail;
+        for (n, item) in oxinode_core::ui::Conversation::new([0; 16])
+            .menu()
+            .iter()
+            .enumerate()
+        {
+            cases.push(Case {
+                name: format!("messages-thread-menu-{}", slug(item.label)),
+                script: format!("{messages} select select down*{n}"),
+                state: scene::with_conversations(&named(Some("Bench peer"))),
+                size: square,
+            });
+        }
+        let mut no_fix = scene::with_conversations(&named(Some("Bench peer")));
+        no_fix.position = oxinode_core::gps::Position::OFF;
+        cases.push(Case {
+            name: "messages-thread-refused-no-fix".to_string(),
+            script: format!("{messages} select select down*7 select"),
+            state: no_fix,
+            size: square,
+        });
+        let mut under_a_host = scene::with_conversations(&named(Some("Bench peer")));
+        under_a_host.home.host = scene::populated().home.host;
+        under_a_host.home.mode = scene::populated().home.mode;
+        cases.push(Case {
+            name: "messages-thread-replied-held".to_string(),
+            script: format!("{messages} select select down*2 select"),
+            state: under_a_host,
+            size: square,
+        });
         cases.push(Case {
             name: format!("{}/messages-thread", Size::WIDE.name()),
             script: format!("{messages} select"),
@@ -520,7 +567,7 @@ fn write(dir: &Path, name: &str, image: &Image) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use monopanel::Readable;
+    use monopanel::{Detail, Readable};
     use oxinode_core::ui::{self, NavExt};
     use std::collections::HashSet;
 
@@ -540,10 +587,11 @@ mod tests {
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
         // confirmed. With the node, four more of the Peers screen, Home
-        // with messages unread, two more of the Messages screen and eight
-        // conversations, and a conversation on the second panel.
+        // with messages unread, two more of the Messages screen, thirteen
+        // conversations and every item of the reply menu, two refused and
+        // one held reply, and a conversation on the second panel.
         let node = if cfg!(feature = "node") {
-            4 + 1 + 2 + 8
+            4 + 1 + 2 + 13 + oxinode_core::ui::Conversation::new([0; 16]).menu().len() + 2
         } else {
             0
         };
@@ -653,10 +701,17 @@ mod tests {
             } else if stem.starts_with("radio-locked-") {
                 assert!(scene.nav.notice_shown().is_some(), "{}", case.name);
             } else if stem.starts_with("messages-thread") {
-                // The conversation the case was given, open.
+                // The conversation the case was given, open; a refusal over
+                // it exactly when the name says so.
                 let open = scene.nav.conversation().expect(&case.name);
                 let row = case.state.conversations.rows[0].unwrap();
                 assert_eq!(open.peer(), row.peer, "{}", case.name);
+                assert_eq!(
+                    scene.nav.refusal_shown().is_some(),
+                    stem.contains("-refused-"),
+                    "{}",
+                    case.name
+                );
             } else {
                 assert!(!scene.nav.is_editing(), "{}", case.name);
             }

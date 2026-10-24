@@ -34,20 +34,18 @@
 //!
 //! # Conversations
 //!
-//! The messages from one sender are a conversation with it: listed for the
-//! Messages screen by [`Messages::conversations`], newest first, and drawn
-//! one at a time by [`Messages::thread`].
+//! The messages from one sender are a conversation with it, along with what
+//! the board sent it ([`super::outbox`]): listed for the Messages screen by
+//! [`super::Station::conversations`], newest first, and drawn one at a time
+//! by [`super::Station::entries`].
 //!
 //! [`lxmf`]: super::lxmf
 
 extern crate alloc;
 
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 
-use crate::screens::{
-    ConversationRow, Conversations, Direction, Entry, PeerName, Read, Thread, CONVERSATIONS,
-};
+use crate::screens::{Direction, Entry, PeerName, Read, Thread};
 
 use super::lxmf::Message;
 use super::peers::Table;
@@ -231,49 +229,27 @@ impl Messages {
         self.forged
     }
 
-    /// What the Messages screen shows at `now_ms`: a line for each sender
-    /// with a message kept, the newest first, named as the peer table names
-    /// it.
-    pub fn conversations(&self, peers: &Table, now_ms: u64) -> Conversations {
-        // Newest first: the kept messages are oldest first, so from the end,
-        // each sender where its newest message is.
-        let mut order: Vec<[u8; 16]> = Vec::new();
-        for received in self.kept.iter().rev() {
-            if !order.contains(&received.message.source) {
-                order.push(received.message.source);
-            }
-        }
-        let mut out = Conversations::default();
-        for (slot, peer) in out.rows.iter_mut().zip(order.iter().take(CONVERSATIONS)) {
-            let mine = || self.kept.iter().filter(|r| r.message.source == *peer);
-            *slot = Some(ConversationRow {
-                peer: *peer,
-                name: name_of(peers, peer),
-                unread: mine().any(|r| r.unread),
-                age_s: mine()
-                    .map(|r| r.at_ms)
-                    .max()
-                    .and_then(|at| age_s(at, now_ms)),
-            });
-        }
-        out
-    }
-
     /// The messages from `peer`, oldest first, as the thread draws them at
-    /// `now_ms`. [`Messages::read`] counts in the same order.
-    pub fn entries(&self, peer: &[u8; 16], now_ms: u64) -> Vec<Entry<'_>> {
+    /// `now_ms`, each with when it arrived. [`Messages::read`] counts in the
+    /// same order.
+    pub fn entries(&self, peer: &[u8; 16], now_ms: u64) -> impl Iterator<Item = (u64, Entry<'_>)> {
+        let peer = *peer;
         self.kept
             .iter()
-            .filter(|r| r.message.source == *peer)
-            .map(|r| Entry {
-                direction: Direction::Received(r.trust),
-                age_s: age_s(r.at_ms, now_ms),
-                title: &r.message.title,
-                content: &r.message.content,
-                attachment: r.message.attachment,
-                unread: r.unread,
+            .filter(move |r| r.message.source == peer)
+            .map(move |r| {
+                (
+                    r.at_ms,
+                    Entry {
+                        direction: Direction::Received(r.trust),
+                        age_s: age_s(r.at_ms, now_ms),
+                        title: &r.message.title,
+                        content: &r.message.content,
+                        attachment: r.message.attachment,
+                        unread: r.unread,
+                    },
+                )
             })
-            .collect()
     }
 
     /// The thread with `peer`, over `entries` from [`Messages::entries`].
@@ -310,7 +286,7 @@ impl Messages {
 }
 
 /// What the peer table calls a sender, if it has heard one.
-fn name_of(peers: &Table, peer: &[u8; 16]) -> Option<PeerName> {
+pub(crate) fn name_of(peers: &Table, peer: &[u8; 16]) -> Option<PeerName> {
     peers
         .get(peer)
         .and_then(|p| p.name.as_deref())
@@ -318,7 +294,7 @@ fn name_of(peers: &Table, peer: &[u8; 16]) -> Option<PeerName> {
 }
 
 /// Seconds from `at_ms` to `now_ms`, as the screens take an age.
-fn age_s(at_ms: u64, now_ms: u64) -> Option<u32> {
+pub(crate) fn age_s(at_ms: u64, now_ms: u64) -> Option<u32> {
     now_ms
         .checked_sub(at_ms)
         .map(|ms| (ms / 1_000).min(u64::from(u32::MAX)) as u32)
@@ -328,7 +304,7 @@ fn age_s(at_ms: u64, now_ms: u64) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::node::lxmf::tests::{board, opened};
-    use crate::node::Node;
+    use crate::node::{Node, Station};
     use crate::screens::{Direction, PeerName, Read};
     use rns_crypto::FixedRng;
 
@@ -502,19 +478,27 @@ mod tests {
         assert_eq!(messages.unread(), Messages::CAPACITY);
     }
 
+    /// The board, having heard the bench peer: its messages and its peers
+    /// together, which is where conversations are put together.
+    fn station() -> Station {
+        Station {
+            peers: knowing_the_sender(),
+            ..Station::new()
+        }
+    }
+
     /// Each sender is a conversation, the newest first, named as the table
     /// names it, marked while anything in it is unread, aged by its newest.
     #[test]
     fn senders_are_conversations_newest_first() {
-        let mut peers = knowing_the_sender();
-        let mut messages = Messages::new();
+        let mut s = station();
         let bench = read(MESSAGE);
         let source = bench.source;
-        messages.receive(bench, &mut peers, 5_000);
+        s.messages.receive(bench, &mut s.peers, 5_000);
         let stranger = read(STRANGER);
         let other = stranger.source;
-        messages.receive(stranger, &mut peers, 9_000);
-        let list = messages.conversations(&peers, 20_000);
+        s.messages.receive(stranger, &mut s.peers, 9_000);
+        let list = s.conversations(20_000);
         let rows: Vec<_> = list.rows.iter().flatten().collect();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].peer, other, "the newest first");
@@ -527,8 +511,8 @@ mod tests {
         // A newer message from the bench puts it first again.
         let mut again = numbered(1);
         again.source = source;
-        messages.receive(again, &mut peers, 12_000);
-        let list = messages.conversations(&peers, 20_000);
+        s.messages.receive(again, &mut s.peers, 12_000);
+        let list = s.conversations(20_000);
         assert_eq!(list.rows[0].unwrap().peer, source);
         assert_eq!(list.rows[0].unwrap().age_s, Some(8));
         assert!(list.rows[2].is_none());
@@ -538,26 +522,25 @@ mod tests {
     /// them; reading it marks them read in that order, and only theirs.
     #[test]
     fn a_thread_is_read_as_far_as_it_was_shown() {
-        let mut peers = knowing_the_sender();
-        let mut messages = Messages::new();
+        let mut s = station();
         let first = read(MESSAGE);
         let source = first.source;
-        messages.receive(first, &mut peers, 5_000);
+        s.messages.receive(first, &mut s.peers, 5_000);
         let stranger = read(STRANGER);
         let other = stranger.source;
-        messages.receive(stranger, &mut peers, 6_000);
+        s.messages.receive(stranger, &mut s.peers, 6_000);
         let mut second = numbered(2);
         second.source = source;
         second.content = "Second".into();
-        messages.receive(second, &mut peers, 7_000);
+        s.messages.receive(second, &mut s.peers, 7_000);
 
-        let entries = messages.entries(&source, 10_000);
+        let entries = s.entries(&source, 10_000);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].age_s, Some(5));
         assert_eq!(entries[1].content, "Second");
         assert_eq!(entries[0].direction, Direction::Received(Trust::Verified));
         assert!(entries.iter().all(|e| e.unread));
-        let thread = messages.thread(&source, &peers, &entries);
+        let thread = s.thread(&source, &entries);
         assert_eq!(thread.name, Some(PeerName::new("Bench peer")));
         assert_eq!(thread.entries.len(), 2);
 
@@ -565,19 +548,22 @@ mod tests {
             peer: source,
             through: 1,
         };
-        assert_eq!(messages.read(read_one), 1);
-        assert_eq!(messages.read(read_one), 0, "once");
-        assert_eq!(messages.unread(), 2, "the second, and the stranger's");
+        assert_eq!(s.read(read_one, 10_000), 1);
+        assert_eq!(s.read(read_one, 10_000), 0, "once");
+        assert_eq!(s.messages.unread(), 2, "the second, and the stranger's");
         assert_eq!(
-            messages.read(Read {
-                peer: source,
-                through: 5
-            }),
+            s.read(
+                Read {
+                    peer: source,
+                    through: 5
+                },
+                10_000
+            ),
             1
         );
-        assert_eq!(messages.unread(), 1);
-        assert!(messages.entries(&other, 10_000)[0].unread);
-        let list = messages.conversations(&peers, 10_000);
+        assert_eq!(s.messages.unread(), 1);
+        assert!(s.entries(&other, 10_000)[0].unread);
+        let list = s.conversations(10_000);
         let bench = list.rows.iter().flatten().find(|r| r.peer == source);
         assert!(!bench.unwrap().unread);
     }

@@ -7,8 +7,10 @@
 #   <direction> <age> <state>[,unread][,attachment] <text>
 #
 # `<` is received, its state verified, unverified or bad; `>` is sent, its
-# state queued, sent, delivered or failed. The age is in seconds, or `-` for
-# not known. `\n` in the text is a newline.
+# state queued (its turn), queued-path, queued-host, queued-idle; sent,
+# sent2 or sent3 (how often it has gone); delivered; failed (no proof) or
+# failed-path. The age is in seconds, or `-` for not known. `\n` in the
+# text is a newline.
 #
 # The bench peer's first message is the text Python LXMF sent in the node's
 # test vectors (core/src/node/vectors/lxmf.txt), typographic punctuation and
@@ -25,7 +27,13 @@ peer 5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d Galaxy S9
 peer 4a6e61d2e1a3b8c09f7e6d5c4b3a2918 Ana
 > 3600 delivered Lunch at one?
 > 2400 failed Lunch at one?
+> 2300 failed-path Are you there?
+> 900 sent3 Hello?
+> 800 sent2 Hello again
 > 600 sent Running late
+> 120 queued-path Where are you?
+> 90 queued-idle No
+> 60 queued-host Yes
 > 30 queued Here now
 
 peer 3b079e41d288106c2fe5935a0d71c4b6

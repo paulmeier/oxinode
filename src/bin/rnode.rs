@@ -1175,6 +1175,40 @@ where
             if action == ui::Action::Announce && host_of(control).lock().is_none() {
                 node.announce_now();
             }
+            // A reply goes to the open conversation's peer, through the node,
+            // which the loop holds. One it cannot write says why, over the
+            // thread; under a host it is written and held, not refused.
+            if let Some(peer) = ui.nav.conversation().map(|c| c.peer()) {
+                let done = match action {
+                    ui::Action::Reply(_) => action.reply().map(|text| node.reply(peer, text)),
+                    ui::Action::SendPosition => {
+                        let mut text = heapless::String::<64>::new();
+                        Some(
+                            screens::position_text(&gps::position(), &mut text)
+                                .and_then(|()| node.reply(peer, &text)),
+                        )
+                    }
+                    ui::Action::RetryFailed => Some(node.retry_failed(peer)),
+                    _ => None,
+                };
+                match done {
+                    Some(Err(refusal)) => {
+                        defmt::info!(
+                            "ui: {=str} refused: {=str}",
+                            action.name(),
+                            refusal.headline()
+                        );
+                        ui.nav.refuse(refusal);
+                    }
+                    // What was written is at the end of the thread: show it.
+                    Some(Ok(())) if action != ui::Action::RetryFailed => {
+                        if let Some(open) = ui.nav.conversation_mut() {
+                            open.show_end();
+                        }
+                    }
+                    _ => {}
+                }
+            }
             // Which conversation the line was is the loop's to know.
             if action == ui::Action::Open {
                 let row = ui
@@ -2025,6 +2059,10 @@ async fn perform(
         ui::Action::Announce => PanelChange::NONE,
         // The loop opened the conversation: it has the list as drawn.
         ui::Action::Open => PanelChange::NONE,
+        // The loop wrote the message: the node is its.
+        ui::Action::Reply(_) | ui::Action::SendPosition | ui::Action::RetryFailed => {
+            PanelChange::NONE
+        }
         // Nobody has the radio, or this would have been the notice above.
         ui::Action::Edit(field) => {
             defmt::info!("ui: editing {=str}", field.name());
