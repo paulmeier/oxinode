@@ -29,6 +29,20 @@
 //! seconds and an SNR as floats, so the conversion happens at this boundary
 //! and nowhere else, and no float is ever stored on this side of it.
 //!
+//! # The engine's clock starts far in the future
+//!
+//! The board's clock is milliseconds since boot, and the engine is told
+//! that plus [`CLOCK_OFFSET_S`]: 2^40 seconds, beyond any emission time an
+//! announce can carry in its five bytes. The engine only ever compares its
+//! clock with itself, except in one place: `rns-core`, departing from
+//! Python's `Transport`, treats an announce stamped more than a day after
+//! its own clock as unstamped. Told seconds since boot, it took every real
+//! Unix time -- the GPS's, Sideband's, MeshChat's -- for none, and so
+//! dropped every re-announce, since a later one must be strictly newer.
+//! With the offset, every stamp counts, and announces are compared with
+//! each other exactly as Python compares them. The clock never jumps, so
+//! path expiry and the other timers are as they were.
+//!
 //! # The tables are bounded
 //!
 //! Every limit in [`config`] is a table on the heap. They are sized for the
@@ -542,8 +556,19 @@ impl Sending {
 /// How often [`Node::tick`] should be called, in milliseconds.
 pub const TICK_MS: u64 = 250;
 
+/// What the engine's clock reads at boot. See the module docs.
+pub const CLOCK_OFFSET_S: u64 = 1 << 40;
+
+/// The latest emission time an announce's five bytes can carry.
+pub const MAX_EMITTED_S: u64 = (1 << 40) - 1;
+
+// Every stamp is behind the engine's clock from boot onwards.
+const _: () = assert!(MAX_EMITTED_S < CLOCK_OFFSET_S);
+
+/// The engine's time for `ms` since boot. At 2^40 an `f64` still resolves
+/// a ten-thousandth of a second.
 fn seconds(ms: u64) -> f64 {
-    ms as f64 / 1000.0
+    (CLOCK_OFFSET_S as f64) + ms as f64 / 1000.0
 }
 
 fn air(bitrate_bps: u32, now_ms: u64) -> InterfaceInfo {
@@ -616,6 +641,7 @@ mod tests {
 
     const ANNOUNCE: &[u8] = include_bytes!("node/vectors/announce.bin");
     const PATH_REQUEST: &[u8] = include_bytes!("node/vectors/path_request.bin");
+    const REANNOUNCE: &[u8] = include_bytes!("node/vectors/reannounce.bin");
     const VECTORS: &str = include_str!("node/vectors/vectors.txt");
 
     /// A field of `vectors.txt`, as bytes.
@@ -701,6 +727,46 @@ mod tests {
                 "sent something at {now} ms"
             );
         }
+    }
+
+    #[test]
+    fn python_announcing_again_a_second_later_is_heard_again() {
+        // Two announces stock Reticulum made, a second apart, stamped with
+        // Unix time. Before `CLOCK_OFFSET_S` the engine dropped the second.
+        let mut node = Node::new(BITRATE, 0, &board());
+        let first = node.heard(ANNOUNCE, Some(SIGNAL), 1_000, &mut rng());
+        assert_eq!(first.heard.len(), 1);
+        let again = node.heard(REANNOUNCE, Some(SIGNAL), 120_000, &mut rng());
+        let [heard] = again.heard.as_slice() else {
+            panic!("the second announce was not reported: {again:?}");
+        };
+        assert_eq!(heard.destination.as_slice(), vector("destination"));
+        assert_eq!(node.paths(), 1);
+
+        // And the other way round the older one is the replay, and is not.
+        let mut node = Node::new(BITRATE, 0, &board());
+        assert_eq!(
+            node.heard(REANNOUNCE, None, 1_000, &mut rng()).heard.len(),
+            1
+        );
+        assert!(node
+            .heard(ANNOUNCE, None, 2_000, &mut rng())
+            .heard
+            .is_empty());
+    }
+
+    #[test]
+    fn a_peer_heard_again_is_brought_up_to_date_in_the_table() {
+        let mut node = Node::new(BITRATE, 0, &board());
+        let mut table = peers::Table::new();
+        for (packet, at_ms) in [(ANNOUNCE, 1_000), (REANNOUNCE, 120_000)] {
+            for heard in node.heard(packet, Some(SIGNAL), at_ms, &mut rng()).heard {
+                table.heard(&heard, at_ms);
+            }
+        }
+        let destination: [u8; 16] = vector("destination").try_into().unwrap();
+        assert_eq!(table.get(&destination).unwrap().last_heard_ms, 120_000);
+        assert_eq!(table.screen(125_000).rows[0].unwrap().age_s, Some(5));
     }
 
     #[test]
@@ -1029,6 +1095,84 @@ mod announcing {
         let heard = heard_by_a_peer(&answer);
         assert_eq!(heard.heard.len(), 1);
         assert_eq!(heard.heard[0].destination, python.hashes().lxmf);
+    }
+
+    /// The peer's announce emitted at `emitted_s`, as the board makes them:
+    /// the same signing, the same framing, a new random half each time.
+    fn peer_announce(emitted_s: u64, entropy: &mut Entropy) -> Vec<u8> {
+        Node::new(1757, 0, &peer())
+            .announce(Kind::Announce, &lxmf_app_data("Peer"), emitted_s, entropy)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_peer_announcing_again_with_the_time_is_heard_again() {
+        // What every Sideband, MeshChat and GPS-clocked oxinode sends: Unix
+        // seconds. Told seconds since boot, the engine took these for
+        // unstamped and dropped the second; see `CLOCK_OFFSET_S`.
+        let mut entropy = Entropy::from_seed([4; 32]);
+        let mut node = Node::new(1757, 0, &board());
+        for (n, (emitted, at_ms)) in [
+            (EMITTED, 10_000),
+            (EMITTED + 100, 140_000),
+            (EMITTED + 1_800, 1_900_000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let out = node.heard(
+                &peer_announce(emitted, &mut entropy),
+                None,
+                at_ms,
+                &mut rng(),
+            );
+            assert_eq!(out.heard.len(), 1, "announce {n}, emitted {emitted}");
+        }
+    }
+
+    #[test]
+    fn an_older_or_unstamped_announce_after_a_newer_one_is_not() {
+        // Python's rule, and the engine's: a later announce over the same
+        // path must be strictly newer. A replay of an older one is not, and
+        // neither is a board with no clock announcing again.
+        let mut entropy = Entropy::from_seed([5; 32]);
+        let mut node = Node::new(1757, 0, &board());
+        let first = node.heard(
+            &peer_announce(EMITTED, &mut entropy),
+            None,
+            10_000,
+            &mut rng(),
+        );
+        assert_eq!(first.heard.len(), 1);
+        for emitted in [EMITTED - 1, EMITTED, 0] {
+            let out = node.heard(
+                &peer_announce(emitted, &mut entropy),
+                None,
+                20_000,
+                &mut rng(),
+            );
+            assert!(out.heard.is_empty(), "emitted {emitted}");
+        }
+        let mut node = Node::new(1757, 0, &board());
+        node.heard(&peer_announce(0, &mut entropy), None, 10_000, &mut rng());
+        let again = node.heard(&peer_announce(0, &mut entropy), None, 20_000, &mut rng());
+        assert!(again.heard.is_empty(), "unstamped twice is not newer");
+    }
+
+    #[test]
+    fn a_stamp_from_the_far_future_still_counts() {
+        // The largest five bytes can say: still behind the engine's clock.
+        const MAX: u64 = MAX_EMITTED_S;
+        let mut entropy = Entropy::from_seed([6; 32]);
+        let mut node = Node::new(1757, 0, &board());
+        node.heard(
+            &peer_announce(MAX - 1, &mut entropy),
+            None,
+            10_000,
+            &mut rng(),
+        );
+        let out = node.heard(&peer_announce(MAX, &mut entropy), None, 20_000, &mut rng());
+        assert_eq!(out.heard.len(), 1);
     }
 
     #[test]

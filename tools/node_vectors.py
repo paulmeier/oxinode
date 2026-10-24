@@ -6,6 +6,9 @@ the tests hold the board's stack to what a real peer puts on the air:
 
 * `announce.bin`: an `lxmf.delivery` announce from a fixed identity, with a
   display name in its app data the way Sideband and MeshChat send one;
+* `reannounce.bin`: the same destination announcing again, a little over a
+  second later, so its emission time is strictly newer, as it is when a
+  peer announces again on the air;
 * `path_request.bin`: a path request for that destination, as
   `Transport.request_path` builds it on a node that is not a transport node;
 * `vectors.txt`: what the tests expect to read out of them.
@@ -24,6 +27,7 @@ import argparse
 import os
 import sys
 import tempfile
+import time
 
 # A fixed X25519 + Ed25519 private key, so the destination hash is stable.
 PRIVATE_KEY = bytes(range(64))
@@ -51,6 +55,11 @@ def main(argv=None):
     app_data = msgpack.packb([DISPLAY_NAME.encode("utf-8"), None])
     announce = delivery.announce(app_data=app_data, send=False)
     announce.pack()
+    # Reticulum stamps an announce with whole seconds of `time.time()`, so an
+    # announce that is newer needs a second between them.
+    time.sleep(1.1)
+    reannounce = delivery.announce(app_data=app_data, send=False)
+    reannounce.pack()
 
     path_request_destination = RNS.Destination(
         None, RNS.Destination.OUT, RNS.Destination.PLAIN, RNS.Transport.APP_NAME, "path", "request"
@@ -68,6 +77,8 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "announce.bin"), "wb") as f:
         f.write(announce.raw)
+    with open(os.path.join(args.out, "reannounce.bin"), "wb") as f:
+        f.write(reannounce.raw)
     with open(os.path.join(args.out, "path_request.bin"), "wb") as f:
         f.write(path_request.raw)
     with open(os.path.join(args.out, "vectors.txt"), "w") as f:

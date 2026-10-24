@@ -270,7 +270,12 @@ straight off the air. The table holds sixteen and evicts the peer heard
 longest ago, except one with a conversation, which is never pushed out for a
 stranger; if every peer has one, the stranger is not kept, and that is
 counted. Other announces (propagation nodes, NomadNet, telemetry) are
-verified and passed over. The engine's own path table is its business; the
+verified and passed over. A peer announcing again is heard again only if
+its announce is stamped strictly later than the last, as in Python's
+`Transport`. The engine's clock starts at 2^40 seconds at boot, beyond any
+stamp an announce can carry, because `rns-core` otherwise takes a stamp more
+than a day ahead of its clock for none, and a clock that started at zero put
+every real Unix time there. The engine's own path table is its business; the
 Peers screen shows what the last announce said. Everything is in RAM until a
 reboot.
 
