@@ -6,19 +6,18 @@
 //!
 //! ```text
 //! cargo run -p oxinode-sim --target <host> -- golden --update
+//! cargo run -p oxinode-sim --target <host> --features node -- golden --update
 //! ```
-
-use std::path::PathBuf;
+//!
+//! The second is the node image's set, under `golden/node/`; see
+//! `oxinode_sim::golden::dir`.
 
 use oxinode_sim::golden::{self, Verdict};
 
 #[test]
 fn every_screen_and_menu_matches_its_golden_image() {
-    let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("golden");
-    let diff = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("target")
-        .join("golden-diff");
+    let golden = golden::dir();
+    let diff = golden::diff_dir();
     let verdicts = golden::check(&golden, &diff);
     assert!(!verdicts.is_empty());
     let failures: Vec<String> = verdicts

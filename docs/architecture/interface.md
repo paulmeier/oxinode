@@ -95,13 +95,14 @@ waiting for a second device.
 
 ## What oxinode supplies
 
-**Screens** (`core/src/ui.rs`): the five descriptors, oxinode's `Action`
+**Screens** (`core/src/ui.rs`): the five descriptors (six with the node,
+which adds Peers after Home), oxinode's `Action`
 enum, and `Overlay`, its `Modal`, which is the editor or the notice. A
 `NavExt` trait adds the five things oxinode asks of the navigator beyond what
 the crate provides.
 
 **Content** (`core/src/screens.rs`): what each screen is allowed to know. It
-is handed a `State`, five small structs of plain values, and formats and
+is handed a `State`, a small struct per screen of plain values, and formats and
 draws it. No protocol, no clock, no pin. The firmware copies the values out of
 the modem loop once per redraw in one function; the simulator hands over a
 fixture. A field that is not known is an `Option`, and `None` draws as a
@@ -252,6 +253,26 @@ made, and a receiver that already holds a path through another node replaces
 it only with a strictly newer one. The board's only clock is its GPS receiver,
 so the time is Unix seconds from it when it has said what time it is, and
 zero, which Reticulum reads as not known, when it has not.
+
+### What the node hears
+
+Every packet the node hears is queued for the engine (`node::Inbox`, eight
+deep) and the engine is handed one on a pass of the modem loop on which the
+radio had nothing, because verifying an announce takes it about 45 ms and the
+radio comes first. The channel cannot deliver announces faster than that for
+long, so the queue bounds memory rather than speed: when it is full the
+oldest packet goes, and the log counts it.
+
+An announce the engine verified for an `lxmf.delivery` address becomes a peer
+(`node::peers`), or brings one up to date: its key, its display name read as
+LXMF reads it, when it was heard, the hops, and the signal if it came
+straight off the air. The table holds sixteen and evicts the peer heard
+longest ago, except one with a conversation, which is never pushed out for a
+stranger; if every peer has one, the stranger is not kept, and that is
+counted. Other announces (propagation nodes, NomadNet, telemetry) are
+verified and passed over. The engine's own path table is its business; the
+Peers screen shows what the last announce said. Everything is in RAM until a
+reboot.
 
 ## Redraw stays incremental
 

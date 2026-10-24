@@ -1,7 +1,7 @@
 //! What each screen is allowed to know, and how it is drawn from that.
 //!
-//! The navigator can move between five screens and the pad can drive it;
-//! this is what the screens *say*. The division the navigator enforces holds:
+//! The navigator can move between the screens (five, or six with the node)
+//! and the pad can drive it; this is what the screens *say*. The division the navigator enforces holds:
 //! [`crate::ui`] never decides what is true, and neither does this module. It
 //! is handed a [`State`] -- plain values, copied out of the modem loop by the
 //! caller -- and formats and draws it. The render path takes state by borrow
@@ -54,9 +54,13 @@ use crate::ui::{self, Nav, NavExt, Screen};
 /// screens, and that is the interface crate's to handle.
 pub const LINE_CHARS: usize = ui::LAYOUT.line_chars();
 
-/// The most lines any screen produces. The radio screen is the longest, and
-/// a refusal reason wrapped under it is the longest it gets.
-pub const MAX_LINES: usize = 20;
+/// The most lines any screen produces, and one more. A full Peers screen is
+/// the longest, at two lines a peer; the radio screen with a refusal wrapped
+/// under it is the next, at under twenty.
+pub const MAX_LINES: usize = 2 * PEERS + 1;
+
+/// How many peers the Peers screen lists: every one the node keeps.
+pub const PEERS: usize = 16;
 
 /// Which host has the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -262,7 +266,64 @@ impl Default for System {
     }
 }
 
-/// Everything the five screens know between them.
+/// A peer's display name as the panel can draw it: printable ASCII as it
+/// is, and every other character as one byte the font has no glyph for, so
+/// it draws as one hollow box. Cut at a row's width; a name is never wider
+/// than the row it sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerName {
+    bytes: [u8; LINE_CHARS],
+    len: u8,
+}
+
+impl PeerName {
+    /// What stands in for a character the panel cannot draw.
+    pub const UNDRAWABLE: u8 = 0x7f;
+
+    pub fn new(name: &str) -> Self {
+        let mut out = PeerName {
+            bytes: [0; LINE_CHARS],
+            len: 0,
+        };
+        for (slot, c) in out.bytes.iter_mut().zip(name.chars()) {
+            *slot = match c {
+                ' '..='~' => c as u8,
+                _ => Self::UNDRAWABLE,
+            };
+            out.len += 1;
+        }
+        out
+    }
+
+    pub fn as_str(&self) -> &str {
+        // ASCII only, by construction.
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("?")
+    }
+}
+
+/// One line of [`Screen::Peers`](crate::ui::Screen): a peer, as the node last
+/// heard it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerRow {
+    /// Its LXMF address, which stands in for a name it did not give.
+    pub destination: [u8; 16],
+    pub name: Option<PeerName>,
+    /// Seconds since it was last heard.
+    pub age_s: Option<u32>,
+    /// Hops its last announce came, one being straight off the air.
+    pub hops: Option<u8>,
+    /// The signal of its last announce, if that came straight off the air.
+    pub signal: Option<crate::rnode::air::Signal>,
+}
+
+/// What the Peers screen knows: the peers the node keeps, the one heard most
+/// recently first. Only an image with the node has the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Peers {
+    pub rows: [Option<PeerRow>; PEERS],
+}
+
+/// Everything the screens know between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct State {
     /// The four hex digits that name the board: the suffix of the name it
@@ -274,6 +335,7 @@ pub struct State {
     pub bluetooth: BluetoothScreen,
     pub position: Position,
     pub system: System,
+    pub peers: Peers,
 }
 
 /// The free RAM figure: what lies between the end of static data and the
@@ -482,6 +544,8 @@ impl State {
     pub fn lines(&self, screen: Screen, out: &mut Lines) {
         match screen {
             Screen::Home => self.home.lines(out),
+            #[cfg(feature = "node")]
+            Screen::Peers => self.peers.lines(out),
             Screen::Radio => self.radio.lines(out),
             Screen::Bluetooth => self.bluetooth.lines(out),
             Screen::Position => self.position.lines(out),
@@ -561,6 +625,71 @@ impl Home {
         }
         out.row("Battery", v.as_str());
         out.row("Charger", self.charger.word());
+    }
+}
+
+impl Peers {
+    /// Two lines a peer: its name with how long ago it was heard, then how
+    /// it was heard -- the signal if it came straight off the air, the hops
+    /// if it was relayed.
+    pub fn lines(&self, out: &mut Lines) {
+        let mut any = false;
+        for row in self.rows.iter().flatten() {
+            any = true;
+            row.lines(out);
+        }
+        if !any {
+            out.wrapped("No peers heard yet.");
+        }
+    }
+}
+
+impl PeerRow {
+    fn lines(&self, out: &mut Lines) {
+        let mut when = Text::<LINE_CHARS>::new();
+        match self.age_s {
+            Some(s) => age(&mut when, s),
+            None => {
+                let _ = when.write_str("-");
+            }
+        }
+        // The name has what the age leaves, and a space between them.
+        let room = LINE_CHARS - when.as_str().len() - 1;
+        let mut name = Text::<LINE_CHARS>::new();
+        match &self.name {
+            Some(n) => {
+                let _ = name.write_str(n.as_str());
+            }
+            // No name: the start of its address, marked as not a name.
+            None => {
+                let _ = name.write_str("<");
+                for b in &self.destination[..5] {
+                    let _ = write!(name, "{b:02x}");
+                }
+                let _ = name.write_str(">");
+            }
+        }
+        // ASCII either way, so any byte is a character boundary.
+        let name = name.as_str();
+        out.row(&name[..name.len().min(room)], when.as_str());
+        let mut how = Text::<LINE_CHARS>::new();
+        let _ = how.write_str("  ");
+        match (self.signal, self.hops) {
+            (Some(s), _) => {
+                let _ = write!(how, "{} dBm ", s.rssi_dbm);
+                snr(&mut how, s.snr_quarter_db);
+            }
+            (None, Some(1)) => {
+                let _ = how.write_str("1 hop");
+            }
+            (None, Some(h)) => {
+                let _ = write!(how, "{h} hops");
+            }
+            (None, None) => {
+                let _ = how.write_str("-");
+            }
+        }
+        out.line(how.as_str());
     }
 }
 
@@ -1171,6 +1300,15 @@ mod tests {
     use crate::sh1107::{self, Frame};
     use crate::ui::{Input, Screen, LAYOUT};
 
+    /// A navigator on the Radio screen, however many screens are before it.
+    fn on_radio() -> Nav {
+        let mut nav = ui::nav();
+        while nav.current() != Screen::Radio {
+            nav.handle(Input::Right);
+        }
+        nav
+    }
+
     /// A board mid-session: every field known, every option `Some`.
     fn populated() -> State {
         State {
@@ -1222,7 +1360,159 @@ mod tests {
                 announce_gap_s: Some(252),
                 free_ram: Some(123_456),
             },
+            peers: three_peers(),
         }
+    }
+
+    /// Three peers: one straight off the air, one relayed, one with no name.
+    fn three_peers() -> Peers {
+        let mut peers = Peers::default();
+        peers.rows[0] = Some(PeerRow {
+            destination: [0x11; 16],
+            name: Some(PeerName::new("Ana")),
+            age_s: Some(12),
+            hops: Some(1),
+            signal: Some(crate::rnode::air::Signal {
+                rssi_dbm: -61,
+                snr_quarter_db: 38,
+            }),
+        });
+        peers.rows[1] = Some(PeerRow {
+            destination: [0x22; 16],
+            name: Some(PeerName::new("oxinode 354B")),
+            age_s: Some(300),
+            hops: Some(3),
+            signal: None,
+        });
+        peers.rows[2] = Some(PeerRow {
+            destination: core::array::from_fn(|i| 0xa0 + i as u8),
+            name: None,
+            age_s: Some(7_200),
+            hops: Some(1),
+            signal: None,
+        });
+        peers
+    }
+
+    fn peer_lines(peers: &Peers) -> Vec<String> {
+        let mut out = Lines::new();
+        peers.lines(&mut out);
+        assert!(!out.overflowed(), "a peer's line was cut");
+        (0..out.len())
+            .map(|i| out.get(i).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn no_peers_says_so() {
+        assert_eq!(peer_lines(&Peers::default()), ["No peers heard yet."]);
+    }
+
+    #[test]
+    fn a_peer_is_its_name_and_age_then_how_it_was_heard() {
+        assert_eq!(
+            peer_lines(&three_peers()),
+            [
+                "Ana             12 s",
+                "  -61 dBm 9.5 dB",
+                "oxinode 354B   5 min",
+                "  3 hops",
+                "<a0a1a2a3a4>     2 h",
+                "  1 hop",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_peer_with_nothing_known_but_its_address_is_dashes() {
+        let mut peers = Peers::default();
+        peers.rows[0] = Some(PeerRow {
+            destination: [0xff; 16],
+            name: None,
+            age_s: None,
+            hops: None,
+            signal: None,
+        });
+        assert_eq!(peer_lines(&peers), ["<ffffffffff>       -", "  -"]);
+    }
+
+    #[test]
+    fn a_peer_at_its_widest_fits_and_a_long_name_gives_way_to_the_age() {
+        let mut peers = Peers::default();
+        peers.rows[0] = Some(PeerRow {
+            destination: [0; 16],
+            name: Some(PeerName::new("A name far too long for any row")),
+            age_s: Some(u32::MAX),
+            hops: Some(1),
+            signal: Some(crate::rnode::air::Signal {
+                rssi_dbm: -128,
+                snr_quarter_db: i8::MIN,
+            }),
+        });
+        peers.rows[1] = Some(PeerRow {
+            name: None,
+            hops: Some(u8::MAX),
+            signal: None,
+            ..peers.rows[0].unwrap()
+        });
+        assert_eq!(
+            peer_lines(&peers),
+            [
+                "A name far 1193046 h",
+                "  -128 dBm -32.0 dB",
+                "<000000000 1193046 h",
+                "  255 hops",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_the_font_cannot_draw_is_one_box_a_character() {
+        let name = PeerName::new("Zoë 🙂!");
+        assert_eq!(name.as_str(), "Zo\x7f \x7f!");
+        assert_eq!(
+            PeerName::new("a\tb\n").as_str(),
+            "a\x7fb\x7f",
+            "control characters too"
+        );
+        assert_eq!(monopanel::font::glyph(PeerName::UNDRAWABLE), None, "a box");
+        assert_eq!(PeerName::new(&"x".repeat(40)).as_str().len(), LINE_CHARS);
+    }
+
+    #[test]
+    fn a_full_peers_screen_fits_the_line_buffer() {
+        let row = three_peers().rows[0];
+        let full = Peers { rows: [row; PEERS] };
+        let lines = peer_lines(&full);
+        assert_eq!(lines.len(), 2 * PEERS);
+        assert!(lines.len() < MAX_LINES);
+    }
+
+    /// Every field of a peer, changed on its own, changes a line.
+    #[test]
+    fn changing_any_peer_field_changes_a_line() {
+        type Mutation = (&'static str, fn(&mut PeerRow));
+        let mutations: [Mutation; 6] = [
+            ("name", |r| r.name = Some(PeerName::new("Bea"))),
+            ("no name", |r| r.name = None),
+            ("age", |r| r.age_s = Some(13)),
+            ("hops", |r| {
+                r.signal = None;
+                r.hops = Some(2);
+            }),
+            ("rssi", |r| r.signal.as_mut().unwrap().rssi_dbm = -60),
+            ("snr", |r| r.signal.as_mut().unwrap().snr_quarter_db = 39),
+        ];
+        let base = three_peers();
+        for (name, mutate) in mutations {
+            let mut changed = base;
+            mutate(changed.rows[0].as_mut().unwrap());
+            assert_ne!(peer_lines(&changed), peer_lines(&base), "{name}");
+        }
+        // The address shows only with no name.
+        let mut changed = base;
+        changed.rows[2].as_mut().unwrap().destination[0] = 0;
+        assert_ne!(peer_lines(&changed), peer_lines(&base), "destination");
     }
 
     /// A receiver with a fix, at a place nobody would mistake for a default.
@@ -1685,8 +1975,7 @@ mod tests {
     #[test]
     fn the_radio_screen_scrolls() {
         let state = populated();
-        let mut nav = ui::nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         let mut top = Frame::new();
         render(&mut top, &mut nav, &state);
         assert!(lines_of(&state, Screen::Radio).len() > LAYOUT.visible_lines());
@@ -1864,8 +2153,9 @@ mod tests {
         // strip stay as they were. (Home to Radio does redraw every page,
         // because the radio screen fills every content row; what this
         // guards is that nothing marks the whole panel dirty on principle.)
-        nav.handle(Input::Right);
-        nav.handle(Input::Right);
+        while nav.current() != Screen::Bluetooth {
+            nav.handle(Input::Right);
+        }
         render(&mut scratch, &mut nav, &ticked);
         live.copy_from(&scratch);
         for page in 0..sh1107::PAGES {
@@ -2232,8 +2522,7 @@ mod tests {
     #[test]
     fn rendering_an_editor_replaces_the_content_and_nothing_else() {
         let state = populated();
-        let mut nav = ui::nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         let mut before = Frame::new();
         render(&mut before, &mut nav, &state);
         nav.edit(Editor::open(Field::Frequency, state.radio.config));

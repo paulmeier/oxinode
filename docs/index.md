@@ -33,7 +33,8 @@ the board ships with.
   rather than clamped. The module's 73 ppm reference error is corrected in
   arithmetic.
 - **An on-device interface.** Five screens on the 128 × 128 OLED, driven by
-  the six-switch navigation pad: Home, Radio, Bluetooth, Position, System.
+  the six-switch navigation pad: Home, Radio, Bluetooth, Position, System;
+  six in an image with the node, which adds Peers.
   Every radio parameter is editable from the panel when no host has the
   radio; every screen shows a dash where it knows nothing.
 - **GPS.** The Super IO's GNSS module, powered through its load switch,

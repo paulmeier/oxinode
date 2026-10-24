@@ -211,8 +211,10 @@ mod tests {
     #[test]
     fn the_status_line_shows_the_editor() {
         let mut scene = Scene::with_state(crate::scene::standalone());
+        for _ in 0..Screen::Radio.index() {
+            scene.press(Input::Right);
+        }
         for input in [
-            Input::Right,
             Input::Select,
             Input::Down,
             Input::Down,
@@ -238,7 +240,9 @@ mod tests {
     #[test]
     fn the_screen_says_where_you_are() {
         let mut scene = Scene::new();
-        scene.press(Input::Right);
+        for _ in 0..Screen::Radio.index() {
+            scene.press(Input::Right);
+        }
         scene.press(Input::Select);
         let text = screen(&mut scene, Cells::Braille, Some(Action::Redraw));
         let lines: Vec<&str> = text.lines().collect();

@@ -220,6 +220,14 @@ class Announces(unittest.TestCase):
         self.assertEqual(peer.lxmf_app_data(peer.packb([None, None])), (None, None))
         self.assertEqual(peer.lxmf_app_data(peer.packb([b"n", None, [0]])), ("n", None))
 
+    def test_a_floods_names_are_read_back_as_given(self):
+        self.assertEqual(peer.flood_name(1), "flood 01")
+        self.assertEqual(peer.flood_name(20), "flood 20")
+        for name in ("flood 01", "Zoë"):
+            self.assertEqual(peer.lxmf_app_data(peer.lxmf_name_app_data(name)), (name, None))
+        # The board's own reading in core/src/node.rs packs the same bytes.
+        self.assertEqual(peer.lxmf_name_app_data("Bench peer"), vectors()["app_data"])
+
     def test_what_is_not_an_announce_or_is_short_is_refused(self):
         raw = vector_bytes("announce.bin")
         with self.assertRaises(ValueError):
@@ -348,6 +356,12 @@ class AgainstReticulum(unittest.TestCase):
         self.assertEqual(peer.OPPORTUNISTIC_MAX_CONTENT, M.ENCRYPTED_PACKET_MAX_CONTENT)
         self.assertEqual(peer.ax.MDU, self.RNS.Reticulum.MDU)
         self.assertEqual(peer.CONTEXT_PATH_RESPONSE, self.RNS.Packet.PATH_RESPONSE)
+
+    def test_a_floods_app_data_is_lxmfs(self):
+        self.assertEqual(
+            self.LXMF.display_name_from_app_data(peer.lxmf_name_app_data(peer.flood_name(3))),
+            "flood 03",
+        )
 
     def test_the_signature_verifies_over_what_is_said_to_be_signed(self):
         a = announce()

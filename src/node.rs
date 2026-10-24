@@ -27,14 +27,19 @@
 //! back to that configuration, as it does at boot, because the host may have
 //! left it on its own or switched it off on the way out.
 //!
-//! An announce takes the engine about 43 ms to verify, and the modem loop
-//! waits for it. With no host that delays nothing but the panel.
+//! An announce takes the engine about 45 ms to verify, and the radio comes
+//! first: a heard packet is queued ([`oxinode_core::node::Inbox`]) and the
+//! engine is handed one on a pass of the modem loop on which the radio had
+//! nothing. The modem loop waits for that, which with no host delays nothing
+//! but the panel. What the engine verifies as an `lxmf.delivery` announce
+//! becomes a peer ([`oxinode_core::node::peers`]), and the Peers screen
+//! lists them.
 
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::Peri;
 use oxinode_core::mode::{Change, Mode, Seen};
 use oxinode_core::rnode::air::Signal;
-use oxinode_core::screens::NodeHashes;
+use oxinode_core::screens::{NodeHashes, Peers};
 
 use crate::store::{RecordFlash, Storage};
 
@@ -58,8 +63,9 @@ mod imp {
     use oxinode_core::mode::Presence;
     use oxinode_core::node::announce::{self, Kind};
     use oxinode_core::node::key::{NodeKey, Stored};
+    use oxinode_core::node::peers::{Learned, Table};
     use oxinode_core::node::{
-        announce_len, lxmf_app_data, Entropy, Followed, Node, Outcome, Sending, TICK_MS,
+        announce_len, lxmf_app_data, Entropy, Followed, Inbox, Node, Outcome, Sending, TICK_MS,
     };
 
     use super::*;
@@ -95,6 +101,10 @@ mod imp {
         sending: Sending,
         /// The board's name in its announces, as LXMF's app data.
         app_data: Vec<u8>,
+        /// Packets heard and waiting for the engine.
+        inbox: Inbox,
+        /// Who else is around.
+        peers: Table,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
@@ -136,6 +146,8 @@ mod imp {
                 stored_config: false,
                 sending: Sending::new(),
                 app_data: Vec::new(),
+                inbox: Inbox::new(),
+                peers: Table::new(),
                 entropy: Entropy::from_seed(seed),
                 last_tick_ms: now_ms(),
                 reported_peak: 0,
@@ -242,9 +254,10 @@ mod imp {
             match self.sending.follow(running, now_ms()) {
                 Some(Followed::Started) => defmt::info!("node: running; an announce is due"),
                 Some(Followed::Stopped(dropped)) => defmt::info!(
-                    "node: stopped; {=usize} packets it had waiting were dropped, {=u32} in all",
+                    "node: stopped; {=usize} packets it had waiting were dropped, {=u32} in all; {=usize} heard and not yet looked at",
                     dropped,
-                    self.sending.dropped()
+                    self.sending.dropped(),
+                    self.inbox.clear()
                 ),
                 None => {}
             }
@@ -322,24 +335,41 @@ mod imp {
             self.presence.mode(self.stored_config).is_node()
         }
 
-        /// A packet came off the air and went wherever it goes.
+        /// What the Peers screen shows.
+        pub fn peers(&self) -> Peers {
+            self.peers.screen(now_ms())
+        }
+
+        /// A packet came off the air: queued for the engine, which sees it
+        /// on a pass when the radio is quiet.
         pub fn heard(&mut self, packet: &[u8], signal: Signal) {
-            if !self.running() {
+            if !self.running() || self.node.is_none() {
                 return;
             }
-            let Some(node) = self.node.as_mut() else {
-                return;
-            };
-            let out = node.heard(packet, Some(signal), now_ms(), &mut self.entropy);
-            self.report(out);
+            if self.inbox.push(packet, Some(signal), now_ms()) {
+                defmt::warn!(
+                    "node: {=usize} packets waiting; the oldest was dropped, {=u32} in all",
+                    Inbox::CAPACITY,
+                    self.inbox.dropped()
+                );
+            }
         }
 
         /// Called on every pass of the modem loop; runs the engine's
-        /// housekeeping as often as it asks for it.
-        pub fn tick(&mut self) {
+        /// housekeeping as often as it asks for it, and, when the radio had
+        /// nothing on this pass, hands the engine one packet that waited.
+        pub fn tick(&mut self, radio_quiet: bool) {
             self.follow_mode();
             if !self.running() {
                 return;
+            }
+            if radio_quiet {
+                if let (Some(node), Some(inbound)) = (self.node.as_mut(), self.inbox.pop()) {
+                    let out =
+                        node.heard(&inbound.packet, inbound.signal, now_ms(), &mut self.entropy);
+                    self.learn(&out, inbound.at_ms);
+                    self.report(out);
+                }
             }
             let now = now_ms();
             if now.saturating_sub(self.last_tick_ms) < TICK_MS {
@@ -360,6 +390,43 @@ mod imp {
                 match built {
                     Some(packet) => self.sending.push(packet, Some(kind)),
                     None => defmt::error!("node: the announce could not be built"),
+                }
+            }
+        }
+
+        /// The peers in what the engine verified, heard at `at_ms`.
+        fn learn(&mut self, out: &Outcome, at_ms: u64) {
+            for heard in &out.heard {
+                let name = |p: &Table| {
+                    p.get(&heard.destination)
+                        .and_then(|p| p.name.clone())
+                        .unwrap_or_default()
+                };
+                match self.peers.heard(heard, at_ms) {
+                    Learned::NotLxmf => {}
+                    Learned::New => defmt::info!(
+                        "node: a new peer {=[u8]:02x} \"{=str}\", {=usize} of {=usize}",
+                        &heard.destination[..],
+                        name(&self.peers).as_str(),
+                        self.peers.len(),
+                        Table::CAPACITY
+                    ),
+                    Learned::Updated => defmt::info!(
+                        "node: peer {=[u8]:02x} \"{=str}\" heard again",
+                        &heard.destination[..],
+                        name(&self.peers).as_str()
+                    ),
+                    Learned::Evicted(gone) => defmt::info!(
+                        "node: a new peer {=[u8]:02x} \"{=str}\" in place of {=[u8]:02x}, heard longest ago",
+                        &heard.destination[..],
+                        name(&self.peers).as_str(),
+                        &gone[..]
+                    ),
+                    Learned::Refused => defmt::warn!(
+                        "node: a new peer {=[u8]:02x} not kept: every peer has a conversation ({=u32} turned away)",
+                        &heard.destination[..],
+                        self.peers.refused()
+                    ),
                 }
             }
         }
@@ -546,5 +613,10 @@ impl Listener {
     pub fn heard(&mut self, _packet: &[u8], _signal: Signal) {}
 
     #[inline(always)]
-    pub fn tick(&mut self) {}
+    pub fn tick(&mut self, _radio_quiet: bool) {}
+
+    #[inline(always)]
+    pub fn peers(&self) -> Peers {
+        Peers::default()
+    }
 }

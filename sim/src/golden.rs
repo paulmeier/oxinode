@@ -20,6 +20,12 @@
 //! page, an editor, a notice and a pairing. That is what proves the
 //! interface's layout is derived from the canvas rather than assumed, and it
 //! is drawn from the same scenes and the same scripts.
+//!
+//! And the whole of it again for the image with the node, under `node/`
+//! ([`dir`]), built with the `node` feature: that image's strip has the
+//! Peers screen in it, so none of its pictures is the RNode's. Its set adds
+//! the Peers screen with one peer, a full screen of them, one with no name
+//! and one with nothing known but its address.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +38,30 @@ use crate::image::Image;
 use crate::panel::Size;
 use crate::scene::{self, Scene};
 use crate::script;
+
+/// Where this build's golden images are: `golden/`, or `golden/node/` for
+/// the image with the node.
+pub fn dir() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("golden");
+    if cfg!(feature = "node") {
+        root.join("node")
+    } else {
+        root
+    }
+}
+
+/// Where a mismatch's evidence goes, beside the build's set.
+pub fn diff_dir() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("golden-diff");
+    if cfg!(feature = "node") {
+        root.join("node")
+    } else {
+        root
+    }
+}
 
 /// One state worth a picture.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -145,6 +175,24 @@ pub fn cases() -> Vec<Case> {
         state: scene::searching(),
         size: square,
     });
+    // The Peers screen, beyond empty and populated: one peer, a screen full
+    // of them, one with no name, and one with nothing known but its address.
+    #[cfg(feature = "node")]
+    for (name, peers) in [
+        ("one", scene::one_peer()),
+        ("full", scene::full_of_peers()),
+        ("no-name", scene::nameless_peer()),
+        ("unknown", scene::unknown_peer()),
+    ] {
+        let mut state = scene::standalone();
+        state.peers = peers;
+        cases.push(Case {
+            name: format!("peers-{name}"),
+            script: format!("right*{}", Screen::Peers.index()),
+            state,
+            size: square,
+        });
+    }
 
     // The editors. Each one open on a standalone board; the ones
     // that can be driven to a refusal, refused; one after a confirmed change,
@@ -428,8 +476,10 @@ mod tests {
         // menu windows, a scroll, every editor, three refusals, a notice and
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
-        // confirmed.
-        let square = 2 * Screen::COUNT
+        // confirmed. With the node, four more of the Peers screen.
+        let peers = if cfg!(feature = "node") { 4 } else { 0 };
+        let square = peers
+            + 2 * Screen::COUNT
             + items
             + 3
             + 1

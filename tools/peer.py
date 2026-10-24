@@ -19,6 +19,10 @@ what says whether it said the right thing.
   * It announces its own `lxmf.delivery` destination, under one identity that
     is kept between runs, when it starts and again when it first hears the
     board, so a board that came up later still learns it and can answer.
+  * With `--flood N`, it then announces N more `lxmf.delivery` destinations
+    under throwaway identities, named `flood 01` and on, as fast as the
+    RNode will send them: more peers than the board keeps, and more packets
+    than it queues, to see what it loses and that it stays responsive.
 
     python3.11 tools/peer.py --rnode /dev/cu.usbmodem3101 --board-log 65C11224153B1DFD
 
@@ -371,6 +375,17 @@ def lxmf_app_data(app_data: bytes) -> Tuple[Optional[str], Optional[int]]:
     return app_data.decode("utf-8"), None
 
 
+def flood_name(n: int) -> str:
+    """The display name of the n'th of a flood's announces, from 1."""
+    return f"flood {n:02d}"
+
+
+def lxmf_name_app_data(name: str) -> bytes:
+    """LXMF's app data for a display name and no stamp cost, as
+    `LXMRouter.get_announce_app_data` packs it."""
+    return packb([name.encode("utf-8"), None])
+
+
 def announce_problems(a: Announce) -> List[str]:
     """What is wrong with an `lxmf.delivery` announce, short of the signature,
     which needs Ed25519 and so Reticulum. Empty when nothing is."""
@@ -714,6 +729,11 @@ def peer_main(args, out_dir: str) -> int:
                 router.announce(delivery.hash)
                 run.say(f"announced {hexrep(delivery.hash)}")
                 next_announce = now + args.announce_every if args.announce_every > 0 else float("inf")
+                for n in range(1, args.flood + 1):
+                    throwaway = RNS.Destination(RNS.Identity(), RNS.Destination.IN, RNS.Destination.SINGLE, "lxmf", "delivery")
+                    throwaway.announce(app_data=lxmf_name_app_data(flood_name(n)))
+                    run.say(f"flood: announced {hexrep(throwaway.hash)} as {flood_name(n)!r}")
+                args.flood = 0
             with run.lock:
                 answer, board_identity = run.answer_at is not None and now >= run.answer_at, run.board_identity
                 if answer:
@@ -785,6 +805,7 @@ def main() -> int:
     ap.add_argument("--title", default="", help="the messages' title (default none)")
     ap.add_argument("--settle", type=float, default=5.0, help="seconds between the board's first announce and the first message (default 5)")
     ap.add_argument("--gap", type=float, default=10.0, help="seconds between one message resolving and the next going (default 10)")
+    ap.add_argument("--flood", type=int, default=0, help="announce this many throwaway lxmf.delivery destinations, back to back, after the peer's own first announce (default 0)")
     ap.add_argument("--announce-every", type=float, default=0.0, help="seconds between the peer's own announces (default 0: once, at the start)")
     ap.add_argument("--seconds", type=float, default=120.0, help="the longest the run lasts (default 120)")
     ap.add_argument("--listen", action="store_true", help="run all --seconds, even once everything expected has happened")

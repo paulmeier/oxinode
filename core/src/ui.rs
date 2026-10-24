@@ -51,6 +51,10 @@ pub const LAYOUT: Layout = Layout::of(sh1107::WIDTH, sh1107::HEIGHT);
 pub enum Screen {
     /// What the modem is doing right now.
     Home,
+    /// Who else is around: the peers the node has heard. Only in an image
+    /// with the node; an RNode has no peers of its own.
+    #[cfg(feature = "node")]
+    Peers,
     /// Frequency, bandwidth, spreading factor, coding rate, power.
     Radio,
     /// Advertising, connected, bonded.
@@ -79,6 +83,12 @@ const HOME_MENU: [Item<Action>; 4] = [
     Item::new("Redraw", Action::Redraw),
     Item::new("Announce Now", Action::Announce),
 ];
+
+/// What [`Screen::Peers`] offers: nothing yet but the way out. Messaging a
+/// peer arrives with conversations, and is not listed before it does
+/// anything.
+#[cfg(feature = "node")]
+const PEERS_MENU: [Item<Action>; 1] = [Item::BACK];
 
 /// What [`Screen::Radio`] offers: the band, an editor for each of the five
 /// parameters a host sets, then the three things that act on the
@@ -114,17 +124,17 @@ const SYSTEM_MENU: [Item<Action>; 3] = [
     Item::new("Bootloader", Action::Bootloader),
 ];
 
-/// The icons, in [`Screen::ALL`] order.
+/// The icons, one per screen.
 ///
 /// Drawn as ASCII art and converted by a generator, for the same reason the
 /// font is: hand-entered hex has no symptom other than a wrong picture.
-const ICONS: [Icon; Screen::COUNT] = [
-    [0x78, 0x7c, 0x06, 0x77, 0x06, 0x7c, 0x78], // a house
-    [0x04, 0x12, 0x09, 0x7d, 0x09, 0x12, 0x04], // an antenna radiating
-    [0x00, 0x22, 0x14, 0x7f, 0x36, 0x00, 0x00], // the Bluetooth rune
-    [0x1c, 0x36, 0x22, 0x7f, 0x22, 0x36, 0x1c], // a map pin
-    [0x1c, 0x3e, 0x77, 0x22, 0x77, 0x3e, 0x1c], // a cog
-];
+const HOUSE: Icon = [0x78, 0x7c, 0x06, 0x77, 0x06, 0x7c, 0x78];
+#[cfg(feature = "node")]
+const PEOPLE: Icon = [0x72, 0x77, 0x72, 0x00, 0x72, 0x77, 0x72]; // two people
+const ANTENNA: Icon = [0x04, 0x12, 0x09, 0x7d, 0x09, 0x12, 0x04]; // radiating
+const RUNE: Icon = [0x00, 0x22, 0x14, 0x7f, 0x36, 0x00, 0x00]; // Bluetooth's
+const PIN: Icon = [0x1c, 0x36, 0x22, 0x7f, 0x22, 0x36, 0x1c]; // a map pin
+const COG: Icon = [0x1c, 0x3e, 0x77, 0x22, 0x77, 0x3e, 0x1c];
 
 /// The screens as the interface crate sees them: what [`Nav`] is built over.
 ///
@@ -136,39 +146,52 @@ pub const SCREENS: [Spec<Action>; Screen::COUNT] = [
     Spec {
         title: "Home",
         menu_title: "Home Action",
-        icon: ICONS[0],
+        icon: HOUSE,
         menu: &HOME_MENU,
+    },
+    #[cfg(feature = "node")]
+    Spec {
+        title: "Peers",
+        menu_title: "Peers Action",
+        icon: PEOPLE,
+        menu: &PEERS_MENU,
     },
     Spec {
         title: "Radio",
         menu_title: "Radio Action",
-        icon: ICONS[1],
+        icon: ANTENNA,
         menu: &RADIO_MENU,
     },
     Spec {
         title: "Bluetooth",
         menu_title: "Bluetooth Action",
-        icon: ICONS[2],
+        icon: RUNE,
         menu: &BLUETOOTH_MENU,
     },
     Spec {
         title: "Position",
         menu_title: "Position Action",
-        icon: ICONS[3],
+        icon: PIN,
         menu: &POSITION_MENU,
     },
     Spec {
         title: "System",
         menu_title: "System Action",
-        icon: ICONS[4],
+        icon: COG,
         menu: &SYSTEM_MENU,
     },
 ];
 
+/// One with the node, for the Peers screen; none without.
+const NODE: usize = cfg!(feature = "node") as usize;
+
 impl Screen {
-    /// Every screen, in strip order.
-    pub const ALL: [Screen; 5] = [
+    /// Every screen, in strip order. Peers sits next to Home: it is what a
+    /// node is looked at for.
+    pub const ALL: [Screen; 5 + NODE] = [
         Screen::Home,
+        #[cfg(feature = "node")]
+        Screen::Peers,
         Screen::Radio,
         Screen::Bluetooth,
         Screen::Position,
@@ -182,10 +205,12 @@ impl Screen {
     pub const fn index(self) -> usize {
         match self {
             Screen::Home => 0,
-            Screen::Radio => 1,
-            Screen::Bluetooth => 2,
-            Screen::Position => 3,
-            Screen::System => 4,
+            #[cfg(feature = "node")]
+            Screen::Peers => 1,
+            Screen::Radio => 1 + NODE,
+            Screen::Bluetooth => 2 + NODE,
+            Screen::Position => 3 + NODE,
+            Screen::System => 4 + NODE,
         }
     }
 
@@ -413,6 +438,15 @@ mod tests {
     use crate::sh1107::Frame;
     use monopanel::page;
 
+    /// A navigator on the Radio screen, however many screens are before it.
+    fn on_radio() -> Nav {
+        let mut nav = nav();
+        while nav.current() != Screen::Radio {
+            nav.handle(Input::Right);
+        }
+        nav
+    }
+
     /// The layout is the one every golden image was approved against.
     #[test]
     fn the_layout_is_the_panels() {
@@ -544,8 +578,7 @@ mod tests {
     // ---- the editor level ------------------------------------------------
 
     fn on_radio_menu(item: usize) -> Nav {
-        let mut nav = nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         nav.handle(Input::Select);
         for _ in 0..item {
             nav.handle(Input::Down);
@@ -570,8 +603,7 @@ mod tests {
     /// Confirming a legal value returns it once and closes the editor.
     #[test]
     fn confirming_returns_the_setting_and_closes() {
-        let mut nav = nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         nav.edit(Editor::open(Field::TxPower, DEFAULT));
         assert!(nav.is_editing());
         assert_eq!(nav.title(), "TX Power");
@@ -594,8 +626,7 @@ mod tests {
     #[test]
     fn cancel_returns_nothing_and_closes() {
         for field in Field::ALL {
-            let mut nav = nav();
-            nav.handle(Input::Right);
+            let mut nav = on_radio();
             nav.edit(Editor::open(field, DEFAULT));
             nav.handle(Input::Up);
             nav.handle(Input::Right);
@@ -611,8 +642,7 @@ mod tests {
     /// hands nothing back.
     #[test]
     fn a_refused_value_keeps_the_editor_open() {
-        let mut nav = nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         nav.edit(Editor::open(Field::TxPower, DEFAULT));
         for _ in 0..8 {
             nav.handle(Input::Up); // 14 -> 22
@@ -634,8 +664,7 @@ mod tests {
     /// Sideways inside an editor moves the cursor, not the screen.
     #[test]
     fn sideways_in_an_editor_does_not_change_screen() {
-        let mut nav = nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         nav.edit(Editor::open(Field::Frequency, DEFAULT));
         nav.handle(Input::Right);
         nav.handle(Input::Right);
@@ -650,8 +679,7 @@ mod tests {
     #[test]
     fn a_notice_closes_on_any_key() {
         for input in Input::ALL {
-            let mut nav = nav();
-            nav.handle(Input::Right);
+            let mut nav = on_radio();
             nav.notice(Lock::Usb);
             assert!(nav.is_editing());
             assert_eq!(nav.notice_shown(), Some(Lock::Usb));
@@ -690,8 +718,7 @@ mod tests {
             .map(|n| n.to_string())
             .collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
-        let mut nav = nav();
-        nav.handle(Input::Right);
+        let mut nav = on_radio();
         nav.edit(Editor::open(Field::Bandwidth, DEFAULT));
         let mut frame = Frame::new();
         page(&mut frame, &mut nav, "", "", &refs);

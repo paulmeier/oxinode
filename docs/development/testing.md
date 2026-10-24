@@ -54,7 +54,10 @@ diff image (the expected picture dimmed, every differing pixel in red) in
 
 ```bash
 cargo run -p oxinode-sim --target "$(rustc -vV | sed -n 's/^host: //p')" -- golden --update
+cargo run -p oxinode-sim --target "$(rustc -vV | sed -n 's/^host: //p')" --features node -- golden --update
 ```
+
+The second is the node image's set, under `sim/golden/node/`.
 
 The set is generated from the screen list and the field list rather than
 written out, so a screen, menu item or editable field added to the core is a
