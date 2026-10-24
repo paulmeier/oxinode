@@ -146,6 +146,27 @@ pub struct VendorLog<'d, D: Driver<'d>> {
 /// Whether a reader has attached since the bus last came up.
 static LISTENING: AtomicBool = AtomicBool::new(false);
 
+/// The bus as the node's host rule sees it: configured by a host computer,
+/// and not suspended. Pulling the cable or putting the computer to sleep
+/// ends a USB host here, where DTR alone might not say so; see
+/// `oxinode_core::mode`.
+#[cfg(feature = "node")]
+static CONFIGURED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "node")]
+static SUSPENDED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the bus is configured and awake.
+#[cfg(feature = "node")]
+pub fn bus_active() -> bool {
+    CONFIGURED.load(Ordering::Relaxed) && !SUSPENDED.load(Ordering::Relaxed)
+}
+
+/// Without the node nothing asks, and nothing is tracked.
+#[cfg(not(feature = "node"))]
+pub fn bus_active() -> bool {
+    true
+}
+
 /// Answers the attach request, and forgets the reader whenever the bus resets
 /// or sleeps, because a reader that went with the cable never says goodbye.
 pub struct VendorLogControl {
@@ -174,16 +195,22 @@ impl Default for VendorLogControl {
 impl Handler for VendorLogControl {
     fn reset(&mut self) {
         LISTENING.store(false, Ordering::Relaxed);
+        #[cfg(feature = "node")]
+        CONFIGURED.store(false, Ordering::Relaxed);
     }
     fn configured(&mut self, configured: bool) {
         if !configured {
             LISTENING.store(false, Ordering::Relaxed);
         }
+        #[cfg(feature = "node")]
+        CONFIGURED.store(configured, Ordering::Relaxed);
     }
     fn suspended(&mut self, suspended: bool) {
         if suspended {
             LISTENING.store(false, Ordering::Relaxed);
         }
+        #[cfg(feature = "node")]
+        SUSPENDED.store(suspended, Ordering::Relaxed);
     }
     fn get_string(&mut self, index: StringIndex, _lang_id: u16) -> Option<&str> {
         (Some(index) == self.name).then_some(INTERFACE_NAME)

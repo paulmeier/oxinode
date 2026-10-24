@@ -102,6 +102,11 @@ the reason in the log rather than programming the chip unattended. A board in
 TNC mode reaches a configured radio about 420 ms after reset with no host
 attached.
 
+In an image with the node, the stored configuration is also what the board is
+a node on whenever no host is there, and it goes back to it three seconds
+after the last host leaves. See
+[The interface](../architecture/interface.md#two-modes-a-hosts-rnode-or-a-node-of-its-own).
+
 ## Sideband over Bluetooth
 
 The nRF52840 has no Bluetooth Classic, only LE, so in Sideband tick

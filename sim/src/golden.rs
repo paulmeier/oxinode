@@ -132,6 +132,13 @@ pub fn cases() -> Vec<Case> {
     // The receiver on and looking, which is neither of the two
     // states every screen is drawn in and the one the power question is
     // about.
+    // A node of its own, which is the other thing the Home screen can say.
+    cases.push(Case {
+        name: "home-standalone".to_string(),
+        script: String::new(),
+        state: scene::standalone(),
+        size: square,
+    });
     cases.push(Case {
         name: "position-searching".to_string(),
         script: format!("right*{}", Screen::Position.index()),
@@ -415,14 +422,27 @@ mod tests {
         assert_eq!(names.len(), cases.len(), "a name repeats");
         let items: usize = Screen::ALL.iter().map(|s| s.menu().len()).sum();
         // Screens twice, every menu item, three scroll positions, the system
-        // screen scrolled, pairing and refused, then five editors, three refusals, the cursor, the
+        // screen scrolled, the board standalone, pairing and refused, then
+        // five editors, three refusals, the cursor, the
         // screen after an edit, and two notices. Then every screen, three
         // menu windows, a scroll, every editor, three refusals, a notice and
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
         // confirmed.
-        let square =
-            2 * Screen::COUNT + items + 3 + 1 + 2 + Field::ALL.len() + 3 + 1 + 1 + 2 + 1 + 2 + 2;
+        let square = 2 * Screen::COUNT
+            + items
+            + 3
+            + 1
+            + 1
+            + 2
+            + Field::ALL.len()
+            + 3
+            + 1
+            + 1
+            + 2
+            + 1
+            + 2
+            + 2;
         let wide = Screen::COUNT + 3 + 1 + Field::ALL.len() + 3 + 1 + 1;
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
@@ -436,6 +456,7 @@ mod tests {
         assert!(names.contains("radio-edit-band-changed"));
         assert!(names.contains("radio-after-band"));
         assert!(names.contains("system-scrolled-bottom"));
+        assert!(names.contains("home-standalone"));
         for screen in Screen::ALL {
             let title = slug(screen.title());
             assert!(names.contains(title.as_str()), "{screen:?}");
