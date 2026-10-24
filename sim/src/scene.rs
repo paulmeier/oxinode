@@ -13,8 +13,10 @@
 //! back. An `Edit` is answered with an editor or a notice by the same rule
 //! the firmware applies -- a host on the line owns the radio -- and a
 //! confirmed `Set` lands in the scene's own state, so the screen after an
-//! edit shows the value that was set. Nothing else is acted on; the actions
-//! are collected for the caller to look at.
+//! edit shows the value that was set. An `Open` opens the conversation on
+//! the highlighted line, drawn from the scene's [`Recorded`] conversations,
+//! and what a thread shows is marked read in them as the node would. Nothing
+//! else is acted on; the actions are collected for the caller to look at.
 
 use monopanel::Canvas;
 use oxinode_core::battery;
@@ -24,13 +26,14 @@ use oxinode_core::lr1121::config::{ConfigError, RadioConfig, BENCH_2G4, DEFAULT}
 use oxinode_core::rnode::air::Signal;
 use oxinode_core::rnode::hosts::Transport;
 use oxinode_core::screens::{
-    self, Air, BluetoothScreen, Home, Host, Identity, Mode, NodeHashes, PeerName, PeerRow, Peers,
-    Position, Radio, State, System, PEERS,
+    self, Air, BluetoothScreen, ConversationRow, Home, Host, Identity, Mode, NodeHashes, PeerName,
+    PeerRow, Peers, Position, Radio, State, System, PEERS,
 };
 use oxinode_core::sh1107::Frame;
 use oxinode_core::status::Bluetooth;
 use oxinode_core::ui::{self, Action, Input, Nav, NavExt};
 
+use crate::conversation::{self, Recorded};
 use crate::panel::{Panel, Size};
 
 /// Which fixture a scene starts from.
@@ -45,6 +48,8 @@ pub enum Fixture {
     Standalone,
     /// The standalone board on the other band: 2478 MHz on the u.FL.
     HighFrequency,
+    /// The standalone board with the bundled conversations, some unread.
+    Conversation,
 }
 
 impl Fixture {
@@ -55,6 +60,7 @@ impl Fixture {
             "populated" => Some(Fixture::Populated),
             "standalone" => Some(Fixture::Standalone),
             "2g4" => Some(Fixture::HighFrequency),
+            "conversation" => Some(Fixture::Conversation),
             _ => None,
         }
     }
@@ -65,6 +71,7 @@ impl Fixture {
             Fixture::Populated => populated(),
             Fixture::Standalone => standalone(),
             Fixture::HighFrequency => high_frequency(),
+            Fixture::Conversation => with_conversations(&conversation::bench()),
         }
     }
 }
@@ -159,6 +166,9 @@ pub fn populated() -> State {
             free_ram: Some(126_976),
         },
         peers: three_peers(),
+        // Only an image with the node has the Messages screen; the bundled
+        // conversations, so that opening one shows a thread.
+        conversations: conversation::list(&conversation::bench()),
     }
 }
 
@@ -301,6 +311,38 @@ pub fn unread() -> State {
     state
 }
 
+/// The standalone board with `recorded` as its conversations, and Home
+/// counting what in them is unread.
+pub fn with_conversations(recorded: &[Recorded]) -> State {
+    let mut state = standalone();
+    state.conversations = conversation::list(recorded);
+    let unread = recorded
+        .iter()
+        .flat_map(|r| &r.messages)
+        .filter(|m| m.unread)
+        .count();
+    state.home.unread = Some(unread as u16);
+    state
+}
+
+/// As many conversations as the screen lists, a little older down the list,
+/// every other one unread. None of them has a thread to open.
+pub fn full_of_conversations() -> State {
+    let mut state = standalone();
+    for (n, slot) in state.conversations.rows.iter_mut().enumerate() {
+        *slot = Some(ConversationRow {
+            peer: [n as u8 + 0x40; 16],
+            name: Some(PeerName::new(&format!(
+                "oxinode {:04X}",
+                0x1a2b + n * 0x111
+            ))),
+            unread: n % 2 == 0,
+            age_s: Some(30 + 41 * n as u32 * n as u32),
+        });
+    }
+    state
+}
+
 /// The standalone board holding the bench's 2.4 GHz configuration: 2478 MHz,
 /// 812.5 kHz, SF8, 11 dBm, uncorrected. What the screens show on the other
 /// band, and the editors opening on a frequency with four megahertz digits.
@@ -340,6 +382,9 @@ pub fn refused() -> State {
 pub struct Scene {
     pub nav: Nav,
     pub state: State,
+    /// The conversations a thread is drawn from, by its peer: the bundled
+    /// ones unless the scene is given others.
+    pub recorded: Vec<Recorded>,
 }
 
 impl Default for Scene {
@@ -359,6 +404,17 @@ impl Scene {
         Scene {
             nav: ui::nav(),
             state,
+            recorded: conversation::bench(),
+        }
+    }
+
+    /// Home, at the top, on the standalone board with `recorded` as its
+    /// conversations.
+    pub fn with_conversations(recorded: Vec<Recorded>) -> Self {
+        Scene {
+            nav: ui::nav(),
+            state: with_conversations(&recorded),
+            recorded,
         }
     }
 
@@ -380,8 +436,31 @@ impl Scene {
     }
 
     /// Render the page as it stands, on whatever is handed in.
+    ///
+    /// With a conversation open, its thread is the recorded one with that
+    /// peer, if there is one, and what it shows is marked read -- in the
+    /// recording, and on the Messages screen and Home, as on the board.
     pub fn draw(&mut self, canvas: &mut impl Canvas) {
-        screens::render(canvas, &mut self.nav, &self.state);
+        let open = self.nav.conversation().map(|c| c.peer());
+        let recorded = self.recorded.iter().find(|r| Some(r.peer) == open);
+        let entries = recorded.map(Recorded::entries).unwrap_or_default();
+        let thread = recorded.map(|r| r.thread(&entries));
+        let read = screens::render_with(canvas, &mut self.nav, &self.state, thread.as_ref());
+        let Some(read) = read else { return };
+        let Some(recorded) = self.recorded.iter_mut().find(|r| r.peer == read.peer) else {
+            return;
+        };
+        recorded.read(read);
+        let row = recorded.row();
+        for slot in self.state.conversations.rows.iter_mut().flatten() {
+            if slot.peer == row.peer {
+                slot.unread = row.unread;
+            }
+        }
+        if self.state.home.unread.is_some() {
+            let unread = self.recorded.iter().flat_map(|r| &r.messages);
+            self.state.home.unread = Some(unread.filter(|m| m.unread).count() as u16);
+        }
     }
 
     /// Press one key. Returns what the board would now have to do, if
@@ -424,6 +503,12 @@ impl Scene {
                 self.nav.edit(Editor::open(field, self.state.radio.config));
             }
             (Action::Set(setting), None) => self.state.radio.config.apply(setting),
+            (Action::Open, _) => {
+                let rows = &self.state.conversations.rows;
+                if let Some(row) = self.nav.selected().and_then(|n| rows[n]) {
+                    self.nav.open_conversation(row.peer);
+                }
+            }
             _ => {}
         }
     }
@@ -563,6 +648,34 @@ mod tests {
         );
     }
 
+    /// Opening the highlighted conversation shows its thread; what the
+    /// thread shows is read, on the Messages screen and on Home, as on the
+    /// board; back is the list, on the line it was opened from.
+    #[cfg(feature = "node")]
+    #[test]
+    fn a_recorded_conversation_is_opened_read_and_left() {
+        let mut scene = Scene::with_state(Fixture::Conversation.state());
+        let before = scene.state.home.unread.unwrap();
+        let actions = scene.run(&script::parse("right down*3 select").unwrap());
+        assert_eq!(actions, [Action::Open]);
+        let row = scene.state.conversations.rows[3].unwrap();
+        assert_eq!(scene.nav.conversation().map(|c| c.peer()), Some(row.peer));
+        assert!(row.unread, "the stranger's question");
+        scene.frame();
+        assert!(!scene.state.conversations.rows[3].unwrap().unread);
+        assert_eq!(scene.state.home.unread, Some(before - 1));
+        scene.press(Input::Back);
+        assert_eq!(scene.nav.conversation(), None);
+        assert_eq!(scene.nav.selected(), Some(3));
+        // A screen with no conversations opens nothing.
+        let mut empty = Scene::with_state(standalone());
+        empty.state.conversations = Default::default();
+        assert!(empty
+            .run(&script::parse("right select").unwrap())
+            .is_empty());
+        assert_eq!(empty.nav.conversation(), None);
+    }
+
     /// The frame is the page the core would draw for the same state.
     #[test]
     fn the_frame_is_the_core_page() {
@@ -604,6 +717,11 @@ mod tests {
         assert_eq!(Fixture::named("populated"), Some(Fixture::Populated));
         assert_eq!(Fixture::named("standalone"), Some(Fixture::Standalone));
         assert_eq!(Fixture::named("2g4"), Some(Fixture::HighFrequency));
+        assert_eq!(Fixture::named("conversation"), Some(Fixture::Conversation));
+        let talk = Fixture::Conversation.state();
+        assert_eq!(talk.home.host, Host::None);
+        assert!(talk.home.unread.unwrap() > 0);
+        assert!(talk.conversations.rows[0].is_some());
         assert_eq!(Fixture::named("full"), None);
         assert_eq!(standalone().home.host, Host::None);
         assert!(standalone().radio.tnc);

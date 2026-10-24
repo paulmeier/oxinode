@@ -112,7 +112,7 @@ rather than when the 784 KB runs out. Measured on 2026-10-23, `rns-core`
 |---|---:|---:|
 | `rnode` | 333,708 | 54,364 |
 | `rnode` with `node` | 541,720 | 120,828 |
-| ceiling in `tools/test.sh` | 589,824 (576 KiB) | 131,072 (128 KiB) |
+| ceiling in `tools/test.sh` | 622,592 (608 KiB) | 131,072 (128 KiB) |
 
 Measured again on 2026-10-23 with the board's identity, which added 8,384
 bytes of flash, most of it key generation. The roughly 200 KB the stack
@@ -123,6 +123,15 @@ and the curve arithmetic. The RAM is the heap and a little more. The ceilings
 leave room for what the messaging work adds next and little beyond it;
 raising one is a deliberate edit to `test.sh`, made with its reason in the
 change that needs it.
+
+The flash ceiling was 576 KiB until 2026-10-24, when the conversation
+screens ([#62](https://github.com/paulmeier/oxinode/issues/62)) took the
+image from 583,280 bytes to 593,384 (RAM 122,580): 10,104 bytes for the
+thread's layout and wrapping, the windowed page, and the modem loop's part
+in opening a conversation and marking it read. It is now 608 KiB, about
+29 KB over that, which is room for sending
+([#63](https://github.com/paulmeier/oxinode/issues/63)) and not much more;
+the store and text entry make their own case when they come.
 
 ## How the layout is kept honest
 

@@ -43,7 +43,7 @@ use embassy_nrf::peripherals::RNG;
 use embassy_nrf::Peri;
 use oxinode_core::mode::{Change, Mode, Seen};
 use oxinode_core::rnode::air::Signal;
-use oxinode_core::screens::{NodeHashes, Peers};
+use oxinode_core::screens::{Conversations, NodeHashes, Peers, Read, Thread};
 
 use crate::store::{RecordFlash, Storage};
 
@@ -349,6 +349,42 @@ mod imp {
         /// Messages not yet read, for the Home screen.
         pub fn unread(&self) -> Option<u16> {
             Some(self.station.messages.unread().min(usize::from(u16::MAX)) as u16)
+        }
+
+        /// What the Messages screen shows.
+        pub fn conversations(&self) -> Conversations {
+            self.station
+                .messages
+                .conversations(&self.station.peers, now_ms())
+        }
+
+        /// Hand `draw` the thread with `peer`, if a conversation is open:
+        /// borrowed from the store for as long as the drawing takes.
+        pub fn with_thread<R>(
+            &self,
+            peer: Option<[u8; 16]>,
+            draw: impl FnOnce(Option<&Thread<'_>>) -> R,
+        ) -> R {
+            let Some(peer) = peer else {
+                return draw(None);
+            };
+            let messages = &self.station.messages;
+            let entries = messages.entries(&peer, now_ms());
+            let thread = messages.thread(&peer, &self.station.peers, &entries);
+            draw(Some(&thread))
+        }
+
+        /// The panel has shown a conversation this far.
+        pub fn read(&mut self, read: Read) {
+            let marked = self.station.messages.read(read);
+            if marked > 0 {
+                defmt::info!(
+                    "node: {=usize} read from {=[u8]:02x}; {=usize} unread",
+                    marked,
+                    read.peer[..5],
+                    self.station.messages.unread()
+                );
+            }
         }
 
         /// A number that moves when a new message arrives, for the panel to
@@ -741,6 +777,23 @@ impl Listener {
     pub fn unread(&self) -> Option<u16> {
         None
     }
+
+    #[inline(always)]
+    pub fn conversations(&self) -> Conversations {
+        Conversations::default()
+    }
+
+    #[inline(always)]
+    pub fn with_thread<R>(
+        &self,
+        _peer: Option<[u8; 16]>,
+        draw: impl FnOnce(Option<&Thread<'_>>) -> R,
+    ) -> R {
+        draw(None)
+    }
+
+    #[inline(always)]
+    pub fn read(&mut self, _read: Read) {}
 
     #[inline(always)]
     pub fn arrived(&self) -> u32 {

@@ -1,9 +1,9 @@
 //! `oxinode-sim`: look at the panel without a board.
 //!
 //! ```text
-//! oxinode-sim render [--script S] [--state F] [--panel WxH] [--text] -o out.png
-//! oxinode-sim steps  [--script S] [--state F] [--panel WxH] --out DIR
-//! oxinode-sim tty    [--script S] [--state F] [--braille | --half]
+//! oxinode-sim render [--script S] [--state F] [--conversation C] [--panel WxH] [--text] -o out.png
+//! oxinode-sim steps  [--script S] [--state F] [--conversation C] [--panel WxH] --out DIR
+//! oxinode-sim tty    [--script S] [--state F] [--conversation C] [--braille | --half]
 //! oxinode-sim golden [--update] [--dir DIR] [--diff DIR]
 //! oxinode-sim raw    FILE -o out.png
 //! ```
@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use oxinode_core::sh1107;
+use oxinode_sim::conversation;
 use oxinode_sim::golden::{self, Verdict};
 use oxinode_sim::image::{frame_from_bytes, Image};
 use oxinode_sim::panel::Size;
@@ -28,12 +29,12 @@ use oxinode_sim::tty;
 const USAGE: &str = "\
 usage: oxinode-sim <command> [options]
 
-  render [--script S] [--state F] [--panel WxH] [--text] -o FILE.png
+  render [--script S] [--state F] [--conversation C] [--panel WxH] [--text] -o FILE.png
       Run a script from a fresh panel and write the final frame as a PNG at
       4x with a pixel grid; --text prints it as braille instead.
-  steps  [--script S] [--state F] [--panel WxH] --out DIR
+  steps  [--script S] [--state F] [--conversation C] [--panel WxH] --out DIR
       The same, writing one PNG per step: 00-start.png, 01-right.png, ...
-  tty    [--script S] [--state F] [--braille | --half]
+  tty    [--script S] [--state F] [--conversation C] [--braille | --half]
       Drive the real menu tree with the arrow keys, in the terminal.
   golden [--update] [--dir DIR] [--diff DIR]
       Compare every screen and menu against the committed images (default
@@ -46,8 +47,12 @@ A script is key names separated by spaces: left right up down select back,
 with word*N for repeats and # for comments. --state is the fixture the
 screens draw from: `populated` (the default) is a board mid-session with a
 host on the line, `empty` one that knows nothing yet, `standalone` a TNC
-with no host attached -- the one whose settings the panel may change -- and
-`2g4` that TNC on the other band, at 2478 MHz.
+with no host attached -- the one whose settings the panel may change --
+`2g4` that TNC on the other band, at 2478 MHz, and `conversation` that TNC
+with the bundled conversations (sim/conversations/bench.txt), some unread.
+--conversation reads conversations from a file in that format instead, and
+puts them on the standalone board; the Messages screen and a thread, in an
+image built with the node, draw from them.
 --panel is the size to draw on: 128x128 (the default, the board's own) or
 any other, such as 128x64; the golden set is held at both of those.
 ";
@@ -58,6 +63,7 @@ enum Command {
     Render {
         script: String,
         state: Fixture,
+        conversation: Option<PathBuf>,
         panel: Size,
         text: bool,
         out: Option<PathBuf>,
@@ -65,12 +71,14 @@ enum Command {
     Steps {
         script: String,
         state: Fixture,
+        conversation: Option<PathBuf>,
         panel: Size,
         out: PathBuf,
     },
     Tty {
         script: String,
         state: Fixture,
+        conversation: Option<PathBuf>,
         cells: Option<Cells>,
     },
     Golden {
@@ -101,6 +109,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     };
     let mut script = String::new();
     let mut state = Fixture::Populated;
+    let mut conversation = None;
     let mut panel = Size::SQUARE;
     let mut text = false;
     let mut out = None;
@@ -122,9 +131,13 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--state" => {
                 let v = value("--state")?;
                 state = Fixture::named(&v).ok_or_else(|| {
-                    format!("--state: `{v}` is not `empty`, `populated`, `standalone` or `2g4`")
+                    format!(
+                        "--state: `{v}` is not `empty`, `populated`, `standalone`, `2g4` \
+                         or `conversation`"
+                    )
                 })?;
             }
+            "--conversation" => conversation = Some(PathBuf::from(value("--conversation")?)),
             "--panel" => {
                 let v = value("--panel")?;
                 panel = Size::parse(&v)
@@ -153,6 +166,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             Command::Render {
                 script,
                 state,
+                conversation,
                 panel,
                 text,
                 out,
@@ -161,12 +175,14 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
         "steps" => Command::Steps {
             script,
             state,
+            conversation,
             panel,
             out: out.ok_or("steps: --out DIR is required")?,
         },
         "tty" => Command::Tty {
             script,
             state,
+            conversation,
             cells,
         },
         "golden" => Command::Golden {
@@ -195,11 +211,12 @@ fn run(command: Command) -> Result<(), String> {
         Command::Render {
             script,
             state,
+            conversation,
             panel,
             text,
             out,
         } => {
-            let mut scene = Scene::with_state(state.state());
+            let mut scene = scene(state, conversation)?;
             let actions = scene.run_on(panel, &script::parse(&script).unwrap());
             for action in actions {
                 eprintln!("action: {action:?}");
@@ -219,10 +236,11 @@ fn run(command: Command) -> Result<(), String> {
         Command::Steps {
             script,
             state,
+            conversation,
             panel,
             out,
         } => {
-            let mut scene = Scene::with_state(state.state());
+            let mut scene = scene(state, conversation)?;
             let inputs = script::parse(&script).unwrap();
             fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
             let path = out.join("00-start.png");
@@ -242,9 +260,10 @@ fn run(command: Command) -> Result<(), String> {
         Command::Tty {
             script,
             state,
+            conversation,
             cells,
         } => {
-            let mut scene = Scene::with_state(state.state());
+            let mut scene = scene(state, conversation)?;
             scene.run(&script::parse(&script).unwrap());
             tty::run(scene, cells).map_err(|e| e.to_string())
         }
@@ -310,6 +329,17 @@ fn run(command: Command) -> Result<(), String> {
     }
 }
 
+/// The scene a command starts from: the fixture, or the standalone board
+/// with the conversations in a file.
+fn scene(state: Fixture, conversation: Option<PathBuf>) -> Result<Scene, String> {
+    let Some(path) = conversation else {
+        return Ok(Scene::with_state(state.state()));
+    };
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let recorded = conversation::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Scene::with_conversations(recorded))
+}
+
 fn write_png(path: &std::path::Path, image: &Image) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -361,6 +391,7 @@ mod tests {
             Command::Render {
                 script: "right".into(),
                 state: Fixture::Empty,
+                conversation: None,
                 panel: Size::SQUARE,
                 text: false,
                 out: Some("x.png".into()),
@@ -392,6 +423,14 @@ mod tests {
             }
         ));
         assert!(parse("render --script").unwrap_err().contains("value"));
+        assert!(matches!(
+            parse("render --state conversation --conversation c.txt -o x.png").unwrap(),
+            Command::Render {
+                state: Fixture::Conversation,
+                conversation: Some(path),
+                ..
+            } if path == std::path::Path::new("c.txt")
+        ));
         assert!(parse("render --panel wide -o x.png")
             .unwrap_err()
             .contains("WxH"));
@@ -428,6 +467,31 @@ mod tests {
             parse("golden --update --dir /tmp/g --diff /tmp/d").unwrap(),
             Command::Golden { update: true, .. }
         ));
+    }
+
+    /// A file of conversations is read and put on the standalone board; one
+    /// that is missing or malformed says which, and where.
+    #[test]
+    fn a_conversation_file_is_read_or_refused() {
+        let dir = std::env::temp_dir().join(format!("oxinode-sim-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.txt");
+        fs::write(
+            &good,
+            "peer 00112233445566778899aabbccddeeff Bo\n< 5 verified,unread Hi\n",
+        )
+        .unwrap();
+        let read = scene(Fixture::Populated, Some(good)).unwrap();
+        assert_eq!(read.recorded.len(), 1);
+        assert_eq!(read.state.home.unread, Some(1));
+        assert!(read.state.conversations.rows[0].unwrap().unread);
+        let bad = dir.join("bad.txt");
+        fs::write(&bad, "< 5 verified Hi\n").unwrap();
+        let err = scene(Fixture::Populated, Some(bad)).unwrap_err();
+        assert!(err.contains("bad.txt: line 1"), "{err}");
+        let err = scene(Fixture::Populated, Some(dir.join("none.txt"))).unwrap_err();
+        assert!(err.contains("none.txt"), "{err}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

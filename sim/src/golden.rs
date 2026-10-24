@@ -23,9 +23,12 @@
 //!
 //! And the whole of it again for the image with the node, under `node/`
 //! ([`dir`]), built with the `node` feature: that image's strip has the
-//! Peers screen in it, so none of its pictures is the RNode's. Its set adds
-//! the Peers screen with one peer, a full screen of them, one with no name
-//! and one with nothing known but its address.
+//! Messages and Peers screens in it, so none of its pictures is the RNode's.
+//! Its set adds the Peers screen with one peer, a full screen of them, one
+//! with no name and one with nothing known but its address; and the
+//! Messages screen with one conversation and a full screen of them, and a
+//! conversation open, drawn from the recorded ones in
+//! [`crate::conversation`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -199,6 +202,58 @@ pub fn cases() -> Vec<Case> {
             script: format!("right*{}", Screen::Peers.index()),
             state,
             size: square,
+        });
+    }
+
+    // The Messages screen beyond empty and populated: one conversation and
+    // a screen full of them. Then a conversation open: the bench's, at its
+    // first unread message; one with a single message; a long one opened
+    // part-way down; a message longer than the screen, from its start; every
+    // state a sent message can be in; a sender not verified; characters the
+    // font lacks; and the reply menu.
+    #[cfg(feature = "node")]
+    {
+        use crate::conversation;
+        let recorded = conversation::bench();
+        let named = |name: Option<&str>| {
+            let r = recorded.iter().find(|r| r.name.as_deref() == name);
+            vec![r.expect("a bundled conversation").clone()]
+        };
+        let messages = format!("right*{}", Screen::Messages.index());
+        cases.push(Case {
+            name: "messages-one".to_string(),
+            script: messages.clone(),
+            state: scene::with_conversations(&named(Some("Galaxy S9"))),
+            size: square,
+        });
+        cases.push(Case {
+            name: "messages-full".to_string(),
+            script: messages.clone(),
+            state: scene::full_of_conversations(),
+            size: square,
+        });
+        for (name, who, then) in [
+            ("thread", Some("Bench peer"), ""),
+            ("thread-one", Some("Galaxy S9"), ""),
+            ("thread-scrolled", Some("Chatty"), ""),
+            ("thread-long-message", Some("Long winded"), "left"),
+            ("thread-outgoing", Some("Ana"), ""),
+            ("thread-unverified", None, ""),
+            ("thread-undrawable", Some("Zo\u{eb} \u{1f642}"), ""),
+            ("thread-menu-back", Some("Bench peer"), "select"),
+        ] {
+            cases.push(Case {
+                name: format!("messages-{name}"),
+                script: format!("{messages} select {then}"),
+                state: scene::with_conversations(&named(who)),
+                size: square,
+            });
+        }
+        cases.push(Case {
+            name: format!("{}/messages-thread", Size::WIDE.name()),
+            script: format!("{messages} select"),
+            state: scene::with_conversations(&named(Some("Bench peer"))),
+            size: Size::WIDE,
         });
     }
 
@@ -484,10 +539,15 @@ mod tests {
         // menu windows, a scroll, every editor, three refusals, a notice and
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
-        // confirmed. With the node, four more of the Peers screen and Home
-        // with messages unread.
-        let peers = if cfg!(feature = "node") { 4 + 1 } else { 0 };
-        let square = peers
+        // confirmed. With the node, four more of the Peers screen, Home
+        // with messages unread, two more of the Messages screen and eight
+        // conversations, and a conversation on the second panel.
+        let node = if cfg!(feature = "node") {
+            4 + 1 + 2 + 8
+        } else {
+            0
+        };
+        let square = node
             + 2 * Screen::COUNT
             + items
             + 3
@@ -502,7 +562,14 @@ mod tests {
             + 1
             + 2
             + 2;
-        let wide = Screen::COUNT + 3 + 1 + Field::ALL.len() + 3 + 1 + 1;
+        let wide = Screen::COUNT
+            + 3
+            + 1
+            + Field::ALL.len()
+            + 3
+            + 1
+            + 1
+            + usize::from(cfg!(feature = "node"));
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
         for field in Field::ALL {
@@ -558,7 +625,8 @@ mod tests {
                     let selected = scene.nav.menu_item().expect("menu open");
                     // The second panel names its menu cases by position.
                     if case.size == Size::SQUARE {
-                        assert_eq!(slug(screen.menu()[selected].label), item, "{}", case.name);
+                        let (_, items) = scene.nav.menu();
+                        assert_eq!(slug(items[selected].label), item, "{}", case.name);
                     }
                 }
                 None => assert!(!scene.nav.menu_is_open(), "{}", case.name),
@@ -584,6 +652,11 @@ mod tests {
                 }
             } else if stem.starts_with("radio-locked-") {
                 assert!(scene.nav.notice_shown().is_some(), "{}", case.name);
+            } else if stem.starts_with("messages-thread") {
+                // The conversation the case was given, open.
+                let open = scene.nav.conversation().expect(&case.name);
+                let row = case.state.conversations.rows[0].unwrap();
+                assert_eq!(open.peer(), row.peer, "{}", case.name);
             } else {
                 assert!(!scene.nav.is_editing(), "{}", case.name);
             }

@@ -53,14 +53,17 @@ Five modules, no dependencies, `no_std`, `forbid(unsafe_code)`:
   so a shorter panel loses lines and nothing else and a narrower one loses
   characters. A test pins the 128 × 128 layout to the numbers the interface
   was first drawn with.
-- **`nav`**: `Input`, `Item`, `Screen`, `Modal`, `Outcome`, `NoModal`, and
-  `Nav<A, M>`. Screens are data the application supplies, a slice of
-  descriptors (title, menu title, icon, menu), and the navigator is generic
-  over the action type its menu items carry. It hands an action back from
-  `handle` when the user picks one and never interprets it.
+- **`nav`**: `Input`, `Item`, `Screen`, `Modal`, `Outcome`, `NoModal`,
+  `Detail`, `NoDetail`, and `Nav<A, M, D>`. Screens are data the application
+  supplies, a slice of descriptors (title, menu title, icon, menu, and
+  `open` for a list), and the navigator is generic over the action type its
+  menu items carry. It hands an action back from `handle` when the user
+  picks one and never interprets it.
 - **`draw`**: the title bar, the icon strip, the menu (windowed around its
   highlight when it does not fit), the scrollbar, and `page`, which composes
-  them.
+  them. `page_of` takes the content as a `Content`: every line, a list with
+  nothing in it yet, or a window onto content too long to hold, whose total
+  the scrollbar is drawn from.
 - **`font`**: the 5 × 7 font.
 
 And one optional module, `eg`, behind the `embedded-graphics` feature, which
@@ -77,12 +80,17 @@ The crate has a README and a doctest showing a two-screen application in
 thirty lines. It is `publish = false` under a name that is free on crates.io,
 waiting for a second device.
 
-## Three levels
+## Three levels, and two exceptions
 
 1. **Screens**, side by side, moved between with left and right. Content is a
    list of text lines the application formats into its own buffers; `page`
    draws the ones that fit from the scroll position with a scrollbar when
-   there are more.
+   there are more. A screen whose descriptor has `open` set is a **list**:
+   each line is an entry, up and down move a highlight drawn as a bar with
+   the text knocked out of it (the view follows it, and it stops at the
+   ends), and OK hands back the `open` action for the caller to act on
+   `Nav::selected`. A list has no menu, which `Nav::new` asserts, and with
+   no entries it is an ordinary screen.
 2. **A menu** over each screen, opened with OK. Each item carries an action of
    the application's type, or `None` for an item that only closes the menu.
 3. **A modal**, opened by the caller and not by a menu, that takes every key
@@ -92,14 +100,24 @@ waiting for a second device.
    configuration to edit and only the caller knows whether a host has the
    line. The firmware's `perform` does it in six lines; the simulator's
    `Scene::press` does it in the same six.
+4. **A detail**, the other exception: opened by the caller over a screen,
+   browsed like one. It has its own title, scroll and menu (OK opens it);
+   up and down scroll it by line, left and right move it by whatever the
+   application says its parts are (`Detail::step`, clamped by the
+   navigator), and back closes it and puts the screen under it back as it
+   was, scroll and highlight. The strip keeps marking the screen it was
+   opened from. A menu or a modal can be opened over it. A modal does not
+   scroll; a detail is what something longer than a screen is.
 
 ## What oxinode supplies
 
-**Screens** (`core/src/ui.rs`): the five descriptors (six with the node,
-which adds Peers after Home), oxinode's `Action`
-enum, and `Overlay`, its `Modal`, which is the editor or the notice. A
-`NavExt` trait adds the five things oxinode asks of the navigator beyond what
-the crate provides.
+**Screens** (`core/src/ui.rs`): the five descriptors (seven with the node,
+which adds Messages and Peers after Home), oxinode's `Action`
+enum, `Overlay`, its `Modal`, which is the editor or the notice, and
+`Conversation`, its `Detail`, the thread with one peer. A `NavExt` trait adds
+the things oxinode asks of the navigator beyond what the crate provides:
+the current screen as the enum, and the overlays and the conversation by
+name.
 
 **Content** (`core/src/screens.rs`): what each screen is allowed to know. It
 is handed a `State`, a small struct per screen of plain values, and formats and
@@ -320,6 +338,36 @@ cannot show (an image, a file, audio, telemetry, anything unknown) is marked
 as having an attachment. Fields that only describe the message (its icon,
 thread, ticket, renderer, what it replies to) do not count. A new message
 lights the panel and the Home screen's unread count.
+
+### Conversations on the panel
+
+The messages from one sender are a conversation. The Messages screen is a
+list of them (`Messages::conversations`, newest first, named from the peer
+table), copied into `State` once per redraw like everything else on a
+screen. Choosing one hands back `Action::Open`; the modem loop answers it
+with `NavExt::open_conversation` for the peer on that line of the list as
+it was last drawn, so a message arriving between the drawing and the press
+cannot change which conversation opens.
+
+A thread is not copied: sixteen messages of up to 295 bytes would be a
+State five kilobytes larger on every redraw. `screens::render_with` takes
+the open conversation's `Thread` instead, borrowed from the store
+(`Messages::entries`) for the length of one drawing. The thread is laid out
+by one function, `Thread::each`, a header per message, a note about an
+unverified sender, the text wrapped by `wrap_drawn` (which measures in
+characters as the panel draws them, keeps line breaks and never cuts a
+character), and a blank line between messages; its length, where each
+message starts, and the window of lines on the panel are all taken from it,
+so they cannot disagree. Only the window is formatted, and `page_of` is
+handed it with the total. The `Conversation` detail keeps where each message
+starts, for left and right, and whether it has been placed: the first
+drawing puts the view at the first unread message.
+
+`render_with` returns how many of the thread's messages have had their last
+line in view (`Thread::read_through`), and the loop marks those read
+(`Messages::read`), but only when the panel is lit: the page is drawn into
+the frame while the panel is out too, and nobody read that. Under a menu
+nothing is counted, because the menu covers the middle of the thread.
 
 ## Redraw stays incremental
 

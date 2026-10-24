@@ -20,16 +20,23 @@
 //! The one exception -- one value, opened from a menu item -- is the
 //! crate's [`Modal`]. oxinode's is [`Overlay`]: an [`Editor`] for one radio
 //! parameter, or a [`Lock`] notice saying why it cannot be edited right now.
+//!
+//! The other is the crate's [`Detail`]: oxinode's is a [`Conversation`],
+//! the thread with one peer, opened from the Messages screen's list. Like an
+//! editor it is opened by the caller ([`NavExt::open_conversation`]), in
+//! answer to [`Action::Open`], because which peer the highlighted line is
+//! is the caller's to know.
 //! An editor is opened by the caller with [`NavExt::edit`] rather than by
 //! the menu itself, because opening one needs the configuration to edit and
 //! the navigator is not handed that -- and because the caller is the one
 //! that knows whether a host has the radio, in which case it opens a
 //! [`NavExt::notice`] instead.
 
-use monopanel::{Icon, Item, Layout, Modal, Outcome, Screen as Spec};
+use monopanel::{Detail, Icon, Item, Layout, Modal, Outcome, Screen as Spec};
 
 use crate::edit::{Confirm, Editor, Field, Lock};
 use crate::lr1121::config::Setting;
+use crate::screens::{Thread, THREAD};
 use crate::sh1107;
 
 pub use monopanel::Input;
@@ -51,6 +58,10 @@ pub const LAYOUT: Layout = Layout::of(sh1107::WIDTH, sh1107::HEIGHT);
 pub enum Screen {
     /// What the modem is doing right now.
     Home,
+    /// The conversations, one a line, each opening the thread with its
+    /// peer. Only in an image with the node.
+    #[cfg(feature = "node")]
+    Messages,
     /// Who else is around: the peers the node has heard. Only in an image
     /// with the node; an RNode has no peers of its own.
     #[cfg(feature = "node")]
@@ -83,6 +94,10 @@ const HOME_MENU: [Item<Action>; 4] = [
     Item::new("Redraw", Action::Redraw),
     Item::new("Announce Now", Action::Announce),
 ];
+
+/// What a conversation offers: nothing yet but the way out. The replies
+/// arrive with sending, and are not listed before they do anything.
+const REPLY_MENU: [Item<Action>; 1] = [Item::BACK];
 
 /// What [`Screen::Peers`] offers: nothing yet but the way out. Messaging a
 /// peer arrives with conversations, and is not listed before it does
@@ -130,6 +145,8 @@ const SYSTEM_MENU: [Item<Action>; 3] = [
 /// font is: hand-entered hex has no symptom other than a wrong picture.
 const HOUSE: Icon = [0x78, 0x7c, 0x06, 0x77, 0x06, 0x7c, 0x78];
 #[cfg(feature = "node")]
+const BUBBLE: Icon = [0x4e, 0x31, 0x15, 0x11, 0x15, 0x11, 0x0e]; // a speech bubble
+#[cfg(feature = "node")]
 const PEOPLE: Icon = [0x72, 0x77, 0x72, 0x00, 0x72, 0x77, 0x72]; // two people
 const ANTENNA: Icon = [0x04, 0x12, 0x09, 0x7d, 0x09, 0x12, 0x04]; // radiating
 const RUNE: Icon = [0x00, 0x22, 0x14, 0x7f, 0x36, 0x00, 0x00]; // Bluetooth's
@@ -148,6 +165,15 @@ pub const SCREENS: [Spec<Action>; Screen::COUNT] = [
         menu_title: "Home Action",
         icon: HOUSE,
         menu: &HOME_MENU,
+        open: None,
+    },
+    #[cfg(feature = "node")]
+    Spec {
+        title: "Messages",
+        menu_title: "",
+        icon: BUBBLE,
+        menu: &[],
+        open: Some(Action::Open),
     },
     #[cfg(feature = "node")]
     Spec {
@@ -155,41 +181,48 @@ pub const SCREENS: [Spec<Action>; Screen::COUNT] = [
         menu_title: "Peers Action",
         icon: PEOPLE,
         menu: &PEERS_MENU,
+        open: None,
     },
     Spec {
         title: "Radio",
         menu_title: "Radio Action",
         icon: ANTENNA,
         menu: &RADIO_MENU,
+        open: None,
     },
     Spec {
         title: "Bluetooth",
         menu_title: "Bluetooth Action",
         icon: RUNE,
         menu: &BLUETOOTH_MENU,
+        open: None,
     },
     Spec {
         title: "Position",
         menu_title: "Position Action",
         icon: PIN,
         menu: &POSITION_MENU,
+        open: None,
     },
     Spec {
         title: "System",
         menu_title: "System Action",
         icon: COG,
         menu: &SYSTEM_MENU,
+        open: None,
     },
 ];
 
-/// One with the node, for the Peers screen; none without.
-const NODE: usize = cfg!(feature = "node") as usize;
+/// Two with the node, for the Messages and Peers screens; none without.
+const NODE: usize = 2 * cfg!(feature = "node") as usize;
 
 impl Screen {
-    /// Every screen, in strip order. Peers sits next to Home: it is what a
-    /// node is looked at for.
+    /// Every screen, in strip order. Messages and Peers sit next to Home:
+    /// they are what a node is looked at for.
     pub const ALL: [Screen; 5 + NODE] = [
         Screen::Home,
+        #[cfg(feature = "node")]
+        Screen::Messages,
         #[cfg(feature = "node")]
         Screen::Peers,
         Screen::Radio,
@@ -206,7 +239,9 @@ impl Screen {
         match self {
             Screen::Home => 0,
             #[cfg(feature = "node")]
-            Screen::Peers => 1,
+            Screen::Messages => 1,
+            #[cfg(feature = "node")]
+            Screen::Peers => 2,
             Screen::Radio => 1 + NODE,
             Screen::Bluetooth => 2 + NODE,
             Screen::Position => 3 + NODE,
@@ -282,6 +317,10 @@ pub enum Action {
     /// Announce the board now, as soon as the announce budget allows. Only
     /// offered in an image with the node.
     Announce,
+    /// Open the conversation on the highlighted line of the Messages
+    /// screen. The caller answers with [`NavExt::open_conversation`]; see
+    /// the module docs.
+    Open,
 }
 
 impl Action {
@@ -300,6 +339,7 @@ impl Action {
             Action::Reboot => "reboot",
             Action::Bootloader => "bootloader",
             Action::Announce => "announce now",
+            Action::Open => "open conversation",
         }
     }
 
@@ -370,9 +410,85 @@ impl Modal<Action> for Overlay {
     }
 }
 
+/// The thread with one peer, open over the Messages screen: the crate's
+/// detail level.
+///
+/// It holds which peer, and what the last drawing of the thread said about
+/// it: where each message starts, for left and right to stop at, and
+/// whether it has been placed yet -- at its first unread message, the first
+/// time it is drawn. The messages themselves are the node's, and are handed
+/// to [`crate::screens::render_with`] each time.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Conversation {
+    peer: [u8; 16],
+    stops: [u16; THREAD],
+    count: u8,
+    placed: bool,
+}
+
+impl Conversation {
+    /// The conversation with `peer`, not yet drawn.
+    pub const fn new(peer: [u8; 16]) -> Self {
+        Conversation {
+            peer,
+            stops: [0; THREAD],
+            count: 0,
+            placed: false,
+        }
+    }
+
+    /// Whose it is.
+    pub const fn peer(&self) -> [u8; 16] {
+        self.peer
+    }
+
+    /// Whether it has been drawn, and so placed, once.
+    pub const fn placed(&self) -> bool {
+        self.placed
+    }
+
+    /// Learn where the thread's messages start, from the thread as it is
+    /// drawn now, and that it has been placed.
+    pub fn lay_out(&mut self, thread: &Thread<'_>) {
+        self.count = thread.stops(&mut self.stops) as u8;
+        self.placed = true;
+    }
+
+    fn stops(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
+        self.stops[..usize::from(self.count)]
+            .iter()
+            .map(|&s| usize::from(s))
+    }
+}
+
+impl Detail<Action> for Conversation {
+    fn title(&self) -> &'static str {
+        "Thread"
+    }
+
+    fn menu_title(&self) -> &'static str {
+        "Reply"
+    }
+
+    fn menu(&self) -> &'static [Item<Action>] {
+        &REPLY_MENU
+    }
+
+    /// By message: right to the start of the next one, or the end if there
+    /// is no next; left to the start of the one the view is in, or of the
+    /// one before if the view starts on one.
+    fn step(&self, top: usize, forward: bool) -> usize {
+        if forward {
+            self.stops().find(|&s| s > top).unwrap_or(usize::MAX)
+        } else {
+            self.stops().rev().find(|&s| s < top).unwrap_or(0)
+        }
+    }
+}
+
 /// Where the user is: the interface crate's navigator, over oxinode's
-/// screens, actions and overlay.
-pub type Nav = monopanel::Nav<Action, Overlay>;
+/// screens, actions, overlay and conversation.
+pub type Nav = monopanel::Nav<Action, Overlay, Conversation>;
 
 /// A navigator on the Home screen, at its top, with nothing open.
 pub const fn nav() -> Nav {
@@ -397,6 +513,13 @@ pub trait NavExt {
     /// caller's answer to [`Action::Edit`] -- or to any action for which
     /// [`Action::changes_the_radio`] holds -- while a host has the line.
     fn notice(&mut self, lock: Lock);
+    /// The conversation, while one is open.
+    fn conversation(&self) -> Option<&Conversation>;
+    /// The conversation, to tell it what was drawn.
+    fn conversation_mut(&mut self) -> Option<&mut Conversation>;
+    /// Open the conversation with `peer` over the Messages screen: the
+    /// caller's answer to [`Action::Open`].
+    fn open_conversation(&mut self, peer: [u8; 16]);
 }
 
 impl NavExt for Nav {
@@ -428,6 +551,18 @@ impl NavExt for Nav {
 
     fn notice(&mut self, lock: Lock) {
         self.open(Overlay::Notice(lock));
+    }
+
+    fn conversation(&self) -> Option<&Conversation> {
+        self.detail()
+    }
+
+    fn conversation_mut(&mut self) -> Option<&mut Conversation> {
+        self.detail_mut()
+    }
+
+    fn open_conversation(&mut self, peer: [u8; 16]) {
+        self.open_detail(Conversation::new(peer));
     }
 }
 
@@ -497,11 +632,16 @@ mod tests {
         assert_eq!(nav.current(), Screen::Home, "wrapped");
     }
 
-    /// Every menu starts with Back, so every menu can be left.
+    /// Every menu starts with Back, so every menu can be left. A list has
+    /// none: select opens what is highlighted.
     #[test]
     fn every_menu_can_be_left() {
         for screen in Screen::ALL {
             let items = screen.menu();
+            if screen.spec().open.is_some() {
+                assert!(items.is_empty(), "{screen:?} is a list with a menu");
+                continue;
+            }
             assert_eq!(items[0], Item::BACK, "{screen:?}");
             assert_eq!(
                 items.iter().filter(|i| i.action.is_none()).count(),
@@ -573,6 +713,98 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- conversations -------------------------------------------------
+
+    /// The Messages screen sits next to Home, is a list, and hands back
+    /// `Open` for its highlighted line; the conversation the caller opens
+    /// over it is titled, has the reply menu, and keeps the strip on it.
+    #[cfg(feature = "node")]
+    #[test]
+    fn messages_is_a_list_that_opens_a_conversation() {
+        assert_eq!(Screen::Messages.index(), 1);
+        assert_eq!(Screen::Messages.spec().open, Some(Action::Open));
+        assert!(!Action::Open.changes_the_radio(), "reading is the panel's");
+        let mut nav = nav();
+        nav.handle(Input::Right);
+        assert_eq!(nav.current(), Screen::Messages);
+        nav.set_content(2, LAYOUT.visible_lines());
+        nav.set_entries(2);
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), Some(Action::Open));
+        assert_eq!(nav.selected(), Some(1));
+        nav.open_conversation([7; 16]);
+        assert_eq!(nav.conversation().map(Conversation::peer), Some([7; 16]));
+        assert_eq!(nav.title(), "Thread");
+        assert_eq!(nav.current(), Screen::Messages);
+        nav.handle(Input::Select);
+        assert_eq!(nav.menu(), ("Reply", &REPLY_MENU[..]));
+        assert_eq!(nav.handle(Input::Select), None, "Back only, for now");
+        nav.handle(Input::Back);
+        assert_eq!(nav.conversation(), None);
+        assert_eq!(nav.selected(), Some(1), "back on the line it opened");
+    }
+
+    /// Every title clears both corners of the title bar with a cell to
+    /// spare, at their widest: a full battery and a board's name.
+    #[test]
+    fn every_title_clears_the_corners() {
+        use monopanel::font::{width_of, ADVANCE};
+        let width = LAYOUT.width;
+        let left = 2 + width_of("100%");
+        let right = width - 2 - width_of("7F23");
+        let titles = Screen::ALL
+            .iter()
+            .map(|s| s.title())
+            .chain([Conversation::new([0; 16]).title()]);
+        for title in titles {
+            let x = (width - width_of(title)) / 2;
+            assert!(x >= left + ADVANCE, "{title} meets the battery");
+            assert!(
+                x + width_of(title) + ADVANCE <= right,
+                "{title} meets the name"
+            );
+        }
+    }
+
+    /// Left and right move a conversation by message: to the next start,
+    /// or the end; to the start of the one in view, or the one before.
+    #[test]
+    fn a_conversation_steps_by_message() {
+        let mut c = Conversation::new([0; 16]);
+        c.stops[..3].copy_from_slice(&[0, 4, 7]);
+        c.count = 3;
+        assert_eq!(c.step(0, true), 4);
+        assert_eq!(c.step(5, true), 7);
+        assert_eq!(c.step(7, true), usize::MAX, "the end");
+        assert_eq!(c.step(7, false), 4);
+        assert_eq!(c.step(6, false), 4, "the start of the one in view");
+        assert_eq!(c.step(4, false), 0);
+        assert_eq!(c.step(0, false), 0);
+        let empty = Conversation::new([0; 16]);
+        assert_eq!(empty.step(3, true), usize::MAX);
+        assert_eq!(empty.step(3, false), 0);
+        assert!(!empty.placed());
+    }
+
+    /// The speech bubble, drawn back as art: an icon typed as hex has no
+    /// symptom but a wrong picture.
+    #[cfg(feature = "node")]
+    #[test]
+    fn the_bubble_is_a_bubble() {
+        let art: Vec<String> = (0..7)
+            .map(|row| {
+                BUBBLE
+                    .iter()
+                    .map(|col| if col >> row & 1 == 1 { '#' } else { '.' })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            art,
+            [".#####.", "#.....#", "#.#.#.#", "#.....#", ".#####.", ".#.....", "#......",]
+        );
     }
 
     // ---- the editor level ------------------------------------------------

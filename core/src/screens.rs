@@ -1,6 +1,6 @@
 //! What each screen is allowed to know, and how it is drawn from that.
 //!
-//! The navigator can move between the screens (five, or six with the node)
+//! The navigator can move between the screens (five, or seven with the node)
 //! and the pad can drive it; this is what the screens *say*. The division the navigator enforces holds:
 //! [`crate::ui`] never decides what is true, and neither does this module. It
 //! is handed a [`State`] -- plain values, copied out of the modem loop by the
@@ -32,7 +32,7 @@
 
 use core::fmt::Write;
 
-use monopanel::{font, page, Canvas, Layout};
+use monopanel::{font, page, page_of, Canvas, Content, Layout};
 
 use crate::battery;
 use crate::ble::NAME_LEN;
@@ -61,6 +61,14 @@ pub const MAX_LINES: usize = 2 * PEERS + 1;
 
 /// How many peers the Peers screen lists: every one the node keeps.
 pub const PEERS: usize = 16;
+
+/// How many conversations the Messages screen lists: one with each peer the
+/// node keeps, at most.
+pub const CONVERSATIONS: usize = PEERS;
+
+/// The most messages one conversation shows, both ways together: as many as
+/// the node keeps received, and as many again for the ones it sends.
+pub const THREAD: usize = 32;
 
 /// Which host has the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -355,6 +363,106 @@ pub struct Peers {
     pub rows: [Option<PeerRow>; PEERS],
 }
 
+/// One line of the Messages screen: a peer the board has a conversation
+/// with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConversationRow {
+    /// Its LXMF address: what the conversation is opened by, and what
+    /// stands in for a name it did not give.
+    pub peer: [u8; 16],
+    pub name: Option<PeerName>,
+    /// Something from it has not been read.
+    pub unread: bool,
+    /// Seconds since the last message, either way.
+    pub age_s: Option<u32>,
+}
+
+/// What the Messages screen knows: the conversations, the one with the
+/// newest message first. Only an image with the node has the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Conversations {
+    pub rows: [Option<ConversationRow>; CONVERSATIONS],
+}
+
+/// What the board believes about who sent a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// Signed by the key the sender announced.
+    Verified,
+    /// The sender's key has not been heard; it has been asked for.
+    Unverified,
+    /// The sender's key was heard after the message came, and did not sign
+    /// it. Marked so for good.
+    Failed,
+}
+
+/// Where a message the board sends has got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Waiting to go: for a path, for the channel, or for a host to leave.
+    Queued,
+    /// On the air, and not yet proved.
+    Sent,
+    /// The recipient's proof came back.
+    Delivered,
+    /// It never was, after every retry.
+    Failed,
+}
+
+impl Delivery {
+    /// The word on the screen.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Delivery::Queued => "queued",
+            Delivery::Sent => "sent",
+            Delivery::Delivered => "delivered",
+            Delivery::Failed => "failed",
+        }
+    }
+}
+
+/// Which way a message went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// From the peer, with what the board believes about that.
+    Received(Trust),
+    /// From the board, and where it has got to.
+    Sent(Delivery),
+}
+
+/// One message of a conversation, as the thread draws it: borrowed from
+/// wherever the messages are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry<'a> {
+    pub direction: Direction,
+    /// Seconds since it arrived, or since it was written.
+    pub age_s: Option<u32>,
+    /// LXMF's title, which phones send empty.
+    pub title: &'a str,
+    pub content: &'a str,
+    /// It carried something the board does not show.
+    pub attachment: bool,
+    /// Received and not yet read.
+    pub unread: bool,
+}
+
+/// One conversation: the peer, and its messages oldest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thread<'a> {
+    pub peer: [u8; 16],
+    pub name: Option<PeerName>,
+    pub entries: &'a [Entry<'a>],
+}
+
+/// How far into a conversation the panel has shown: the first `through` of
+/// its entries have had their last line in view. What the caller marks
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Read {
+    pub peer: [u8; 16],
+    pub through: usize,
+}
+
 /// Everything the screens know between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct State {
@@ -368,6 +476,7 @@ pub struct State {
     pub position: Position,
     pub system: System,
     pub peers: Peers,
+    pub conversations: Conversations,
 }
 
 /// The free RAM figure: what lies between the end of static data and the
@@ -495,6 +604,86 @@ pub fn wrap(text: &str, width: usize) -> impl Iterator<Item = &str> {
     })
 }
 
+/// How many cells of the panel a character takes once [`drawable`] has
+/// folded it: three for an ellipsis, one for everything else.
+fn cells(c: char) -> usize {
+    if c == '\u{2026}' {
+        3
+    } else {
+        1
+    }
+}
+
+/// Break what somebody wrote into lines no wider than `width` cells as the
+/// panel draws them ([`drawable`]): at every newline, at a space where it
+/// can, and mid-word where it must. A blank line between two newlines is
+/// kept as a blank line; spaces at the ends of a line are not, because a
+/// leading space would read as the indent a sent message has.
+///
+/// [`wrap`] is for the screens' own sentences, which are ASCII; this is for
+/// text from anywhere, so it measures in characters and never cuts one.
+pub fn wrap_drawn(text: &str, width: usize) -> impl Iterator<Item = &str> {
+    text.trim()
+        .split('\n')
+        .flat_map(move |paragraph| Paragraph {
+            rest: paragraph.trim_end_matches('\r').trim_matches(' '),
+            width: width.max(3),
+            started: false,
+        })
+}
+
+/// One paragraph of [`wrap_drawn`], a line at a time.
+struct Paragraph<'a> {
+    rest: &'a str,
+    width: usize,
+    started: bool,
+}
+
+impl<'a> Iterator for Paragraph<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.rest.is_empty() {
+            // An empty paragraph is a blank line, once.
+            let first = !self.started;
+            self.started = true;
+            return first.then_some("");
+        }
+        self.started = true;
+        let mut used = 0;
+        let mut space = None;
+        let mut cut = None;
+        for (i, c) in self.rest.char_indices() {
+            if used + cells(c) > self.width {
+                cut = Some(i);
+                break;
+            }
+            if c == ' ' {
+                space = Some(i);
+            }
+            used += cells(c);
+        }
+        let Some(cut) = cut else {
+            return Some(core::mem::take(&mut self.rest));
+        };
+        // A space just past the width is as good a place as one inside it.
+        let at = if self.rest[cut..].starts_with(' ') {
+            cut
+        } else {
+            space.unwrap_or(cut)
+        };
+        // Never nothing: a character wider than the line still moves on.
+        let at = if at == 0 {
+            self.rest.chars().next().map_or(1, char::len_utf8)
+        } else {
+            at
+        };
+        let (line, tail) = self.rest.split_at(at);
+        self.rest = tail.trim_start_matches(' ');
+        Some(line.trim_end_matches(' '))
+    }
+}
+
 /// A frequency to the kilohertz: `915.000 MHz`, `2478.000 MHz`.
 fn megahertz(out: &mut Text<LINE_CHARS>, hz: u32) {
     let _ = write!(
@@ -576,6 +765,10 @@ impl State {
     pub fn lines(&self, screen: Screen, out: &mut Lines) {
         match screen {
             Screen::Home => self.home.lines(out),
+            #[cfg(feature = "node")]
+            Screen::Messages => {
+                self.conversations.lines(out);
+            }
             #[cfg(feature = "node")]
             Screen::Peers => self.peers.lines(out),
             Screen::Radio => self.radio.lines(out),
@@ -692,20 +885,7 @@ impl PeerRow {
         }
         // The name has what the age leaves, and a space between them.
         let room = LINE_CHARS - when.as_str().len() - 1;
-        let mut name = Text::<LINE_CHARS>::new();
-        match &self.name {
-            Some(n) => {
-                let _ = name.write_str(n.as_str());
-            }
-            // No name: the start of its address, marked as not a name.
-            None => {
-                let _ = name.write_str("<");
-                for b in &self.destination[..5] {
-                    let _ = write!(name, "{b:02x}");
-                }
-                let _ = name.write_str(">");
-            }
-        }
+        let name = label(self.name.as_ref(), &self.destination);
         // ASCII either way, so any byte is a character boundary.
         let name = name.as_str();
         out.row(&name[..name.len().min(room)], when.as_str());
@@ -727,6 +907,290 @@ impl PeerRow {
             }
         }
         out.line(how.as_str());
+    }
+}
+
+/// What a peer is called on the panel: its name, or with none the start
+/// of its address, marked as not a name.
+fn label(name: Option<&PeerName>, destination: &[u8; 16]) -> Text<LINE_CHARS> {
+    let mut out = Text::<LINE_CHARS>::new();
+    match name {
+        Some(n) => {
+            let _ = out.write_str(n.as_str());
+        }
+        None => {
+            let _ = out.write_str("<");
+            for b in &destination[..5] {
+                let _ = write!(out, "{b:02x}");
+            }
+            let _ = out.write_str(">");
+        }
+    }
+    out
+}
+
+/// An age as a value: [`age`], or a dash.
+fn age_or_dash(secs: Option<u32>) -> Text<LINE_CHARS> {
+    let mut out = Text::<LINE_CHARS>::new();
+    match secs {
+        Some(s) => age(&mut out, s),
+        None => {
+            let _ = out.write_str("-");
+        }
+    }
+    out
+}
+
+impl Conversations {
+    /// One line a conversation: a mark if something in it is unread, the
+    /// peer's name, and how long ago the last message was. Returns how many
+    /// there are, which is how many of the lines are entries to open; with
+    /// none, a sentence that says so.
+    pub fn lines(&self, out: &mut Lines) -> usize {
+        let mut entries = 0;
+        for row in self.rows.iter().flatten() {
+            entries += 1;
+            let when = age_or_dash(row.age_s);
+            // The mark, the name in what the age leaves, a space, the age.
+            let room = LINE_CHARS - 1 - when.as_str().len() - 1;
+            let name = label(row.name.as_ref(), &row.peer);
+            let name = name.as_str();
+            let mut left = Text::<LINE_CHARS>::new();
+            let _ = left.write_str(if row.unread { "*" } else { " " });
+            let _ = left.write_str(&name[..name.len().min(room)]);
+            out.row(left.as_str(), when.as_str());
+        }
+        if entries == 0 {
+            out.wrapped("No messages yet.");
+        }
+        entries
+    }
+}
+
+/// How far a sent message's lines are set in from a received one's: the
+/// two are told apart by where they stand, not by colour.
+const SENT_INDENT: usize = 2;
+
+/// A line of a thread before it is drawn, a little wider than a line so
+/// that one too wide is seen to be rather than cut.
+type ThreadLine = Text<{ LINE_CHARS + 8 }>;
+
+impl Entry<'_> {
+    /// Its first line: who it is from, and how long ago; for one the board
+    /// sent, where it has got to. The name gives way to the rest.
+    fn header(&self, thread: &Thread<'_>, out: &mut ThreadLine) {
+        out.clear();
+        let when = age_or_dash(self.age_s);
+        let mut right = Text::<LINE_CHARS>::new();
+        let who = match self.direction {
+            Direction::Received(_) => label(thread.name.as_ref(), &thread.peer),
+            Direction::Sent(delivery) => {
+                let _ = write!(right, "{} ", delivery.word());
+                let mut you = Text::<LINE_CHARS>::new();
+                let _ = you.write_str("You");
+                you
+            }
+        };
+        let _ = right.write_str(when.as_str());
+        let room = LINE_CHARS.saturating_sub(right.as_str().len() + 1);
+        let who = who.as_str();
+        let who = &who[..who.len().min(room)];
+        let width = LINE_CHARS - who.len();
+        let _ = write!(out, "{who}{:>width$}", right.as_str());
+    }
+
+    /// What the board says about the sender under the header, if anything:
+    /// a sender is trusted only once its signature has been checked.
+    fn note(&self) -> Option<&'static str> {
+        match self.direction {
+            Direction::Received(Trust::Unverified) => Some("(unverified sender)"),
+            Direction::Received(Trust::Failed) => Some("(bad signature)"),
+            _ => None,
+        }
+    }
+
+    fn indent(&self) -> usize {
+        match self.direction {
+            Direction::Received(_) => 0,
+            Direction::Sent(_) => SENT_INDENT,
+        }
+    }
+
+    /// Its body, a line at a time, folded for the panel: the title if it has
+    /// one, the content, and a word for what is not shown.
+    fn body(&self, out: &mut ThreadLine, mut f: impl FnMut(&str)) {
+        let indent = self.indent();
+        let width = LINE_CHARS - indent;
+        let empty = self.title.trim().is_empty() && self.content.trim().is_empty();
+        let mut emit = |text: &str, fold: bool| {
+            out.clear();
+            for _ in 0..indent {
+                let _ = out.write_char(' ');
+            }
+            if fold {
+                for b in drawable(text) {
+                    let _ = out.write_char(char::from(b));
+                }
+            } else {
+                let _ = out.write_str(text);
+            }
+            f(out.as_str());
+        };
+        for text in [self.title, self.content] {
+            if !text.trim().is_empty() {
+                for line in wrap_drawn(text, width) {
+                    emit(line, true);
+                }
+            }
+        }
+        if self.attachment {
+            emit("(attachment)", false);
+        }
+        if empty && !self.attachment {
+            emit("(empty)", false);
+        }
+    }
+}
+
+/// One line of a thread, as [`Thread::each`] hands it out.
+struct Line<'l> {
+    /// The entry it belongs to; a blank line belongs to the entry above it.
+    entry: usize,
+    /// It is an entry's header, where left and right stop.
+    header: bool,
+    /// It is the last line of its entry's text.
+    last: bool,
+    text: &'l str,
+}
+
+impl Thread<'_> {
+    /// Every line of the thread, in order: per message, the header, a note
+    /// about the sender if there is one, the body, and a blank line before
+    /// the next. The one place the thread is laid out, so its length, its
+    /// stops and its window cannot disagree. Called through `dyn`, so the
+    /// layout is in the image once rather than once for each caller.
+    fn each(&self, f: &mut dyn FnMut(Line<'_>)) {
+        if self.entries.is_empty() {
+            f(Line {
+                entry: 0,
+                header: false,
+                last: false,
+                text: "No messages.",
+            });
+            return;
+        }
+        let mut out = ThreadLine::new();
+        let mut pending = ThreadLine::new();
+        for (n, entry) in self.entries.iter().enumerate() {
+            if n > 0 {
+                f(Line {
+                    entry: n - 1,
+                    header: false,
+                    last: false,
+                    text: "",
+                });
+            }
+            entry.header(self, &mut out);
+            f(Line {
+                entry: n,
+                header: true,
+                last: false,
+                text: out.as_str(),
+            });
+            if let Some(note) = entry.note() {
+                f(Line {
+                    entry: n,
+                    header: false,
+                    last: false,
+                    text: note,
+                });
+            }
+            // One line behind, so the last one can be said to be.
+            let mut held = false;
+            entry.body(&mut out, |line| {
+                if held {
+                    f(Line {
+                        entry: n,
+                        header: false,
+                        last: false,
+                        text: pending.as_str(),
+                    });
+                }
+                pending.clear();
+                let _ = pending.write_str(line);
+                held = true;
+            });
+            f(Line {
+                entry: n,
+                header: false,
+                last: true,
+                text: pending.as_str(),
+            });
+        }
+    }
+
+    /// How many lines it has.
+    pub fn len(&self) -> usize {
+        let mut n = 0;
+        self.each(&mut |_| n += 1);
+        n
+    }
+
+    /// Whether it has no messages.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Where each message starts, as a line, into `out`; how many there were.
+    pub fn stops(&self, out: &mut [u16]) -> usize {
+        let (mut line, mut n) = (0, 0);
+        self.each(&mut |l| {
+            if l.header && n < out.len() {
+                out[n] = line;
+                n += 1;
+            }
+            line = line.saturating_add(1);
+        });
+        n
+    }
+
+    /// The line the first unread message starts on, if one is unread.
+    pub fn first_unread(&self) -> Option<usize> {
+        let first = self.entries.iter().position(|e| e.unread)?;
+        let (mut line, mut found) = (0, None);
+        self.each(&mut |l| {
+            if l.header && l.entry == first && found.is_none() {
+                found = Some(line);
+            }
+            line += 1;
+        });
+        found
+    }
+
+    /// The lines from `first`, as many as `rows`, into `out`.
+    pub fn window(&self, first: usize, rows: usize, out: &mut Lines) {
+        let mut line = 0;
+        self.each(&mut |l| {
+            if (first..first + rows).contains(&line) {
+                out.line(l.text);
+            }
+            line += 1;
+        });
+    }
+
+    /// How many messages, from the first, have had their last line shown by
+    /// a view whose top is `first` and which shows `rows`. Everything above
+    /// the view's foot has been passed, which counts as shown.
+    pub fn read_through(&self, first: usize, rows: usize) -> usize {
+        let foot = first + rows;
+        let (mut line, mut through) = (0, 0);
+        self.each(&mut |l| {
+            if l.last && line < foot {
+                through = l.entry + 1;
+            }
+            line += 1;
+        });
+        through
     }
 }
 
@@ -1302,20 +1766,31 @@ pub fn passkey_box(canvas: &mut impl Canvas, key: u32) {
 /// there are several on the table. What Bluetooth is doing is on the
 /// Bluetooth screen and nowhere else.
 /// Any canvas will do: the board's frame, or a bitmap of another size.
+///
+/// With a conversation open, [`render_with`] is the one to call.
 pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
+    render_with(canvas, nav, state, None);
+}
+
+/// [`render`], with the conversation that is open, if one is: its messages
+/// are not part of [`State`], because they are the node's and are borrowed
+/// rather than copied. A conversation open with no thread handed in, or
+/// with another peer's, draws as one with no messages.
+///
+/// Returns how far into the conversation the panel now shows, for the
+/// caller to mark read -- on a panel that is lit, since one that is out
+/// shows nobody anything. The first time a conversation is drawn it is
+/// placed at its first unread message, or at its end if none is.
+pub fn render_with(
+    canvas: &mut impl Canvas,
+    nav: &mut Nav,
+    state: &State,
+    thread: Option<&Thread<'_>>,
+) -> Option<Read> {
     let mut lines = Lines::new();
     // An editor or a notice replaces the screen's lines; the chrome stays.
     // Cut to the rows this canvas has, because a modal does not scroll.
     let rows = Layout::for_canvas(canvas).visible_lines();
-    if let Some(editor) = nav.editor() {
-        editor.lines_in(&mut lines, rows);
-    } else if let Some(lock) = nav.notice_shown() {
-        lock.lines_in(&mut lines, rows);
-    } else {
-        state.lines(nav.current(), &mut lines);
-    }
-    let strs = lines.as_strs();
-
     let mut left = Text::<8>::new();
     if let Some(cell) = state.home.battery {
         let _ = write!(left, "{}%", cell.percent);
@@ -1324,10 +1799,68 @@ pub fn render(canvas: &mut impl Canvas, nav: &mut Nav, state: &State) {
         Some(name) => core::str::from_utf8(name).unwrap_or("?"),
         None => "",
     };
-    page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
+    let mut read = None;
+    if let Some(editor) = nav.editor() {
+        editor.lines_in(&mut lines, rows);
+        let strs = lines.as_strs();
+        page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
+    } else if let Some(lock) = nav.notice_shown() {
+        lock.lines_in(&mut lines, rows);
+        let strs = lines.as_strs();
+        page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
+    } else if let Some(open) = nav.conversation().copied() {
+        let none = Thread {
+            peer: open.peer(),
+            name: None,
+            entries: &[],
+        };
+        let thread = thread.filter(|t| t.peer == open.peer()).unwrap_or(&none);
+        let total = thread.len();
+        nav.set_content(total, rows);
+        if !open.placed() {
+            nav.set_scroll(thread.first_unread().unwrap_or(usize::MAX));
+        }
+        if let Some(open) = nav.conversation_mut() {
+            open.lay_out(thread);
+        }
+        let first = nav.scroll();
+        thread.window(first, rows, &mut lines);
+        let strs = lines.as_strs();
+        page_of(
+            canvas,
+            nav,
+            left.as_str(),
+            name,
+            Content::Window {
+                total,
+                lines: &strs[..lines.len()],
+            },
+        );
+        // Under a menu, the middle of the thread is covered.
+        if !nav.menu_is_open() {
+            read = Some(Read {
+                peer: thread.peer,
+                through: thread.read_through(first, rows),
+            });
+        }
+    } else {
+        let screen = nav.current();
+        state.lines(screen, &mut lines);
+        let strs = lines.as_strs();
+        let strs = &strs[..lines.len()];
+        #[cfg(feature = "node")]
+        if screen == Screen::Messages && state.conversations.rows.iter().all(Option::is_none) {
+            page_of(canvas, nav, left.as_str(), name, Content::Empty(strs));
+        } else {
+            page(canvas, nav, left.as_str(), name, strs);
+        }
+        #[cfg(not(feature = "node"))]
+        page(canvas, nav, left.as_str(), name, strs);
+    }
     if let Some(key) = state.bluetooth.passkey {
         passkey_box(canvas, key);
     }
+    read
 }
 
 #[cfg(test)]
@@ -1399,6 +1932,7 @@ mod tests {
                 free_ram: Some(123_456),
             },
             peers: three_peers(),
+            conversations: two_conversations(),
         }
     }
 
@@ -1590,6 +2124,484 @@ mod tests {
         let mut changed = base;
         changed.rows[2].as_mut().unwrap().destination[0] = 0;
         assert_ne!(peer_lines(&changed), peer_lines(&base), "destination");
+    }
+
+    /// Two conversations: one with something unread, and one with a peer
+    /// that gave no name, read.
+    fn two_conversations() -> Conversations {
+        let mut c = Conversations::default();
+        c.rows[0] = Some(ConversationRow {
+            peer: [0x11; 16],
+            name: Some(PeerName::new("Ana")),
+            unread: true,
+            age_s: Some(12),
+        });
+        c.rows[1] = Some(ConversationRow {
+            peer: core::array::from_fn(|i| 0xa0 + i as u8),
+            name: None,
+            unread: false,
+            age_s: Some(7_200),
+        });
+        c
+    }
+
+    fn conversation_lines(c: &Conversations) -> (Vec<String>, usize) {
+        let mut out = Lines::new();
+        let entries = c.lines(&mut out);
+        assert!(!out.overflowed(), "a conversation's line was cut");
+        let lines = (0..out.len())
+            .map(|i| out.get(i).unwrap().to_string())
+            .collect();
+        (lines, entries)
+    }
+
+    #[test]
+    fn no_conversations_says_so_and_has_nothing_to_open() {
+        let (lines, entries) = conversation_lines(&Conversations::default());
+        assert_eq!(entries, 0);
+        assert_eq!(lines, ["No messages yet."]);
+    }
+
+    #[test]
+    fn a_conversation_is_a_mark_a_name_and_an_age() {
+        let (lines, entries) = conversation_lines(&two_conversations());
+        assert_eq!(entries, 2);
+        assert_eq!(lines, ["*Ana            12 s", " <a0a1a2a3a4>    2 h"]);
+    }
+
+    #[test]
+    fn a_conversation_at_its_widest_fits_and_the_name_gives_way() {
+        let mut c = Conversations::default();
+        let row = ConversationRow {
+            peer: [0; 16],
+            name: Some(PeerName::new("A name far too long for any row")),
+            unread: true,
+            age_s: Some(u32::MAX),
+        };
+        c.rows = [Some(row); CONVERSATIONS];
+        c.rows[1] = Some(ConversationRow { age_s: None, ..row });
+        let (lines, entries) = conversation_lines(&c);
+        assert_eq!(entries, CONVERSATIONS);
+        assert_eq!(lines[0], "*A name fa 1193046 h");
+        assert_eq!(lines[1], "*A name far too lo -");
+        assert!(lines.len() < MAX_LINES);
+    }
+
+    /// Every field of a conversation, changed on its own, changes its line.
+    #[test]
+    fn changing_any_conversation_field_changes_a_line() {
+        type Mutation = (&'static str, fn(&mut ConversationRow));
+        let mutations: [Mutation; 4] = [
+            ("name", |r| r.name = Some(PeerName::new("Bea"))),
+            ("no name", |r| r.name = None),
+            ("unread", |r| r.unread = false),
+            ("age", |r| r.age_s = Some(13)),
+        ];
+        let base = two_conversations();
+        for (name, mutate) in mutations {
+            let mut changed = base;
+            mutate(changed.rows[0].as_mut().unwrap());
+            assert_ne!(
+                conversation_lines(&changed),
+                conversation_lines(&base),
+                "{name}"
+            );
+        }
+        let mut changed = base;
+        changed.rows[1].as_mut().unwrap().peer[0] = 0;
+        assert_ne!(
+            conversation_lines(&changed),
+            conversation_lines(&base),
+            "peer"
+        );
+    }
+
+    // ---- the thread -------------------------------------------------------
+
+    fn wrapped(text: &str, width: usize) -> Vec<String> {
+        wrap_drawn(text, width).map(str::to_string).collect()
+    }
+
+    /// Text from anywhere is wrapped by what the panel draws: newlines kept,
+    /// blank lines kept, spaces at the ends dropped, and no character cut.
+    #[test]
+    fn what_somebody_wrote_wraps_to_the_line() {
+        assert_eq!(wrapped("one two three", 7), ["one two", "three"]);
+        assert_eq!(
+            wrapped("one\ntwo\r\n\nthree  ", 20),
+            ["one", "two", "", "three"]
+        );
+        assert_eq!(wrapped("  indented", 20), ["indented"]);
+        assert_eq!(wrapped("", 20), [""; 1], "an empty text is one blank line");
+        // Measured as drawn: an ellipsis is three cells, an é is one.
+        assert_eq!(wrapped("ab\u{2026}c", 5), ["ab\u{2026}", "c"]);
+        assert_eq!(wrapped("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}", 5).len(), 2);
+        // A word longer than the line is cut, at a character.
+        let long = "\u{1f642}".repeat(25);
+        let lines = wrapped(&long, 20);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].chars().count(), 20);
+        // Every word is kept, every line fits.
+        let text = "The quick brown fox jumps over the lazy dog, and then over it again \u{2026}";
+        let lines = wrapped(text, 18);
+        assert_eq!(lines.join(" "), text);
+        for line in &lines {
+            assert!(drawable(line).count() <= 18, "`{line}`");
+        }
+    }
+
+    const HELLO: &str = "Hello from the bench \u{2013} it\u{2019}s \u{201c}Python\u{201d}\u{2026}";
+
+    /// A conversation with Ana: what the bench sent, a reply delivered, and
+    /// a question from a sender not yet verified, unread.
+    fn entries() -> [Entry<'static>; 3] {
+        [
+            Entry {
+                direction: Direction::Received(Trust::Verified),
+                age_s: Some(420),
+                title: "",
+                content: HELLO,
+                attachment: false,
+                unread: false,
+            },
+            Entry {
+                direction: Direction::Sent(Delivery::Delivered),
+                age_s: Some(300),
+                title: "",
+                content: "On my way",
+                attachment: false,
+                unread: false,
+            },
+            Entry {
+                direction: Direction::Received(Trust::Unverified),
+                age_s: Some(12),
+                title: "",
+                content: "Where are you?",
+                attachment: false,
+                unread: true,
+            },
+        ]
+    }
+
+    fn thread<'a>(entries: &'a [Entry<'a>]) -> Thread<'a> {
+        Thread {
+            peer: [0x11; 16],
+            name: Some(PeerName::new("Ana")),
+            entries,
+        }
+    }
+
+    fn thread_lines(thread: &Thread<'_>) -> Vec<String> {
+        let mut out = Lines::new();
+        let all = thread.len();
+        assert!(
+            all < MAX_LINES,
+            "too long for one buffer: test it in windows"
+        );
+        thread.window(0, all, &mut out);
+        assert!(!out.overflowed(), "a thread line was cut");
+        (0..out.len())
+            .map(|i| out.get(i).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_thread_tells_received_from_sent_by_where_they_stand() {
+        let e = entries();
+        assert_eq!(
+            thread_lines(&thread(&e)),
+            [
+                "Ana            7 min",
+                "Hello from the bench",
+                "- it's 'Python'...",
+                "",
+                "You  delivered 5 min",
+                "  On my way",
+                "",
+                "Ana             12 s",
+                "(unverified sender)",
+                "Where are you?",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_outgoing_state_has_its_word() {
+        let mut e = entries();
+        let mut seen = Vec::new();
+        for delivery in [
+            Delivery::Queued,
+            Delivery::Sent,
+            Delivery::Delivered,
+            Delivery::Failed,
+        ] {
+            e[1].direction = Direction::Sent(delivery);
+            let header = thread_lines(&thread(&e))[4].clone();
+            assert!(header.starts_with("You "), "{header}");
+            assert!(
+                header.ends_with(&format!("{} 5 min", delivery.word())),
+                "{header}"
+            );
+            seen.push(header);
+        }
+        seen.dedup();
+        assert_eq!(seen.len(), 4);
+        // At the widest age, the state outlasts the name.
+        e[1].direction = Direction::Sent(Delivery::Delivered);
+        e[1].age_s = Some(u32::MAX);
+        assert_eq!(thread_lines(&thread(&e))[4], " delivered 1193046 h");
+    }
+
+    #[test]
+    fn a_sender_is_trusted_only_when_verified() {
+        let mut e = entries();
+        e[0].direction = Direction::Received(Trust::Failed);
+        let lines = thread_lines(&thread(&e));
+        assert_eq!(lines[1], "(bad signature)");
+        e[0].direction = Direction::Received(Trust::Verified);
+        let lines = thread_lines(&thread(&e));
+        assert!(!lines[1].starts_with('('), "{lines:?}");
+    }
+
+    #[test]
+    fn what_is_not_shown_is_said() {
+        let mut e = entries();
+        e[1].content = "";
+        e[1].attachment = true;
+        assert_eq!(thread_lines(&thread(&e))[5], "  (attachment)");
+        e[1].attachment = false;
+        e[1].content = "   ";
+        assert_eq!(thread_lines(&thread(&e))[5], "  (empty)");
+        e[1].title = "Plans";
+        e[1].content = "Lunch?";
+        let lines = thread_lines(&thread(&e));
+        assert_eq!(&lines[5..7], ["  Plans", "  Lunch?"]);
+        let none = thread(&[]);
+        assert_eq!(thread_lines(&none), ["No messages."]);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn a_name_the_font_lacks_and_text_it_lacks_draw_as_boxes() {
+        let mut e = entries();
+        e[0].content = "Gr\u{fc}\u{df}e \u{1f642}";
+        let mut t = thread(&e);
+        t.name = Some(PeerName::new("Zo\u{eb}"));
+        let lines = thread_lines(&t);
+        assert_eq!(lines[0], "Zo\x7f            7 min");
+        assert_eq!(lines[1], "Gr\x7f\x7fe \x7f");
+    }
+
+    /// A message longer than the screen wraps to as many lines as it needs,
+    /// every one inside the row, every word kept; the window shows it a
+    /// screenful at a time, exactly as the whole would.
+    #[test]
+    fn a_long_message_wraps_and_is_never_cut() {
+        let long: String = (0..120).map(|n| format!("word{n} ")).collect();
+        let e = [Entry {
+            content: &long,
+            ..entries()[0]
+        }];
+        let t = Thread {
+            peer: [0; 16],
+            name: None,
+            entries: &e,
+        };
+        let total = t.len();
+        assert!(total > 2 * LAYOUT.visible_lines(), "{total}");
+        let mut all = Vec::new();
+        for first in (0..total).step_by(LAYOUT.visible_lines()) {
+            let mut out = Lines::new();
+            t.window(first, LAYOUT.visible_lines(), &mut out);
+            assert!(!out.overflowed());
+            all.extend((0..out.len()).map(|i| out.get(i).unwrap().to_string()));
+        }
+        assert_eq!(all.len(), total);
+        assert_eq!(all[1..].join(" "), long.trim());
+    }
+
+    #[test]
+    fn a_thread_knows_where_its_messages_start_and_what_has_been_shown() {
+        let e = entries();
+        let t = thread(&e);
+        let mut stops = [0u16; THREAD];
+        assert_eq!(t.stops(&mut stops), 3);
+        assert_eq!(&stops[..3], [0, 4, 7]);
+        assert_eq!(t.first_unread(), Some(7));
+        // The first's last line is line 2; the third's is line 9.
+        assert_eq!(t.read_through(0, 2), 0);
+        assert_eq!(t.read_through(0, 3), 1);
+        assert_eq!(t.read_through(0, 6), 2);
+        assert_eq!(t.read_through(0, 9), 2);
+        assert_eq!(t.read_through(0, 10), 3);
+        assert_eq!(t.read_through(5, 5), 3, "passed counts as shown");
+        let mut none = entries();
+        none[2].unread = false;
+        assert_eq!(thread(&none).first_unread(), None);
+    }
+
+    /// Every field of a message, changed on its own, changes the thread.
+    #[test]
+    fn changing_any_entry_field_changes_a_line() {
+        type Mutation = (&'static str, fn(&mut [Entry<'static>; 3]));
+        let mutations: [Mutation; 9] = [
+            ("trust", |e| {
+                e[2].direction = Direction::Received(Trust::Verified)
+            }),
+            ("delivery", |e| {
+                e[1].direction = Direction::Sent(Delivery::Queued)
+            }),
+            ("direction", |e| {
+                e[0].direction = Direction::Sent(Delivery::Sent)
+            }),
+            ("age", |e| e[0].age_s = Some(421 + 60)),
+            ("no age", |e| e[0].age_s = None),
+            ("title", |e| e[0].title = "Hi"),
+            ("content", |e| e[1].content = "On my way!"),
+            ("attachment", |e| e[1].attachment = true),
+            ("unread", |e| e[0].unread = true),
+        ];
+        let base = entries();
+        for (name, mutate) in mutations {
+            let mut changed = base;
+            mutate(&mut changed);
+            let (a, b) = (thread(&changed), thread(&base));
+            let lines_differ = thread_lines(&a) != thread_lines(&b);
+            // Unread is not drawn: it says where the thread opens.
+            let opens_differ = a.first_unread() != b.first_unread();
+            assert!(lines_differ || opens_differ, "{name}");
+        }
+        let mut t = thread(&base);
+        t.name = None;
+        assert_ne!(thread_lines(&t), thread_lines(&thread(&base)), "name");
+        t.peer[0] = 0;
+        let mut u = thread(&base);
+        u.name = None;
+        assert_ne!(thread_lines(&t), thread_lines(&u), "peer");
+    }
+
+    /// A navigator with the conversation with Ana open over Messages.
+    #[cfg(feature = "node")]
+    fn in_conversation() -> Nav {
+        let mut nav = ui::nav();
+        nav.handle(Input::Right);
+        nav.open_conversation([0x11; 16]);
+        nav
+    }
+
+    #[cfg(feature = "node")]
+    fn draw_thread(nav: &mut Nav, thread: Option<&Thread<'_>>) -> (Frame, Option<Read>) {
+        let mut frame = Frame::new();
+        let read = render_with(&mut frame, nav, &populated(), thread);
+        (frame, read)
+    }
+
+    /// A conversation opens at its first unread message, and the panel says
+    /// how far it has shown; with nothing unread it opens at its end.
+    #[cfg(feature = "node")]
+    #[test]
+    fn a_conversation_opens_at_the_first_unread_message() {
+        let long: String = (0..30).map(|n| format!("word{n} ")).collect();
+        let mut e = entries();
+        e[0].content = &long;
+        let t = thread(&e);
+        let unread = t.first_unread().unwrap();
+        assert!(unread > LAYOUT.visible_lines(), "below the first screen");
+        let mut nav = in_conversation();
+        let (_, read) = draw_thread(&mut nav, Some(&t));
+        assert_eq!(nav.scroll(), unread.min(t.len() - LAYOUT.visible_lines()));
+        assert!(nav.conversation().unwrap().placed());
+        assert_eq!(
+            read,
+            Some(Read {
+                peer: [0x11; 16],
+                through: 3
+            })
+        );
+        // Once placed, it stays where it is put.
+        nav.handle(Input::Left);
+        nav.handle(Input::Left);
+        let at = nav.scroll();
+        draw_thread(&mut nav, Some(&t));
+        assert_eq!(nav.scroll(), at);
+        assert!(at < unread);
+
+        e[2].unread = false;
+        let t = thread(&e);
+        let mut nav = in_conversation();
+        draw_thread(&mut nav, Some(&t));
+        assert_eq!(nav.scroll(), t.len() - LAYOUT.visible_lines(), "the end");
+    }
+
+    /// Sideways moves by message, landing on each header in turn.
+    #[cfg(feature = "node")]
+    #[test]
+    fn a_conversation_is_walked_by_message() {
+        let long: String = (0..40).map(|n| format!("w{n} ")).collect();
+        let mut e = entries();
+        e[0].content = &long;
+        e[1].content = &long;
+        e[2].unread = false;
+        let t = thread(&e);
+        let mut stops = [0u16; THREAD];
+        let n = t.stops(&mut stops);
+        let mut nav = in_conversation();
+        draw_thread(&mut nav, Some(&t));
+        for _ in 0..5 {
+            nav.handle(Input::Left);
+        }
+        assert_eq!(nav.scroll(), 0);
+        nav.handle(Input::Right);
+        assert_eq!(nav.scroll(), usize::from(stops[1]));
+        let mut out = Lines::new();
+        t.window(nav.scroll(), 1, &mut out);
+        assert!(out.get(0).unwrap().starts_with("You "), "a header");
+        nav.handle(Input::Right);
+        let max = t.len() - LAYOUT.visible_lines();
+        assert_eq!(nav.scroll(), usize::from(stops[n - 1]).min(max));
+    }
+
+    /// Under a menu nothing is counted as shown; a thread for another peer,
+    /// or none, draws as one with no messages.
+    #[cfg(feature = "node")]
+    #[test]
+    fn a_conversation_reads_only_what_it_shows() {
+        let e = entries();
+        let t = thread(&e);
+        let mut nav = in_conversation();
+        nav.handle(Input::Select);
+        assert!(nav.menu_is_open());
+        assert_eq!(draw_thread(&mut nav, Some(&t)).1, None);
+        nav.handle(Input::Back);
+        let mut other = thread(&e);
+        other.peer = [0x22; 16];
+        let (frame, read) = draw_thread(&mut nav, Some(&other));
+        assert_eq!(read.map(|r| r.through), Some(0));
+        let (none, _) = draw_thread(&mut nav, None);
+        assert_eq!(frame.as_bytes(), none.as_bytes());
+        let (some, _) = draw_thread(&mut nav, Some(&t));
+        assert_ne!(some.as_bytes(), none.as_bytes());
+    }
+
+    /// The Messages screen with nothing in it opens nothing; with
+    /// conversations, its first line is highlighted and select asks for it.
+    #[cfg(feature = "node")]
+    #[test]
+    fn the_messages_screen_highlights_what_select_opens() {
+        let empty = State {
+            home: populated().home,
+            ..State::default()
+        };
+        let mut nav = ui::nav();
+        nav.handle(Input::Right);
+        render(&mut Frame::new(), &mut nav, &empty);
+        assert_eq!(nav.selected(), None);
+        assert_eq!(nav.handle(Input::Select), None);
+        render(&mut Frame::new(), &mut nav, &populated());
+        assert_eq!(nav.selected(), Some(0));
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), Some(ui::Action::Open));
+        assert_eq!(nav.selected(), Some(1));
     }
 
     /// A receiver with a fix, at a place nobody would mistake for a default.
@@ -1980,6 +2992,21 @@ mod tests {
                 lines_of(&base, Screen::System),
                 "{name}"
             );
+        }
+        // The conversations, which only an image with the node draws.
+        #[cfg(feature = "node")]
+        for (name, mutate) in [
+            (
+                "conversation",
+                (|s| s.conversations.rows[0].as_mut().unwrap().unread = false) as fn(&mut State),
+            ),
+            ("no conversations", |s| {
+                s.conversations = Conversations::default()
+            }),
+        ] {
+            let mut changed = base;
+            mutate(&mut changed);
+            assert_ne!(all(&changed), reference, "changing {name} changed no line");
         }
         for (name, mutate) in [
             ("name", (|s| s.bluetooth.name = None) as fn(&mut State)),

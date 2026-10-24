@@ -871,6 +871,9 @@ where
     // The node's count of messages arrived, as the panel last saw it: when
     // it moves, a message came, and the panel lights.
     let mut arrived = node.arrived();
+    // The conversations as last drawn: what the highlighted line was when
+    // OK was pressed on it, whatever has arrived since.
+    let mut drawn = screens::Conversations::default();
     let mut last_signal: Option<(i16, i8)> = None;
     // When a frame last passed between the modem and a host, on either
     // transport and in either direction, for the Home screen's "talking".
@@ -1172,6 +1175,16 @@ where
             if action == ui::Action::Announce && host_of(control).lock().is_none() {
                 node.announce_now();
             }
+            // Which conversation the line was is the loop's to know.
+            if action == ui::Action::Open {
+                let row = ui
+                    .nav
+                    .selected()
+                    .and_then(|n| drawn.rows.get(n).copied().flatten());
+                if let Some(row) = row {
+                    ui.nav.open_conversation(row.peer);
+                }
+            }
             let change = perform(
                 action,
                 &mut ui,
@@ -1232,7 +1245,16 @@ where
                     );
                     state.peers = node.peers();
                     state.home.unread = node.unread();
-                    screens::render(&mut ui.scratch, &mut ui.nav, &state);
+                    state.conversations = node.conversations();
+                    drawn = state.conversations;
+                    let open = ui.nav.conversation().map(ui::Conversation::peer);
+                    let read = node.with_thread(open, |thread| {
+                        screens::render_with(&mut ui.scratch, &mut ui.nav, &state, thread)
+                    });
+                    // Only what a lit panel showed has been read.
+                    if let (Some(read), false) = (read, ui.asleep) {
+                        node.read(read);
+                    }
                 }
                 ui.commit();
             }
@@ -2001,6 +2023,8 @@ async fn perform(
         }
         // The node, which the modem loop holds, has been told already.
         ui::Action::Announce => PanelChange::NONE,
+        // The loop opened the conversation: it has the list as drawn.
+        ui::Action::Open => PanelChange::NONE,
         // Nobody has the radio, or this would have been the notice above.
         ui::Action::Edit(field) => {
             defmt::info!("ui: editing {=str}", field.name());
@@ -2148,6 +2172,7 @@ impl Facts {
             },
             // The node's, which the caller adds; the radio-less loop has none.
             peers: screens::Peers::default(),
+            conversations: screens::Conversations::default(),
         }
     }
 }
