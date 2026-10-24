@@ -98,6 +98,7 @@ use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
 use oxinode::gps;
 use oxinode::modem::{CsmaReport, Modem, RxReport, TxOutcome, TxReport};
+use oxinode::node::Listener;
 use oxinode::nus;
 use oxinode::pad;
 use oxinode::store::{Flash, RecordFlash, Storage};
@@ -239,7 +240,7 @@ async fn main(_spawner: Spawner) {
     // run's verdict rather than this one's.
     let last_fault = ble::fault::take();
     let last_stall = ble::stall::take();
-    let p = embassy_nrf::init(ble::embassy_config());
+    let mut p = embassy_nrf::init(ble::embassy_config());
     // Before any of these peripherals is built: their constructors enable
     // their interrupts, and the NVIC's reset priority is the one the link
     // layer runs at.
@@ -378,6 +379,9 @@ async fn main(_spawner: Spawner) {
         p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
         p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
+    // The node seeds itself from the RNG before the controller owns it; see
+    // `oxinode::node`. Without the `node` feature this takes nothing.
+    let mut node = Listener::new(p.RNG.reborrow());
     ble::stall::arm(STALL_AFTER_MS);
     let stack_parts = ble::bring_up(mpsl_p, sdc_p, p.RNG, Irqs, ble::LfSource::Crystal);
     ble::stall::disarm();
@@ -611,6 +615,7 @@ async fn main(_spawner: Spawner) {
             panel.as_mut(),
             &pad_events,
             &mut battery,
+            &mut node,
         )
         .await
     };
@@ -826,6 +831,7 @@ async fn run<'d, D, S, B>(
     mut panel: Option<&mut Panel<'_>>,
     pad_events: &pad::Events,
     battery: &mut Sense<'_>,
+    node: &mut Listener,
 ) -> !
 where
     D: UsbDriverTrait<'d>,
@@ -1025,8 +1031,13 @@ where
                         Ok(Some(report)) => {
                             led.off();
                             last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                            if heard(&mut air_in, &mut protocol, &report, &rx_buf, listener) {
+                            // The host has its copy; the node takes one only
+                            // when there is no host.
+                            if let Some(packet) =
+                                heard(&mut air_in, &mut protocol, &report, &rx_buf, listener)
+                            {
                                 last_host_frame = Some(Instant::now());
+                                node.heard(packet.payload, packet.signal, || host_of(control));
                             }
                             led.on();
                         }
@@ -1052,6 +1063,8 @@ where
                 }
             }
         }
+
+        node.tick(|| host_of(control));
 
         // Gestures from the pad go to the navigator; what it hands back is
         // done here, where the storage and the panel are.
@@ -1164,19 +1177,20 @@ where
 }
 
 /// A frame off the air: through the reassembler, and if it completes a
-/// packet, to the host with its signal. Says whether it did.
+/// packet, to the host with its signal. Hands back the packet it delivered,
+/// for the node.
 ///
 /// The signal is per packet rather than per frame -- the mean of two for a
 /// packet that came as two -- and quarter-dB throughout: the chip reports
 /// it that way and the protocol carries it that way, so nothing is rounded
 /// in between.
-fn heard<S: Sink>(
-    air_in: &mut Reassembler,
+fn heard<'a, S: Sink>(
+    air_in: &'a mut Reassembler,
     protocol: &mut Protocol,
     report: &RxReport,
     rx_buf: &[u8],
     out: &mut S,
-) -> bool {
+) -> Option<air::Packet<'a>> {
     let signal = air::Signal {
         rssi_dbm: report.rssi_dbm,
         snr_quarter_db: report.snr_quarter_db,
@@ -1189,7 +1203,7 @@ fn heard<S: Sink>(
             "rx: an empty frame, rssi {=i16} dBm; nothing to read",
             report.rssi_dbm
         );
-        return false;
+        return None;
     };
     defmt::debug!(
         "rx: {=usize} bytes, header {=u8:#x} (seq {=u8}, split {=bool}), rssi {=i16} dBm, snr {=i16} dB",
@@ -1217,14 +1231,14 @@ fn heard<S: Sink>(
                 packet.payload,
                 out,
             );
-            true
+            Some(packet)
         }
         None => {
             defmt::debug!(
                 "rx: {=usize} bytes, half of a split packet; holding it",
                 report.len
             );
-            false
+            None
         }
     }
 }
@@ -1366,6 +1380,9 @@ async fn act<S, B>(
                             report.rssi_dbm
                         );
                         *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
+                        // A transmission is a host's, since the node sends
+                        // nothing yet, so what is heard while waiting to send
+                        // is the host's alone.
                         heard(
                             air_in,
                             protocol,

@@ -26,6 +26,7 @@ pub mod display;
 pub mod gps;
 pub mod logger;
 pub mod modem;
+pub mod node;
 #[cfg(feature = "ble")]
 pub mod nus;
 pub mod pad;

@@ -1,0 +1,6 @@
+# Written by tools/node_vectors.py with RNS 1.5.0.
+destination fae321c442e3c9bdcd7a3e79d850e03c
+identity aca31af0441d81dbec71e82da0b4b5f5
+public_key 8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f29acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd7
+name_hash 6ec60bc318e2c0f0d908
+app_data 92c40a42656e63682070656572c0

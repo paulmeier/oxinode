@@ -93,6 +93,33 @@ the gap between the end of static data (the linker's `__sheap`) and the stack
 pointer, which is the only honest number on a board where the stack is the
 one thing that grows.
 
+The image built with `node`, which carries a Reticulum stack for the board as
+a node of its own, does have an allocator: a 64 KB heap, a static like any
+other and so inside the RAM figure below rather than in the gap. `rns-core`
+needs it for its tables and packets. Its peak is in the log (`node: heap
+peak`).
+
+## The budget for the image with a node
+
+The RNode image is checked against the chip. The `node` image is also held to
+ceilings below it, so that growth is noticed in the change that causes it
+rather than when the 784 KB runs out. Measured on 2026-10-23, `rns-core`
+0.6.0 and `rns-crypto` 0.2.1:
+
+| | flash | RAM |
+|---|---:|---:|
+| `rnode` | 333,708 | 54,364 |
+| `rnode` with `node` | 533,336 | 120,756 |
+| ceiling in `tools/test.sh` | 589,824 (576 KiB) | 131,072 (128 KiB) |
+
+The 199,628 bytes of flash the stack adds come mostly from `alloc`
+(67 KB, the maps and vectors monomorphised for the engine), `rns-core`
+itself (51 KB), `sha2` (35 KB, SHA-256 for hashes and SHA-512 inside Ed25519)
+and the curve arithmetic. The RAM is the heap and a little more. The ceilings
+leave room for what the messaging work adds next and little beyond it;
+raising one is a deliberate edit to `test.sh`, made with its reason in the
+change that needs it.
+
 ## How the layout is kept honest
 
 `memory.x` is parsed twice: once in Rust for the build (`build.rs`, through
@@ -105,7 +132,8 @@ them.
 Every built image is checked against the layout on every build and again
 before every flash by `tools/check_layout.py`: every loadable byte inside
 FLASH, RAM usage inside RAM, the vector table's initial stack pointer pointing
-into RAM, and the reset vector pointing into FLASH with the Thumb bit set.
+into RAM, and the reset vector pointing into FLASH with the Thumb bit set,
+and, given `--max-flash` and `--max-ram`, the image under its ceilings.
 Those last two are the words the CPU reads first, and they are exactly what is
 wrong when a linker script is wrong. The checker's own tests feed it
 deliberately broken images and assert that it rejects each one.

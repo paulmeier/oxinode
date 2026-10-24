@@ -47,6 +47,10 @@ try cargo clippy --lib --bins -- -D warnings
 step "lint (firmware, ble)"
 try cargo clippy --no-default-features --features ble --lib --bins -- -D warnings
 
+# The product image with the Reticulum stack in it: `node` on top of `ble`.
+step "lint (firmware, ble + node)"
+try cargo clippy --no-default-features --features ble,node --lib --bins -- -D warnings
+
 # The interface crate has one optional feature, the embedded-graphics
 # adapter, and the two builds are different code: without it the crate has
 # no dependencies at all, which is a property worth checking on every run.
@@ -58,11 +62,15 @@ step "unit tests (monopanel, $host)"
 try cargo test -p monopanel --target "$host"
 try cargo test -p monopanel --target "$host" --all-features
 
+# Twice, like the interface crate: with `node` the crate links a Reticulum
+# stack, and without it it must still build with none.
 step "lint (core, $host)"
 try cargo clippy -p oxinode-core --target "$host" --all-targets -- -D warnings
+try cargo clippy -p oxinode-core --target "$host" --all-targets --features node -- -D warnings
 
 step "unit tests (core, $host)"
 try cargo test -p oxinode-core --target "$host"
+try cargo test -p oxinode-core --target "$host" --features node
 
 # The simulator is a third host crate; it renders the interface and compares
 # every screen and menu against the golden images in sim/golden, at the
@@ -111,6 +119,34 @@ for bin in rnode ble; do
         -b "$(tools/layout.py memory.x --field FLASH.origin)" 2>/dev/null
     try tools/check_layout.py "$elf" --uf2 "$elf.uf2"
 done
+
+# The same image with the stack in it, in a target directory of its own so
+# the `rnode` above -- the RNode, and what a developer flashes -- is not
+# replaced by it. Held to ceilings rather than to the chip: the stack, its
+# allocator and the 64 KB heap measured 533,336 bytes of flash and 120,756 of
+# RAM on 2026-10-23, and the ceilings leave room for what the messaging work
+# adds next (an identity, announcing, peers, the LXMF subset) without leaving
+# room for a dependency bump to eat the headroom unnoticed. Raising one is a
+# deliberate change, with the reason, in the change that needs it. See
+# docs/hardware/memory-layout.md.
+NODE_MAX_FLASH=589824   # 576 KiB of the 784 KiB the bootloader leaves
+NODE_MAX_RAM=131072     # 128 KiB of 256 KiB; the stack has the rest
+step "build firmware (ble + node: rnode)"
+try cargo build --release --no-default-features --features ble,node --bin rnode \
+    --target-dir target/node
+
+step "node image layout vs memory.x and its ceilings"
+elf="target/node/thumbv7em-none-eabihf/release/rnode"
+if [[ -f "$elf" ]]; then
+    rust-objcopy -O binary "$elf" "$elf.bin"
+    tools/uf2conv.py "$elf.bin" -o "$elf.uf2" \
+        -b "$(tools/layout.py memory.x --field FLASH.origin)" 2>/dev/null
+    try tools/check_layout.py "$elf" --uf2 "$elf.uf2" \
+        --max-flash "$NODE_MAX_FLASH" --max-ram "$NODE_MAX_RAM"
+else
+    echo "missing $elf"
+    fail=1
+fi
 
 if (( fail )); then
     printf '\n\033[31msome checks failed\033[0m\n'
