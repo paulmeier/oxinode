@@ -116,3 +116,19 @@ the reference firmware the exchange has not been run, and that is the one
 that matters; see [Known limitations](../reference/limitations.md). The
 runner needs no change for it: one `--b` is a stock RNode's port and
 `--b-log none`, since a stock RNode has no log.
+
+## A peer for the messaging work
+
+With no host attached the board is a node of its own, and what it says on the
+air is checked by something that is not the board: `tools/peer.py`, stock
+Reticulum and LXMF speaking through the other bench board. It checks every
+announce the board makes, sends it messages and times the proofs, checks every
+message it sends back, and exits non-zero when anything asked for did not
+happen:
+
+```bash
+python3.11 tools/peer.py --rnode /dev/cu.usbmodem3101 --board-log 65C11224153B1DFD \
+    --send 3 --expect-messages 1 --seconds 300
+```
+
+See [Host tools](../reference/tools.md#peerpy) for what it checks and keeps.
