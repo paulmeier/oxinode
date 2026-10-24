@@ -21,10 +21,11 @@ use oxinode_core::battery;
 use oxinode_core::edit::Editor;
 use oxinode_core::gps;
 use oxinode_core::lr1121::config::{ConfigError, RadioConfig, BENCH_2G4, DEFAULT};
+use oxinode_core::rnode::air::Signal;
 use oxinode_core::rnode::hosts::Transport;
 use oxinode_core::screens::{
-    self, Air, BluetoothScreen, Home, Host, Identity, Mode, NodeHashes, Position, Radio, State,
-    System,
+    self, Air, BluetoothScreen, Home, Host, Identity, Mode, NodeHashes, PeerName, PeerRow, Peers,
+    Position, Radio, State, System, PEERS,
 };
 use oxinode_core::sh1107::Frame;
 use oxinode_core::status::Bluetooth;
@@ -154,7 +155,106 @@ pub fn populated() -> State {
             announce_gap_s: Some(26),
             free_ram: Some(126_976),
         },
+        peers: three_peers(),
     }
+}
+
+/// The bench peer as the board hears it from across the desk: the vectors'
+/// name and address, at the populated board's signal.
+fn bench_peer() -> PeerRow {
+    PeerRow {
+        destination: [
+            0xfa, 0xe3, 0x21, 0xc4, 0x42, 0xe3, 0xc9, 0xbd, 0xcd, 0x7a, 0x3e, 0x79, 0xd8, 0x50,
+            0xe0, 0x3c,
+        ],
+        name: Some(PeerName::new("Bench peer")),
+        age_s: Some(14),
+        hops: Some(1),
+        signal: Some(Signal {
+            rssi_dbm: -69,
+            snr_quarter_db: 45,
+        }),
+    }
+}
+
+/// Three peers: the bench peer, a phone heard through another board, and a
+/// board that announced with no name.
+fn three_peers() -> Peers {
+    let mut peers = Peers::default();
+    peers.rows[0] = Some(bench_peer());
+    peers.rows[1] = Some(PeerRow {
+        destination: [0x5d; 16],
+        name: Some(PeerName::new("Galaxy S9")),
+        age_s: Some(95),
+        hops: Some(2),
+        signal: None,
+    });
+    peers.rows[2] = Some(nameless());
+    peers
+}
+
+fn nameless() -> PeerRow {
+    PeerRow {
+        destination: [
+            0x3b, 0x07, 0x9e, 0x41, 0xd2, 0x88, 0x10, 0x6c, 0x2f, 0xe5, 0x93, 0x5a, 0x0d, 0x71,
+            0xc4, 0xb6,
+        ],
+        name: None,
+        age_s: Some(1_260),
+        hops: Some(1),
+        signal: Some(Signal {
+            rssi_dbm: -112,
+            snr_quarter_db: -38,
+        }),
+    }
+}
+
+/// One peer: the bench peer.
+pub fn one_peer() -> Peers {
+    let mut peers = Peers::default();
+    peers.rows[0] = Some(bench_peer());
+    peers
+}
+
+/// As many peers as the node keeps, heard a little longer ago down the list.
+pub fn full_of_peers() -> Peers {
+    let mut peers = Peers::default();
+    for (n, slot) in peers.rows.iter_mut().enumerate() {
+        let mut name = String::from("oxinode ");
+        name.push_str(&format!("{:04X}", 0x1a2b + n * 0x111));
+        *slot = Some(PeerRow {
+            destination: [n as u8; 16],
+            name: Some(PeerName::new(&name)),
+            age_s: Some(8 + 37 * n as u32 * n as u32),
+            hops: Some(1 + (n % 3) as u8),
+            signal: (n % 3 == 0).then_some(Signal {
+                rssi_dbm: -70 - n as i16,
+                snr_quarter_db: 30 - 4 * n as i8,
+            }),
+        });
+    }
+    debug_assert_eq!(peers.rows.len(), PEERS);
+    peers
+}
+
+/// One peer that announced without a name.
+pub fn nameless_peer() -> Peers {
+    let mut peers = Peers::default();
+    peers.rows[0] = Some(nameless());
+    peers
+}
+
+/// One peer with nothing known but its address.
+pub fn unknown_peer() -> Peers {
+    let mut peers = Peers::default();
+    peers.rows[0] = Some(PeerRow {
+        name: None,
+        age_s: None,
+        hops: None,
+        signal: None,
+        ..nameless()
+    });
+    peers
 }
 
 /// The populated board with its receiver on and still looking: satellites
@@ -350,7 +450,11 @@ mod tests {
     #[test]
     fn a_script_walks_the_menus_and_collects_the_actions() {
         let mut scene = Scene::new();
-        let inputs = script::parse("right*4 select down select").unwrap();
+        let inputs = script::parse(&format!(
+            "right*{} select down select",
+            Screen::System.index()
+        ))
+        .unwrap();
         assert_eq!(scene.run(&inputs), [Action::Reboot]);
         assert_eq!(scene.nav.current(), Screen::System);
         assert!(!scene.nav.menu_is_open());
@@ -361,7 +465,9 @@ mod tests {
     #[test]
     fn scrolling_works_from_the_first_press() {
         let mut scene = Scene::with_state(populated());
-        scene.press(Input::Right);
+        for _ in 0..Screen::Radio.index() {
+            scene.press(Input::Right);
+        }
         assert_eq!(scene.nav.current(), Screen::Radio);
         scene.press(Input::Down);
         assert_eq!(scene.nav.scroll(), 1);
@@ -373,7 +479,11 @@ mod tests {
     fn an_edit_on_a_standalone_board_changes_the_state() {
         use oxinode_core::lr1121::config::Setting;
         let mut scene = Scene::with_state(standalone());
-        let inputs = script::parse("right select down*6 select").unwrap();
+        let inputs = script::parse(&format!(
+            "right*{} select down*6 select",
+            Screen::Radio.index()
+        ))
+        .unwrap();
         assert_eq!(
             scene.run(&inputs),
             [Action::Edit(oxinode_core::edit::Field::TxPower)]
@@ -391,7 +501,11 @@ mod tests {
     fn a_cancelled_edit_leaves_the_state_alone() {
         let mut scene = Scene::with_state(standalone());
         let before = scene.state;
-        let inputs = script::parse("right select down select up up back").unwrap();
+        let inputs = script::parse(&format!(
+            "right*{} select down select up up back",
+            Screen::Radio.index()
+        ))
+        .unwrap();
         let actions = scene.run(&inputs);
         assert_eq!(actions.len(), 1, "only the Edit: {actions:?}");
         assert_eq!(scene.state, before);
@@ -403,7 +517,13 @@ mod tests {
     #[test]
     fn a_host_on_the_line_turns_edits_into_the_notice() {
         let mut scene = Scene::with_state(populated());
-        scene.run(&script::parse("right select down select").unwrap());
+        scene.run(
+            &script::parse(&format!(
+                "right*{} select down select",
+                Screen::Radio.index()
+            ))
+            .unwrap(),
+        );
         assert_eq!(
             scene.nav.notice_shown(),
             Some(oxinode_core::edit::Lock::Usb)
@@ -420,7 +540,13 @@ mod tests {
         assert!(!scene.nav.is_editing());
 
         let mut scene = Scene::with_state(phone());
-        scene.run(&script::parse("right select down select").unwrap());
+        scene.run(
+            &script::parse(&format!(
+                "right*{} select down select",
+                Screen::Radio.index()
+            ))
+            .unwrap(),
+        );
         assert_eq!(
             scene.nav.notice_shown(),
             Some(oxinode_core::edit::Lock::Bluetooth)

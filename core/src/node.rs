@@ -9,12 +9,11 @@
 //! tests exactly as the RNode protocol is, with real packets from Python
 //! Reticulum as the input (see `tools/node_vectors.py`).
 //!
-//! What it does today is listen: it hears announces and path requests and
-//! reports them. It has an identity of its own ([`key`]), the one the board
-//! keeps for its life, and an `lxmf.delivery` destination derived from it, so
-//! a path request for the board is recognised as one. It announces nothing
-//! and answers nothing yet; that arrives with the announcing that builds on
-//! this.
+//! It has an identity of its own ([`key`]), the one the board keeps for its
+//! life, and an `lxmf.delivery` destination derived from it. It hears
+//! announces and keeps the `lxmf.delivery` ones as [`peers`]; it announces
+//! itself within a budget ([`announce`]) and answers path requests for its
+//! address. Messages are next.
 //!
 //! # One interface, and no transport
 //!
@@ -55,6 +54,7 @@ pub use rns_crypto::Rng;
 
 pub mod announce;
 pub mod key;
+pub mod peers;
 use key::{Hashes, NodeKey};
 
 /// Where the engine's randomness comes from: ChaCha20, seeded once.
@@ -123,6 +123,9 @@ pub struct Heard {
     pub name_hash: [u8; 10],
     pub app_data: Option<Vec<u8>>,
     pub hops: u8,
+    /// The signal it came with, if it came straight off the air: one hop.
+    /// A relayed announce's signal is the relay's.
+    pub signal: Option<Signal>,
 }
 
 /// What one call into the node produced.
@@ -264,6 +267,9 @@ impl Node {
         // Reticulum ignores announces for its own destinations as well.
         let ours = self.hashes.lxmf;
         out.heard.retain(|h| h.destination != ours);
+        for heard in &mut out.heard {
+            heard.signal = signal.filter(|_| heard.hops == 1);
+        }
         out
     }
 
@@ -296,6 +302,78 @@ pub fn lxmf_app_data(name: &str) -> Vec<u8> {
 /// the signature, then the app data.
 pub const fn announce_len(app_data_len: usize) -> usize {
     2 + 16 + 1 + 64 + 10 + 10 + 64 + app_data_len
+}
+
+/// A packet off the air, waiting to be handed to the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inbound {
+    pub packet: Vec<u8>,
+    pub signal: Option<Signal>,
+    /// When it was heard, in milliseconds since boot.
+    pub at_ms: u64,
+}
+
+/// Packets heard and not yet looked at, waiting for the radio to be quiet.
+///
+/// Verifying an announce takes the engine about 45 ms, and the radio comes
+/// first: the modem loop takes a packet off the chip as soon as it is there,
+/// queues it here, and hands the engine one only on a pass where the radio
+/// had nothing. The channel cannot deliver announces faster than the board
+/// verifies them for long, so this bounds memory rather than speed:
+/// [`Inbox::CAPACITY`] packets, and when it is full the oldest goes, counted,
+/// as the pad's channel counts what it loses.
+#[derive(Debug, Default)]
+pub struct Inbox {
+    packets: alloc::collections::VecDeque<Inbound>,
+    dropped: u32,
+}
+
+impl Inbox {
+    pub const CAPACITY: usize = 8;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a packet; says whether one was dropped to make room.
+    pub fn push(&mut self, packet: &[u8], signal: Option<Signal>, at_ms: u64) -> bool {
+        let full = self.packets.len() == Self::CAPACITY;
+        if full {
+            self.packets.pop_front();
+            self.dropped += 1;
+        }
+        self.packets.push_back(Inbound {
+            packet: packet.to_vec(),
+            signal,
+            at_ms,
+        });
+        full
+    }
+
+    /// The oldest packet waiting.
+    pub fn pop(&mut self) -> Option<Inbound> {
+        self.packets.pop_front()
+    }
+
+    /// Everything waiting, gone, as when a host arrives; says how many.
+    pub fn clear(&mut self) -> usize {
+        let n = self.packets.len();
+        self.packets.clear();
+        n
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    /// Packets dropped because newer ones arrived while it was full.
+    pub fn dropped(&self) -> u32 {
+        self.dropped
+    }
 }
 
 /// Packets the node has to send, waiting for the air.
@@ -519,6 +597,7 @@ fn route(actions: Vec<TransportAction>) -> Outcome {
                 name_hash: announce.name_hash,
                 app_data: announce.app_data,
                 hops: announce.hops,
+                signal: None,
             }),
             TransportAction::AnnounceLocalPathResponse {
                 destination_hash, ..
@@ -594,6 +673,7 @@ mod tests {
             Some(vector("app_data").as_slice())
         );
         assert_eq!(heard.hops, 1, "one hop: it came off the air");
+        assert_eq!(heard.signal, Some(SIGNAL), "and so its signal is its own");
         assert_eq!(node.paths(), 1);
     }
 
@@ -678,6 +758,41 @@ mod tests {
         let out = Node::new(BITRATE, 0, &board()).heard(&relayed, None, 1_000, &mut rng());
         // Two hops before it reached us, and the one onto our radio.
         assert_eq!(out.heard.iter().map(|h| h.hops).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn a_relayed_announce_does_not_carry_the_relays_signal() {
+        let mut relayed = ANNOUNCE.to_vec();
+        relayed[HOPS] = 1;
+        let out = Node::new(BITRATE, 0, &board()).heard(&relayed, Some(SIGNAL), 1_000, &mut rng());
+        assert_eq!(out.heard.len(), 1);
+        assert_eq!(out.heard[0].hops, 2);
+        assert_eq!(out.heard[0].signal, None);
+    }
+
+    #[test]
+    fn the_inbox_is_bounded_drops_the_oldest_and_counts_it() {
+        let mut inbox = Inbox::new();
+        for i in 0..Inbox::CAPACITY as u8 {
+            assert!(!inbox.push(&[i], Some(SIGNAL), u64::from(i)));
+        }
+        assert!(inbox.push(&[100], None, 100), "full: one went");
+        assert!(inbox.push(&[101], None, 101));
+        assert_eq!(inbox.len(), Inbox::CAPACITY);
+        assert_eq!(inbox.dropped(), 2);
+        let first = inbox.pop().unwrap();
+        assert_eq!(
+            first,
+            Inbound {
+                packet: alloc::vec![2],
+                signal: Some(SIGNAL),
+                at_ms: 2
+            },
+            "the two oldest went, and the rest kept what they came with"
+        );
+        assert_eq!(inbox.clear(), Inbox::CAPACITY - 1);
+        assert!(inbox.is_empty() && inbox.pop().is_none());
+        assert_eq!(inbox.dropped(), 2, "a clear is not a loss to the flood");
     }
 
     #[test]

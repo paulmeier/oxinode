@@ -37,7 +37,8 @@ issue with the boot log attached is the most useful form.
 1. Branch from `main`.
 2. Make the change, with tests where the change is testable. A new screen,
    menu item or editable field needs a golden image, which the simulator
-   generates: `sim golden --update`, then commit the PNGs.
+   generates: `sim golden --update`, and again with `--features node` for
+   the node image's set, then commit the PNGs.
 3. Run `tools/test.sh`. It is exactly what CI runs.
 4. If the change touches hardware behaviour, check it on a board and put the
    relevant log lines in the pull request. The images are built to produce

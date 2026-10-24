@@ -22,6 +22,12 @@ monopanel = { path = "../panel" }
 # compressed, and twenty of them are committed as golden images.
 png = "0.18"
 
+[features]
+# The product image with the node: its strip has the Peers screen, and its
+# Home menu has Announce Now. Every picture differs from the RNode's by the
+# strip at least, so it has a golden set of its own, under `golden/node/`.
+node = ["oxinode-core/node"]
+
 [[bin]]
 name = "oxinode-sim"
 path = "src/main.rs"

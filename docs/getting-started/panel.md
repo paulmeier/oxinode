@@ -40,6 +40,18 @@ has, so it does not flicker between two numbers. Menu: *Sleep Screen*,
 board as soon as the announce budget allows (under a host it opens the same
 notice a radio edit does).
 
+**Peers**, in an image with the node only, next to Home. Who else is
+around: every Sideband, MeshChat or oxinode the board has heard announce an
+LXMF address, the one heard most recently first. Two lines each: the name
+from its announce and how long ago it was heard; then the signal of that
+announce if it came straight off the air (`-69 dBm 11.2 dB`), or how many
+hops it came if it was relayed (`2 hops`). A peer that announced no name
+shows the start of its address in angle brackets, `<3b079e41d2>`, and a
+character the font cannot draw shows as a box. The board keeps sixteen
+peers, in RAM until a reboot; when a seventeenth is heard, the one heard
+longest ago goes. Menu: only *Back* for now; messaging a peer comes with
+conversations.
+
 **Radio.** The band first (`sub-GHz` on the SMA or `2.4 GHz` on the u.FL,
 decided by the frequency; a dash for a frequency in neither), then the
 current configuration, which is exactly what a host reads back: frequency

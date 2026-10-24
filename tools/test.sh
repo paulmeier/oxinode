@@ -78,9 +78,13 @@ try cargo test -p oxinode-core --target "$host" --features node
 # target/golden-diff/ and fails here.
 step "lint (sim, $host)"
 try cargo clippy -p oxinode-sim --target "$host" --all-targets -- -D warnings
+try cargo clippy -p oxinode-sim --target "$host" --all-targets --features node -- -D warnings
 
+# Twice: the RNode's set in sim/golden, and the node image's -- whose strip
+# has the Peers screen, so every picture differs -- in sim/golden/node.
 step "unit tests and golden images (sim, $host)"
 try cargo test -p oxinode-sim --target "$host"
+try cargo test -p oxinode-sim --target "$host" --features node
 
 step "unit tests (host tooling)"
 try python3 -m unittest discover -s tools -p 'test_*.py'

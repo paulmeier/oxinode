@@ -86,16 +86,13 @@ enum Command {
 }
 
 /// Where the golden images live, relative to the crate, wherever it is run
-/// from.
+/// from: the RNode's set, or with `node` the node image's.
 fn default_golden_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("golden")
+    golden::dir()
 }
 
 fn default_diff_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("target")
-        .join("golden-diff")
+    golden::diff_dir()
 }
 
 fn parse_args(args: &[String]) -> Result<Command, String> {
@@ -416,8 +413,14 @@ mod tests {
         match parse("golden").unwrap() {
             Command::Golden { update, dir, diff } => {
                 assert!(!update);
-                assert!(dir.ends_with("golden"));
-                assert!(diff.ends_with("golden-diff"));
+                // With the node, the node image's set beside the RNode's.
+                let (set, evidence) = if cfg!(feature = "node") {
+                    ("golden/node", "golden-diff/node")
+                } else {
+                    ("golden", "golden-diff")
+                };
+                assert!(dir.ends_with(set), "{}", dir.display());
+                assert!(diff.ends_with(evidence), "{}", diff.display());
             }
             other => panic!("{other:?}"),
         }

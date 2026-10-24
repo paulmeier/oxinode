@@ -120,6 +120,11 @@ sim golden            # what tools/test.sh runs
 sim golden --update   # after an intended change; commit the result
 ```
 
+With `--features node` on the `cargo run`, the same two commands work on the
+node image's set under `sim/golden/node/`. That image's strip has the Peers
+screen in it, so every one of its pictures differs from the RNode's, and a
+change to any screen regenerates both sets.
+
 The set under `sim/golden/` is generated from the screen list and the field
 list: every screen empty and populated, every item of every menu, a scrolled
 page at the top, the middle and the bottom, every editor open, the refusals

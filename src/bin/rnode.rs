@@ -1012,6 +1012,9 @@ where
             }
         }
 
+        // The engine verifies what waited only when the radio had nothing
+        // for it on this pass; see `oxinode::node`.
+        let radio_quiet = !matches!(event, Either3::Third(Ok(())));
         match event {
             Either3::First(_) | Either3::Second(_) => {}
             Either3::Third(Ok(())) => {
@@ -1106,7 +1109,7 @@ where
             )
             .await;
         }
-        node.tick();
+        node.tick(radio_quiet);
 
         // The node's own packets: only when it is a node, the radio is
         // receiving, and nobody is on the line who may be about to speak.
@@ -1204,7 +1207,7 @@ where
                 if protocol.external().enabled() {
                     protocol.external().draw(&mut ui.scratch);
                 } else {
-                    let state = facts.state(
+                    let mut state = facts.state(
                         &protocol,
                         air_of(&protocol, receiving),
                         host_of(control),
@@ -1215,6 +1218,7 @@ where
                         battery.read().await,
                         battery.charger(),
                     );
+                    state.peers = node.peers();
                     screens::render(&mut ui.scratch, &mut ui.nav, &state);
                 }
                 ui.commit();
@@ -2108,6 +2112,8 @@ impl Facts {
                 announce_gap_s,
                 free_ram: board::free_ram_bytes(),
             },
+            // The node's, which the caller adds; the radio-less loop has none.
+            peers: screens::Peers::default(),
         }
     }
 }

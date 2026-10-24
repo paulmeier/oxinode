@@ -24,7 +24,8 @@ for how to capture it.
    is read, ported or transliterated. Interface data is fine; code is not.
 4. A new screen, menu item or editable field needs a golden image:
    `cargo run -p oxinode-sim --target "$(rustc -vV | sed -n 's/^host: //p')" -- golden --update`,
-   then commit the PNGs.
+   and again with `--features node` before `--` for the node image's set
+   under `sim/golden/node/`, then commit the PNGs.
 5. Run `tools/test.sh`. It is exactly what CI runs.
 6. If the change touches hardware behaviour, check it on a board and quote
    the log lines in the pull request.
