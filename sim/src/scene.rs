@@ -22,7 +22,7 @@ use oxinode_core::edit::Editor;
 use oxinode_core::gps;
 use oxinode_core::lr1121::config::{ConfigError, RadioConfig, BENCH_2G4, DEFAULT};
 use oxinode_core::screens::{
-    self, Air, BluetoothScreen, Home, Host, Identity, Position, Radio, State, System,
+    self, Air, BluetoothScreen, Home, Host, Identity, NodeHashes, Position, Radio, State, System,
 };
 use oxinode_core::sh1107::Frame;
 use oxinode_core::status::Bluetooth;
@@ -134,6 +134,18 @@ pub fn populated() -> State {
             build: "0000000",
             serial: Some(*b"0123456789ABCDEF"),
             identity: Identity::Signed,
+            // The vectors' peer, so the picture holds an address Python
+            // computed: `tools/node_vectors.py`.
+            node: Some(NodeHashes {
+                identity: [
+                    0xac, 0xa3, 0x1a, 0xf0, 0x44, 0x1d, 0x81, 0xdb, 0xec, 0x71, 0xe8, 0x2d, 0xa0,
+                    0xb4, 0xb5, 0xf5,
+                ],
+                lxmf: [
+                    0xfa, 0xe3, 0x21, 0xc4, 0x42, 0xe3, 0xc9, 0xbd, 0xcd, 0x7a, 0x3e, 0x79, 0xd8,
+                    0x50, 0xe0, 0x3c,
+                ],
+            }),
             free_ram: Some(126_976),
         },
     }

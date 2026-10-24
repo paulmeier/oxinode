@@ -59,7 +59,10 @@ what turns it on. Menu: *GPS On/Off*.
 **System.** oxinode's version, the commit it was built from (a short hash,
 `-dirty` if the tree had uncommitted changes), the RNode protocol version it
 speaks, the device serial, the identity (`none`, `bad checksum`, `unsigned`,
-`signed`), and free RAM. Menu: *Reboot*, *Bootloader*.
+`signed`), and free RAM. In an image with the node, also its LXMF address and
+its Reticulum identity hash, each as two rows of sixteen hex digits: the
+address is what a Sideband or MeshChat user sends to. Menu: *Reboot*,
+*Bootloader*.
 
 Every field that can be unknown shows a dash. A board that has heard nothing
 shows `RSSI -`, not `RSSI 0 dBm`; one with no cell shows `Battery -`; the

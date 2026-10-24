@@ -839,6 +839,9 @@ where
     B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
 {
     let mut protocol = Protocol::with_storage(device, mcu_id);
+    // The node's identity is on its own page; see `oxinode::node`. Nothing
+    // without the `node` feature.
+    node.adopt(storage).await;
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     // The phone's own decoder, and an outbox per transport, so a frame in
     // progress on one is never spliced with the other's. Which outbox a
@@ -866,7 +869,7 @@ where
     // When a frame last passed between the modem and a host, on either
     // transport and in either direction, for the Home screen's "talking".
     let mut last_host_frame: Option<Instant> = None;
-    let facts = Facts::new(mcu_id);
+    let facts = Facts::new(mcu_id, node.hashes());
     // What the radio is currently programmed with, so a configuration is not
     // reprogrammed on every packet -- and, more to the point, so that a change
     // is applied exactly once and can be logged when it happens.
@@ -1495,7 +1498,8 @@ where
     // the board can be told.
     let mut ui = Ui::new();
     let mut last_host_frame: Option<Instant> = None;
-    let facts = Facts::new(mcu_id);
+    // No radio, so no node: the board serves its host and nothing else.
+    let facts = Facts::new(mcu_id, None);
 
     loop {
         if usb_log::is_bootloader_touch_tx(tx, control) {
@@ -1881,10 +1885,11 @@ struct Facts {
     serial: [u8; 16],
     ble_name: [u8; interop::NAME_LEN],
     tag: [u8; 4],
+    node: Option<screens::NodeHashes>,
 }
 
 impl Facts {
-    fn new(mcu_id: u64) -> Self {
+    fn new(mcu_id: u64, node: Option<screens::NodeHashes>) -> Self {
         let ble_name = interop::advertised_name(mcu_id);
         let mut tag = [0u8; 4];
         tag.copy_from_slice(&ble_name[interop::NAME_PREFIX.len()..]);
@@ -1892,6 +1897,7 @@ impl Facts {
             serial: oxinode_core::serial::hex_u64(mcu_id),
             ble_name,
             tag,
+            node,
         }
     }
 
@@ -1943,6 +1949,7 @@ impl Facts {
                 build: env!("OXINODE_BUILD"),
                 serial: Some(self.serial),
                 identity: identity_of(protocol),
+                node: self.node,
                 free_ram: board::free_ram_bytes(),
             },
         }

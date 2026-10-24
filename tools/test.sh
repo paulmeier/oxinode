@@ -123,10 +123,10 @@ done
 # The same image with the stack in it, in a target directory of its own so
 # the `rnode` above -- the RNode, and what a developer flashes -- is not
 # replaced by it. Held to ceilings rather than to the chip: the stack, its
-# allocator and the 64 KB heap measured 533,336 bytes of flash and 120,756 of
-# RAM on 2026-10-23, and the ceilings leave room for what the messaging work
-# adds next (an identity, announcing, peers, the LXMF subset) without leaving
-# room for a dependency bump to eat the headroom unnoticed. Raising one is a
+# allocator, the 64 KB heap and the board's identity measured 541,720 bytes
+# of flash and 120,828 of RAM on 2026-10-23, and the ceilings leave room for
+# what the messaging work adds next (announcing, peers, the LXMF subset)
+# without leaving room for a dependency bump to eat the headroom unnoticed. Raising one is a
 # deliberate change, with the reason, in the change that needs it. See
 # docs/hardware/memory-layout.md.
 NODE_MAX_FLASH=589824   # 576 KiB of the 784 KiB the bootloader leaves

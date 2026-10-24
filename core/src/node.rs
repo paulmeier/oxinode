@@ -10,9 +10,11 @@
 //! Reticulum as the input (see `tools/node_vectors.py`).
 //!
 //! What it does today is listen: it hears announces and path requests and
-//! reports them. It has no identity of its own yet, so it announces nothing
-//! and answers nothing; those arrive with the identity and the announcing
-//! that build on this.
+//! reports them. It has an identity of its own ([`key`]), the one the board
+//! keeps for its life, and an `lxmf.delivery` destination derived from it, so
+//! a path request for the board is recognised as one. It announces nothing
+//! and answers nothing yet; that arrives with the announcing that builds on
+//! this.
 //!
 //! # One interface, and no transport
 //!
@@ -51,6 +53,9 @@ use crate::rnode::air::Signal;
 
 pub use rns_crypto::Rng;
 
+pub mod key;
+use key::{Hashes, NodeKey};
+
 /// Where the engine's randomness comes from: ChaCha20, seeded once.
 ///
 /// Not the chip's RNG itself, for two reasons. The Bluetooth controller owns
@@ -79,13 +84,13 @@ impl Rng for Entropy {
 /// The one interface the engine knows: the radio.
 pub const AIR: InterfaceId = InterfaceId(1);
 
-/// What the engine is told about its tables. See the module docs.
-pub fn config() -> TransportConfig {
+/// What the engine is told about its tables, for the board's identity. See
+/// the module docs.
+pub fn config(identity: [u8; 16]) -> TransportConfig {
     TransportConfig {
         // An endpoint, not a transport node: it does not forward.
         transport_enabled: false,
-        // No identity until the board has one of its own.
-        identity_hash: None,
+        identity_hash: Some(identity),
         local_hops_delta: 0,
         prefer_shorter_path: false,
         max_paths_per_destination: 1,
@@ -138,15 +143,18 @@ pub struct Node {
     engine: TransportEngine,
     /// `rnstransport.path.request`, where every path request is addressed.
     path_request: [u8; 16],
+    hashes: Hashes,
 }
 
 impl Node {
-    /// A node listening on the air at `bitrate_bps`, from `now_ms`.
+    /// The board's node, as `key`, listening on the air at `bitrate_bps`
+    /// from `now_ms`.
     ///
     /// The bitrate is what the engine budgets announces against. A radio
     /// with no configuration yet has none, and is passed as zero.
-    pub fn new(bitrate_bps: u32, now_ms: u64) -> Self {
-        let mut engine = TransportEngine::new(config());
+    pub fn new(bitrate_bps: u32, now_ms: u64, key: &NodeKey) -> Self {
+        let hashes = key.hashes();
+        let mut engine = TransportEngine::new(config(hashes.identity));
         engine.register_interface(air(bitrate_bps, now_ms));
         // Path requests come addressed to a plain destination every node
         // listens on, as Python's `Transport` registers it at start. The
@@ -155,17 +163,18 @@ impl Node {
         let path_request =
             rns_core::destination::destination_hash("rnstransport", &["path", "request"], None);
         engine.register_destination(path_request, constants::DESTINATION_PLAIN);
+        // The address peers send to, so a path request for it is reported.
+        engine.register_destination(hashes.lxmf, constants::DESTINATION_SINGLE);
         Self {
             engine,
             path_request,
+            hashes,
         }
     }
 
-    /// Tell the engine a destination is ours, so a path request for it is
-    /// reported in [`Outcome::path_requests`].
-    pub fn register(&mut self, destination: [u8; 16]) {
-        self.engine
-            .register_destination(destination, constants::DESTINATION_SINGLE);
+    /// What the board is called on the network.
+    pub fn hashes(&self) -> Hashes {
+        self.hashes
     }
 
     /// A packet came off the air, already reassembled and with its header
@@ -311,6 +320,16 @@ mod tests {
         FixedRng::new(&[0x5a; 64])
     }
 
+    /// A board's identity: not the one in the vectors, which is the peer's.
+    fn board() -> NodeKey {
+        NodeKey::generate(&mut Entropy::from_seed([9; 32]))
+    }
+
+    /// The peer's identity, the one `tools/node_vectors.py` announced.
+    fn peer() -> NodeKey {
+        NodeKey::from_private(core::array::from_fn(|i| i as u8))
+    }
+
     /// The SF9 / 125 kHz / 4:5 default, near enough.
     const BITRATE: u32 = 1757;
 
@@ -321,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_real_announce_is_heard_with_everything_python_put_in_it() {
-        let mut node = Node::new(BITRATE, 0);
+        let mut node = Node::new(BITRATE, 0, &board());
         let out = node.heard(ANNOUNCE, Some(SIGNAL), 1_000, &mut rng());
         assert_eq!(
             out.air,
@@ -349,11 +368,10 @@ mod tests {
         // housekeeping rather than on receipt, so a minute of ticks after
         // hearing one is what shows the board is an endpoint.
         //
-        // The engine also needs an identity of its own to rebroadcast, and
-        // the node has none yet, so today this holds for two reasons. Turning
-        // forwarding on with an identity set fails it within 250 ms; it is
-        // the test that keeps holding once the board has an identity.
-        let mut node = Node::new(BITRATE, 0);
+        // The node has an identity, which is what the engine needs to
+        // rebroadcast at all, so this is the test that turning forwarding on
+        // fails: within 250 ms.
+        let mut node = Node::new(BITRATE, 0, &board());
         let mut rng = rng();
         assert_eq!(
             node.heard(ANNOUNCE, Some(SIGNAL), 1_000, &mut rng)
@@ -372,7 +390,7 @@ mod tests {
 
     #[test]
     fn the_same_announce_twice_is_heard_once() {
-        let mut node = Node::new(BITRATE, 0);
+        let mut node = Node::new(BITRATE, 0, &board());
         assert_eq!(
             node.heard(ANNOUNCE, Some(SIGNAL), 1_000, &mut rng())
                 .heard
@@ -401,7 +419,7 @@ mod tests {
         for i in (0..ANNOUNCE.len()).filter(|&i| i != HOPS && i != CONTEXT) {
             let mut damaged = ANNOUNCE.to_vec();
             damaged[i] ^= 0x01;
-            let out = Node::new(BITRATE, 0).heard(&damaged, None, 1_000, &mut rng());
+            let out = Node::new(BITRATE, 0, &board()).heard(&damaged, None, 1_000, &mut rng());
             let heard_ours = out
                 .heard
                 .iter()
@@ -422,7 +440,7 @@ mod tests {
     fn the_hop_count_is_not_signed_and_is_read_as_sent() {
         let mut relayed = ANNOUNCE.to_vec();
         relayed[HOPS] = 2;
-        let out = Node::new(BITRATE, 0).heard(&relayed, None, 1_000, &mut rng());
+        let out = Node::new(BITRATE, 0, &board()).heard(&relayed, None, 1_000, &mut rng());
         // Two hops before it reached us, and the one onto our radio.
         assert_eq!(out.heard.iter().map(|h| h.hops).collect::<Vec<_>>(), [3]);
     }
@@ -430,16 +448,19 @@ mod tests {
     #[test]
     fn a_short_packet_is_nothing_and_not_a_panic() {
         for len in 0..ANNOUNCE.len() {
-            let out = Node::new(BITRATE, 0).heard(&ANNOUNCE[..len], None, 1_000, &mut rng());
+            let out =
+                Node::new(BITRATE, 0, &board()).heard(&ANNOUNCE[..len], None, 1_000, &mut rng());
             assert!(out.heard.is_empty() && out.air.is_empty(), "{len} bytes");
         }
     }
 
     #[test]
     fn a_path_request_for_our_destination_is_reported() {
-        let mut node = Node::new(BITRATE, 0);
+        // The vectors' path request asks for the peer's address, so here the
+        // board is the peer, and its LXMF address is registered by being its.
+        let mut node = Node::new(BITRATE, 0, &peer());
         let ours: [u8; 16] = vector("destination").try_into().unwrap();
-        node.register(ours);
+        assert_eq!(node.hashes().lxmf, ours);
         let out = node.heard(PATH_REQUEST, Some(SIGNAL), 1_000, &mut rng());
         assert_eq!(out.path_requests, [ours]);
         assert!(
@@ -450,14 +471,14 @@ mod tests {
 
     #[test]
     fn a_path_request_for_someone_else_is_ignored() {
-        let mut node = Node::new(BITRATE, 0);
+        let mut node = Node::new(BITRATE, 0, &board());
         let out = node.heard(PATH_REQUEST, Some(SIGNAL), 1_000, &mut rng());
         assert_eq!(out, Outcome::default());
     }
 
     #[test]
     fn an_idle_node_sends_nothing() {
-        let mut node = Node::new(BITRATE, 0);
+        let mut node = Node::new(BITRATE, 0, &board());
         let mut rng = rng();
         for t in 0..400 {
             let out = node.tick(t * TICK_MS, &mut rng);
@@ -467,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_radio_with_no_configuration_still_listens() {
-        let out = Node::new(0, 0).heard(ANNOUNCE, None, 1_000, &mut rng());
+        let out = Node::new(0, 0, &board()).heard(ANNOUNCE, None, 1_000, &mut rng());
         assert_eq!(out.heard.len(), 1);
     }
 
@@ -502,7 +523,7 @@ mod tests {
     #[test]
     fn the_node_runs_on_entropy() {
         let mut entropy = Entropy::from_seed([7; 32]);
-        let out = Node::new(BITRATE, 0).heard(ANNOUNCE, None, 1_000, &mut entropy);
+        let out = Node::new(BITRATE, 0, &board()).heard(ANNOUNCE, None, 1_000, &mut entropy);
         assert_eq!(out.heard.len(), 1);
     }
 
