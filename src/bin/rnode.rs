@@ -842,7 +842,9 @@ where
     let mut protocol = Protocol::with_storage(device, mcu_id);
     // The node's identity is on its own page; see `oxinode::node`. Nothing
     // without the `node` feature.
-    node.adopt(storage).await;
+    let ble_name = interop::advertised_name(mcu_id);
+    node.adopt(storage, &ble_name[interop::NAME_PREFIX.len()..])
+        .await;
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     // The phone's own decoder, and an outbox per transport, so a frame in
     // progress on one is never spliced with the other's. Which outbox a
@@ -1106,6 +1108,41 @@ where
         }
         node.tick();
 
+        // The node's own packets: only when it is a node, the radio is
+        // receiving, and nobody is on the line who may be about to speak.
+        // The port opening ends a wait for a clear channel too, because a
+        // host that opens it sends its detect two seconds later and expects
+        // an answer within a fifth of one; see `oxinode::node`.
+        if let (Some(valid), true) = (applied, receiving) {
+            if let Some(out) = node.next_packet(|| !control.dtr() && !phone_connected()) {
+                let sent = send_packet(
+                    dev,
+                    irq,
+                    &mut protocol,
+                    &valid,
+                    out.bytes(),
+                    &mut receiving,
+                    &mut hosts,
+                    &mut rx_buf,
+                    &mut last_signal,
+                    &mut air_in,
+                    &mut sequence,
+                    || control.dtr() || phone_connected(),
+                    &mut |packet, signal| node.heard(packet, signal),
+                )
+                .await;
+                let went = match sent {
+                    Sent::Went(airtime_us) => Some(airtime_us),
+                    Sent::Abandoned => {
+                        defmt::info!("node: a host may be about to speak; the send was given up");
+                        None
+                    }
+                    Sent::Failed | Sent::Dropped => None,
+                };
+                node.sent(out, went);
+            }
+        }
+
         // Gestures from the pad go to the navigator; what it hands back is
         // done here, where the storage and the panel are.
         let mut chosen = heapless::Vec::<ui::Action, { pad::QUEUE }>::new();
@@ -1115,6 +1152,11 @@ where
             }
         }
         for action in chosen {
+            // The node is the loop's, so it is told here; `perform` gives a
+            // host's notice instead when a host has the radio.
+            if action == ui::Action::Announce && host_of(control).lock().is_none() {
+                node.announce_now();
+            }
             let change = perform(
                 action,
                 &mut ui,
@@ -1167,6 +1209,7 @@ where
                         air_of(&protocol, receiving),
                         host_of(control),
                         node.mode(),
+                        node.announce_gap_s(applied),
                         is_talking(last_host_frame),
                         last_signal,
                         battery.read().await,
@@ -1386,118 +1429,185 @@ async fn act<S, B>(
                 defmt::error!("asked to transmit before the radio was configured");
                 return;
             };
-            // One header byte in front, and two frames if it does not fit
-            // in one; see `oxinode_core::rnode::air`. The decoder's capacity
-            // is the longest packet a frame pair carries, so a packet that
-            // does not split cannot reach here.
-            let Some(split) = Split::new(payload, sequence.take()) else {
-                defmt::error!(
-                    "tx: {=usize} bytes is more than two frames; dropped",
-                    payload.len()
-                );
-                return;
-            };
-            let mut frame = [0u8; air::FRAME_MAX];
-            let Some(n) = split.frame(0, &mut frame) else {
-                return;
-            };
-            // The wait for a clear channel is spent listening, and a packet
-            // heard during it goes to whoever is the host right now -- the
-            // same place as a packet heard while idle, and not necessarily
-            // the host that asked for this transmission. Then the
-            // transmission is tried again, with the wait so far remembered.
-            let mut backoff = Backoff::new(&valid, n as u8, Instant::now().as_ticks());
-            let sent = loop {
-                let mut modem = Modem::new(dev, irq);
-                match modem
-                    .transmit(&valid, &frame[..n], &mut backoff, rx_buf)
-                    .await
-                {
-                    Ok(TxOutcome::Sent(report)) => break Ok(report),
-                    Ok(TxOutcome::Heard(report)) => {
-                        defmt::debug!(
-                            "rx while waiting to transmit: {=usize} bytes, rssi {=i16} dBm",
-                            report.len,
-                            report.rssi_dbm
-                        );
-                        *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
-                        // A transmission is a host's, since the node sends
-                        // nothing yet, so what is heard while waiting to send
-                        // is the host's alone.
-                        heard(
-                            air_in,
-                            protocol,
-                            &report,
-                            rx_buf,
-                            hosts.listener(phone_connected()),
-                        );
-                    }
-                    Err(e) => break Err(e),
-                }
-            };
-            // The second frame follows the first with no wait: the receiver
-            // is holding the first half, and a stock RNode holds it until
-            // any other packet arrives and throws it away.
-            let sent = match sent {
-                Ok(report) if split.frames() == 2 => {
-                    let Some(n) = split.frame(1, &mut frame) else {
-                        return;
-                    };
-                    let mut modem = Modem::new(dev, irq);
-                    match modem.send(&valid, &frame[..n], CsmaReport::default()).await {
-                        Ok(second) => Ok(TxReport {
-                            elapsed_us: report.elapsed_us + second.elapsed_us,
-                            airtime_us: report.airtime_us + second.airtime_us,
-                            ..report
-                        }),
-                        Err(e) => Err(e),
-                    }
-                }
-                other => other,
-            };
+            // A transmission is a host's here, so what is heard while waiting
+            // to send is the host's alone, and nothing gives up.
+            let sent = send_packet(
+                dev,
+                irq,
+                protocol,
+                &valid,
+                payload,
+                receiving,
+                hosts,
+                rx_buf,
+                last_signal,
+                air_in,
+                sequence,
+                || false,
+                &mut |_, _| {},
+            )
+            .await;
             match sent {
-                Ok(report) => {
-                    defmt::debug!(
-                        "tx: {=usize} bytes in {=usize} frames under header {=u8:#x} (seq {=u8}), {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
-                        payload.len(),
-                        split.frames(),
-                        split.header(),
-                        air::sequence_of(split.header()),
-                        report.elapsed_us,
-                        report.csma.senses,
-                        report.csma.busy,
-                        report.csma.waited_us
-                    );
-                    if report.csma.forced {
-                        defmt::warn!(
-                            "tx: the channel never read clear; sent after {=u32} us regardless",
-                            report.csma.waited_us
-                        );
-                    }
-                    // Counted and acknowledged before going back to receive, so
-                    // a host using flow control is released as early as it can
-                    // be rather than after the restart. A modem that never
-                    // sends CMD_READY works perfectly until somebody turns
-                    // flow control on, and then stops after one packet.
-                    protocol.transmitted(hosts.outbox(via));
-                }
-                Err(e) => {
-                    defmt::error!("tx failed: {}", e);
-                    protocol.report_error(error::TXFAILED, hosts.outbox(via));
-                }
-            }
-            // Transmitting leaves the chip in standby, so receive has to be
-            // restarted explicitly or the modem goes deaf after its first
-            // packet -- the kind of fault that looks like a range problem.
-            if *receiving {
-                let mut modem = Modem::new(dev, irq);
-                if let Err(e) = modem.start_rx(&valid).await {
-                    defmt::error!("could not return to receive: {}", e);
-                    *receiving = false;
-                }
+                // Counted and acknowledged before going back to receive, so
+                // a host using flow control is released as early as it can
+                // be rather than after the restart. A modem that never
+                // sends CMD_READY works perfectly until somebody turns
+                // flow control on, and then stops after one packet.
+                Sent::Went(_) => protocol.transmitted(hosts.outbox(via)),
+                Sent::Failed => protocol.report_error(error::TXFAILED, hosts.outbox(via)),
+                Sent::Dropped | Sent::Abandoned => {}
             }
         }
     }
+}
+
+/// What became of a packet [`send_packet`] was given.
+enum Sent {
+    /// It went, taking this long on the air.
+    Went(u32),
+    /// The radio refused or did not finish it; the log says how.
+    Failed,
+    /// It could not be framed: more than two frames' worth.
+    Dropped,
+    /// The caller gave up while the channel was being waited for.
+    Abandoned,
+}
+
+/// One packet onto the air, as a stock RNode would put it there: a header
+/// byte in front, two frames if it does not fit in one, and carrier sense
+/// before the first. Shared by a host's packets and the node's, so the two
+/// cannot come to differ on the air.
+///
+/// The wait for a clear channel is spent listening, and a packet heard during
+/// it goes to whoever is the host right now -- the same place as a packet
+/// heard while idle, and not necessarily the host that asked for this
+/// transmission -- and then to `node`, which takes it only when the board is
+/// a node. Then the transmission is tried again, with the wait so far
+/// remembered. `abandon` is asked before each sense; see
+/// [`Modem::transmit`].
+#[allow(clippy::too_many_arguments)]
+async fn send_packet<S, B>(
+    dev: &mut lr11xx::Lr11xx<S, B>,
+    irq: &mut radio::RadioIrq<'_>,
+    protocol: &mut Protocol,
+    valid: &ValidConfig,
+    payload: &[u8],
+    receiving: &mut bool,
+    hosts: &mut Hosts<OUTBOX>,
+    rx_buf: &mut [u8],
+    last_signal: &mut Option<(i16, i8)>,
+    air_in: &mut Reassembler,
+    sequence: &mut Sequence,
+    abandon: impl Fn() -> bool,
+    node: &mut dyn FnMut(&[u8], air::Signal),
+) -> Sent
+where
+    S: embedded_hal_async::spi::SpiDevice<u8>,
+    B: embedded_hal::digital::InputPin + embedded_hal_async::digital::Wait,
+{
+    // One header byte in front, and two frames if it does not fit in one;
+    // see `oxinode_core::rnode::air`. The decoder's capacity is the longest
+    // packet a frame pair carries, so a host packet that does not split
+    // cannot reach here.
+    let Some(split) = Split::new(payload, sequence.take()) else {
+        defmt::error!(
+            "tx: {=usize} bytes is more than two frames; dropped",
+            payload.len()
+        );
+        return Sent::Dropped;
+    };
+    let mut frame = [0u8; air::FRAME_MAX];
+    let Some(n) = split.frame(0, &mut frame) else {
+        return Sent::Dropped;
+    };
+    let mut backoff = Backoff::new(valid, n as u8, Instant::now().as_ticks());
+    let sent = loop {
+        let mut modem = Modem::new(dev, irq);
+        match modem
+            .transmit(valid, &frame[..n], &mut backoff, rx_buf, &abandon)
+            .await
+        {
+            Ok(TxOutcome::Sent(report)) => break Ok(report),
+            Ok(TxOutcome::Abandoned) => break Err(None),
+            Ok(TxOutcome::Heard(report)) => {
+                defmt::debug!(
+                    "rx while waiting to transmit: {=usize} bytes, rssi {=i16} dBm",
+                    report.len,
+                    report.rssi_dbm
+                );
+                *last_signal = Some((report.rssi_dbm, report.snr_quarter_db));
+                if let Some(packet) = heard(
+                    air_in,
+                    protocol,
+                    &report,
+                    rx_buf,
+                    hosts.listener(phone_connected()),
+                ) {
+                    node(packet.payload, packet.signal);
+                }
+            }
+            Err(e) => break Err(Some(e)),
+        }
+    };
+    // The second frame follows the first with no wait: the receiver is
+    // holding the first half, and a stock RNode holds it until any other
+    // packet arrives and throws it away.
+    let sent = match sent {
+        Ok(report) if split.frames() == 2 => match split.frame(1, &mut frame) {
+            None => Err(None),
+            Some(n) => {
+                let mut modem = Modem::new(dev, irq);
+                match modem.send(valid, &frame[..n], CsmaReport::default()).await {
+                    Ok(second) => Ok(TxReport {
+                        elapsed_us: report.elapsed_us + second.elapsed_us,
+                        airtime_us: report.airtime_us + second.airtime_us,
+                        ..report
+                    }),
+                    Err(e) => Err(Some(e)),
+                }
+            }
+        },
+        other => other,
+    };
+    let outcome = match sent {
+        Ok(report) => {
+            defmt::debug!(
+                "tx: {=usize} bytes in {=usize} frames under header {=u8:#x} (seq {=u8}), {=u32} us, after {=u32} senses ({=u32} busy) and {=u32} us waiting",
+                payload.len(),
+                split.frames(),
+                split.header(),
+                air::sequence_of(split.header()),
+                report.elapsed_us,
+                report.csma.senses,
+                report.csma.busy,
+                report.csma.waited_us
+            );
+            if report.csma.forced {
+                defmt::warn!(
+                    "tx: the channel never read clear; sent after {=u32} us regardless",
+                    report.csma.waited_us
+                );
+            }
+            Sent::Went(report.airtime_us)
+        }
+        Err(None) => Sent::Abandoned,
+        Err(Some(e)) => {
+            defmt::error!("tx failed: {}", e);
+            Sent::Failed
+        }
+    };
+    // Transmitting leaves the chip in standby, so receive has to be
+    // restarted explicitly or the modem goes deaf after its first packet --
+    // the kind of fault that looks like a range problem. An abandoned wait
+    // was spent in receive and ends in standby too.
+    if *receiving {
+        let mut modem = Modem::new(dev, irq);
+        if let Err(e) = modem.start_rx(valid).await {
+            defmt::error!("could not return to receive: {}", e);
+            *receiving = false;
+        }
+    }
+    outcome
 }
 
 /// Answer a host when the radio never came up.
@@ -1640,6 +1750,7 @@ where
                         &protocol,
                         Air::NoRadio,
                         host_of(control),
+                        None,
                         None,
                         is_talking(last_host_frame),
                         None,
@@ -1852,6 +1963,8 @@ async fn perform(
             commit(storage, protocol).await;
             boot::reboot_to_bootloader();
         }
+        // The node, which the modem loop holds, has been told already.
+        ui::Action::Announce => PanelChange::NONE,
         // Nobody has the radio, or this would have been the notice above.
         ui::Action::Edit(field) => {
             defmt::info!("ui: editing {=str}", field.name());
@@ -1951,6 +2064,7 @@ impl Facts {
         air: Air,
         host: Host,
         mode: Option<Mode>,
+        announce_gap_s: Option<u32>,
         talking: bool,
         last_signal: Option<(i16, i8)>,
         battery: Option<oxinode_core::battery::Reading>,
@@ -1991,6 +2105,7 @@ impl Facts {
                 serial: Some(self.serial),
                 identity: identity_of(protocol),
                 node: self.node,
+                announce_gap_s,
                 free_ram: board::free_ram_bytes(),
             },
         }

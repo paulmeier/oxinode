@@ -43,15 +43,24 @@ pub use imp::*;
 
 #[cfg(feature = "node")]
 mod imp {
+    extern crate alloc;
+
     use core::fmt::Write;
     use core::mem::MaybeUninit;
 
+    use alloc::string::String;
+    use alloc::vec::Vec;
     use embassy_nrf::rng::Rng;
     use embassy_time::Instant;
     use embedded_alloc::LlffHeap as Heap;
+
+    use oxinode_core::lr1121::config::ValidConfig;
     use oxinode_core::mode::Presence;
+    use oxinode_core::node::announce::{self, Kind};
     use oxinode_core::node::key::{NodeKey, Stored};
-    use oxinode_core::node::{Entropy, Node, Outcome, TICK_MS};
+    use oxinode_core::node::{
+        announce_len, lxmf_app_data, Entropy, Followed, Node, Outcome, Sending, TICK_MS,
+    };
 
     use super::*;
 
@@ -81,6 +90,11 @@ mod imp {
         presence: Presence,
         /// Whether a configuration was stored at the last look.
         stored_config: bool,
+        /// What waits for the air, and when announces may go; the rule is
+        /// `oxinode_core::node::Sending`.
+        sending: Sending,
+        /// The board's name in its announces, as LXMF's app data.
+        app_data: Vec<u8>,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
@@ -120,6 +134,8 @@ mod imp {
                 node: None,
                 presence: Presence::new(),
                 stored_config: false,
+                sending: Sending::new(),
+                app_data: Vec::new(),
                 entropy: Entropy::from_seed(seed),
                 last_tick_ms: now_ms(),
                 reported_peak: 0,
@@ -133,7 +149,14 @@ mod imp {
         /// written, which is a board's first boot with a node, or written and
         /// damaged, which the log says apart. One that cannot be stored is
         /// still used, and the log says that the next boot will make another.
-        pub async fn adopt<F: RecordFlash>(&mut self, storage: &mut Storage<F>) {
+        ///
+        /// `tag` is the four hex digits the board is known by everywhere --
+        /// the end of its Bluetooth name, top right on the panel -- and its
+        /// announces call it `oxinode` and those.
+        pub async fn adopt<F: RecordFlash>(&mut self, storage: &mut Storage<F>, tag: &[u8]) {
+            let mut name = String::from("oxinode ");
+            name.push_str(core::str::from_utf8(tag).unwrap_or("?"));
+            self.app_data = lxmf_app_data(&name);
             let key = match storage.load_key() {
                 Stored::Key(key) => {
                     let hashes = key.hashes();
@@ -211,6 +234,84 @@ mod imp {
             Some(change)
         }
 
+        /// Notice the node starting or stopping, which a host coming or
+        /// going does, and so does a configuration being stored or reset.
+        /// Starting announces; stopping drops whatever was waiting to go.
+        fn follow_mode(&mut self) {
+            let running = self.running() && self.node.is_some();
+            match self.sending.follow(running, now_ms()) {
+                Some(Followed::Started) => defmt::info!("node: running; an announce is due"),
+                Some(Followed::Stopped(dropped)) => defmt::info!(
+                    "node: stopped; {=usize} packets it had waiting were dropped, {=u32} in all",
+                    dropped,
+                    self.sending.dropped()
+                ),
+                None => {}
+            }
+        }
+
+        /// *Announce Now*, from the panel: as soon as the budget allows.
+        pub fn announce_now(&mut self) {
+            if self.running() {
+                defmt::info!(
+                    "node: an announce asked for; the budget allows one from {=u64} ms",
+                    self.sending.allowed_from()
+                );
+                self.sending.want(Kind::Announce);
+            }
+        }
+
+        /// The next packet for the air, if the board is a node and nobody is
+        /// on the line who may be about to speak: a port open or a phone
+        /// linked. Listening goes on regardless; only sending waits.
+        pub fn next_packet(
+            &mut self,
+            nobody_on_the_line: impl FnOnce() -> bool,
+        ) -> Option<Outgoing> {
+            self.follow_mode();
+            if !self.running() {
+                return None;
+            }
+            self.sending
+                .next(nobody_on_the_line())
+                .map(|(packet, kind)| Outgoing { packet, kind })
+        }
+
+        /// What became of a packet [`Listener::next_packet`] gave out:
+        /// `Some(airtime)` if it went. An announce that went spends the
+        /// budget; one that did not is asked for again.
+        pub fn sent(&mut self, out: Outgoing, went: Option<u32>) {
+            self.sending.sent(out.kind, went, now_ms());
+            if let (Some(kind), Some(airtime_us)) = (out.kind, went) {
+                defmt::info!(
+                    "node: {=str} sent, {=u32} us on the air; the next may go in {=u64} ms",
+                    match kind {
+                        Kind::Announce => "announce",
+                        Kind::PathResponse => "path response",
+                    },
+                    airtime_us,
+                    announce::gap_ms(airtime_us)
+                );
+            }
+        }
+
+        /// The least time between two announces at `config`, by the budget,
+        /// for the System screen.
+        pub fn announce_gap_s(&self, config: Option<ValidConfig>) -> Option<u32> {
+            let airtime = announce::airtime_us(&config?, announce_len(self.app_data.len()))?;
+            Some((announce::gap_ms(airtime) / 1_000) as u32)
+        }
+
+        /// What the GPS says the time is, for an announce's emission time:
+        /// Unix seconds, or zero, which Reticulum reads as not known.
+        fn emitted_s() -> u64 {
+            let position = crate::gps::position();
+            match (position.date, position.time) {
+                (Some(date), Some(time)) => date.unix_seconds(time).unwrap_or(0),
+                _ => 0,
+            }
+        }
+
         /// Which of the two the board is, for the Home screen.
         pub fn mode(&self) -> Option<Mode> {
             Some(self.presence.mode(self.stored_config))
@@ -236,6 +337,7 @@ mod imp {
         /// Called on every pass of the modem loop; runs the engine's
         /// housekeeping as often as it asks for it.
         pub fn tick(&mut self) {
+            self.follow_mode();
             if !self.running() {
                 return;
             }
@@ -249,6 +351,17 @@ mod imp {
             let out = node.tick(now, &mut self.entropy);
             self.last_tick_ms = now;
             self.report(out);
+            // An announce, if one is due and the budget allows it.
+            if let Some(kind) = self.sending.due(now) {
+                let emitted = Self::emitted_s();
+                let built = self.node.as_ref().and_then(|node| {
+                    node.announce(kind, &self.app_data, emitted, &mut self.entropy)
+                });
+                match built {
+                    Some(packet) => self.sending.push(packet, Some(kind)),
+                    None => defmt::error!("node: the announce could not be built"),
+                }
+            }
         }
 
         fn report(&mut self, out: Outcome) {
@@ -261,16 +374,14 @@ mod imp {
                 );
             }
             for destination in &out.path_requests {
-                defmt::warn!(
-                    "node: a path request for {=[u8]:02x}, which nothing answers yet",
+                defmt::info!(
+                    "node: a path request for {=[u8]:02x}; a path response is due",
                     &destination[..]
                 );
+                self.sending.want(Kind::PathResponse);
             }
-            if !out.air.is_empty() {
-                defmt::warn!(
-                    "node: {=usize} packets to send, and nothing sends yet",
-                    out.air.len()
-                );
+            for packet in out.air {
+                self.sending.push(packet, None);
             }
             let used = HEAP.used();
             if used >= self.reported_peak + PEAK_STEP {
@@ -282,6 +393,18 @@ mod imp {
                     self.node.as_ref().map_or(0, Node::paths)
                 );
             }
+        }
+    }
+
+    /// A packet of the node's on its way to the air.
+    pub struct Outgoing {
+        packet: Vec<u8>,
+        kind: Option<Kind>,
+    }
+
+    impl Outgoing {
+        pub fn bytes(&self) -> &[u8] {
+            &self.packet
         }
     }
 
@@ -358,6 +481,18 @@ mod imp {
 #[cfg(not(feature = "node"))]
 pub struct Listener;
 
+/// Without the node there is nothing to send, and this says so in the type:
+/// no value of it exists, so the modem loop's sending code is dead.
+#[cfg(not(feature = "node"))]
+pub enum Outgoing {}
+
+#[cfg(not(feature = "node"))]
+impl Outgoing {
+    pub fn bytes(&self) -> &[u8] {
+        match *self {}
+    }
+}
+
 #[cfg(not(feature = "node"))]
 impl Listener {
     pub fn new(_rng: Peri<'_, RNG>) -> Self {
@@ -365,7 +500,28 @@ impl Listener {
     }
 
     #[inline(always)]
-    pub async fn adopt<F: RecordFlash>(&mut self, _storage: &mut Storage<F>) {}
+    pub async fn adopt<F: RecordFlash>(&mut self, _storage: &mut Storage<F>, _tag: &[u8]) {}
+
+    #[inline(always)]
+    pub fn announce_now(&mut self) {}
+
+    #[inline(always)]
+    pub fn next_packet(&mut self, _nobody_on_the_line: impl FnOnce() -> bool) -> Option<Outgoing> {
+        None
+    }
+
+    #[inline(always)]
+    pub fn sent(&mut self, out: Outgoing, _went: Option<u32>) {
+        match out {}
+    }
+
+    #[inline(always)]
+    pub fn announce_gap_s(
+        &self,
+        _config: Option<oxinode_core::lr1121::config::ValidConfig>,
+    ) -> Option<u32> {
+        None
+    }
 
     #[inline(always)]
     pub fn hashes(&self) -> Option<NodeHashes> {

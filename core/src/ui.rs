@@ -62,10 +62,22 @@ pub enum Screen {
 }
 
 /// What [`Screen::Home`] offers.
+#[cfg(not(feature = "node"))]
 const HOME_MENU: [Item<Action>; 3] = [
     Item::BACK,
     Item::new("Sleep Screen", Action::SleepScreen),
     Item::new("Redraw", Action::Redraw),
+];
+
+/// With the node, also *Announce Now*. Only there: an RNode has nothing of
+/// its own to announce, and a menu item that answers with nothing teaches
+/// people the board is broken.
+#[cfg(feature = "node")]
+const HOME_MENU: [Item<Action>; 4] = [
+    Item::BACK,
+    Item::new("Sleep Screen", Action::SleepScreen),
+    Item::new("Redraw", Action::Redraw),
+    Item::new("Announce Now", Action::Announce),
 ];
 
 /// What [`Screen::Radio`] offers: the band, an editor for each of the five
@@ -242,6 +254,9 @@ pub enum Action {
     Reboot,
     /// Restart into the UF2 bootloader.
     Bootloader,
+    /// Announce the board now, as soon as the announce budget allows. Only
+    /// offered in an image with the node.
+    Announce,
 }
 
 impl Action {
@@ -259,11 +274,13 @@ impl Action {
             Action::ToggleGps => "gps on/off",
             Action::Reboot => "reboot",
             Action::Bootloader => "bootloader",
+            Action::Announce => "announce now",
         }
     }
 
     /// Whether carrying this out changes the live radio configuration or the
-    /// radio's state -- the things a host that has the line believes it owns.
+    /// radio's state, or puts something of the board's own on the air -- the
+    /// things a host that has the line believes it owns.
     ///
     /// This is the host-ownership rule in one place. A caller with a host on
     /// the line refuses these and does the rest; see
@@ -271,7 +288,11 @@ impl Action {
     pub const fn changes_the_radio(self) -> bool {
         matches!(
             self,
-            Action::ToggleRadio | Action::ResetRadioConfig | Action::Edit(_) | Action::Set(_)
+            Action::ToggleRadio
+                | Action::ResetRadioConfig
+                | Action::Edit(_)
+                | Action::Set(_)
+                | Action::Announce
         )
     }
 }
@@ -703,6 +724,12 @@ mod tests {
                 }
             }
         }
+        // With the node, announcing puts the board's own packet on the air,
+        // which is the host's while there is one.
+        #[cfg(feature = "node")]
+        assert_eq!(owned.first(), Some(&"Announce Now"));
+        #[cfg(feature = "node")]
+        owned.remove(0);
         assert_eq!(
             owned,
             [

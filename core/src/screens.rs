@@ -240,6 +240,10 @@ pub struct System {
     /// `None` is an image without one, and draws no rows at all rather than
     /// dashes: a dash says "not known yet", and an RNode has nothing to know.
     pub node: Option<NodeHashes>,
+    /// The least time between two of the board's announces, by the announce
+    /// budget at the current configuration, in seconds. Drawn only with a
+    /// node; `None` there is a radio with no configuration.
+    pub announce_gap_s: Option<u32>,
     /// Bytes between the top of static data and the stack pointer.
     pub free_ram: Option<u32>,
 }
@@ -252,6 +256,7 @@ impl Default for System {
             serial: None,
             identity: Identity::None,
             node: None,
+            announce_gap_s: None,
             free_ram: None,
         }
     }
@@ -769,6 +774,17 @@ impl System {
             // rows of sixteen under the label, as the serial is.
             hash(out, "LXMF address", &node.lxmf);
             hash(out, "RNS identity", &node.identity);
+            let mut gap = Text::<LINE_CHARS>::new();
+            match self.announce_gap_s {
+                Some(s) => {
+                    let _ = gap.write_str("1 per ");
+                    duration(&mut gap, s);
+                }
+                None => {
+                    let _ = gap.write_str("-");
+                }
+            }
+            out.row("Announce", gap.as_str());
         }
         v.clear();
         match self.free_ram {
@@ -781,6 +797,17 @@ impl System {
         }
         out.row("RAM free", v.as_str());
     }
+}
+
+/// A span in the fewest words that say it: `45 s`, `4m12s`, `3h05m`.
+fn duration(out: &mut Text<LINE_CHARS>, s: u32) {
+    let _ = if s < 60 {
+        write!(out, "{s} s")
+    } else if s < 3_600 {
+        write!(out, "{}m{:02}s", s / 60, s % 60)
+    } else {
+        write!(out, "{}h{:02}m", s / 3_600, s % 3_600 / 60)
+    };
 }
 
 /// A 16-byte hash under its label: two rows of sixteen lowercase hex digits,
@@ -1192,6 +1219,7 @@ mod tests {
                     identity: [0xa1; 16],
                     lxmf: core::array::from_fn(|i| 0x10 + i as u8),
                 }),
+                announce_gap_s: Some(252),
                 free_ram: Some(123_456),
             },
         }
@@ -1336,6 +1364,7 @@ mod tests {
         assert_eq!(lines[at + 3], "RNS identity");
         assert_eq!(lines[at + 4], "a1".repeat(8));
         assert_eq!(lines[at + 5], "a1".repeat(8));
+        assert_eq!(lines[at + 6], "Announce 1 per 4m12s");
 
         state.system.node = None;
         let rnode = lines_of(&state, Screen::System);
@@ -1345,7 +1374,8 @@ mod tests {
                 .any(|l| l.contains("LXMF") || l.contains("RNS")),
             "{rnode:?}"
         );
-        assert_eq!(rnode.len(), lines.len() - 6);
+        assert!(!rnode.iter().any(|l| l.starts_with("Announce")));
+        assert_eq!(rnode.len(), lines.len() - 7);
     }
 
     /// **The position screen with no fix says so, and shows no coordinate.**
@@ -1534,7 +1564,7 @@ mod tests {
             assert_ne!(all(&changed), reference, "changing {name} changed no line");
         }
         // And the rest, which change the picture rather than a line.
-        let system: [Mutation; 8] = [
+        let system: [Mutation; 9] = [
             ("version", |s| s.system.version = "9.9.9"),
             ("build", |s| s.system.build = "fffffff-dirty"),
             ("serial", |s| s.system.serial = None),
@@ -1546,6 +1576,7 @@ mod tests {
             ("rns identity", |s| {
                 s.system.node.as_mut().unwrap().identity[0] ^= 1
             }),
+            ("announce gap", |s| s.system.announce_gap_s = Some(45)),
             ("ram", |s| s.system.free_ram = Some(1)),
         ];
         for (name, mutate) in system {
@@ -1717,6 +1748,25 @@ mod tests {
     }
 
     /// The free-RAM arithmetic does not wrap when the stack has eaten the gap.
+    #[test]
+    fn the_announce_gap_reads_at_every_scale() {
+        let gap = |s| {
+            let mut v = Text::<LINE_CHARS>::new();
+            duration(&mut v, s);
+            v.as_str().to_owned()
+        };
+        assert_eq!(gap(45), "45 s");
+        assert_eq!(gap(60), "1m00s");
+        assert_eq!(gap(252), "4m12s");
+        assert_eq!(gap(3_599), "59m59s");
+        assert_eq!(gap(3_600), "1h00m");
+        assert_eq!(gap(11_100), "3h05m");
+        // Hours stay one digit at the slowest configuration the radio
+        // accepts (`node::announce` holds it under ten), and that still fits
+        // beside its label with a space between.
+        assert!("Announce 1 per ".len() + gap(9 * 3_600 + 59 * 60).len() <= LINE_CHARS);
+    }
+
     #[test]
     fn free_ram_is_the_gap_or_nothing() {
         assert_eq!(free_ram(0x2000_1000, 0x2003_F000), Some(0x3E000));

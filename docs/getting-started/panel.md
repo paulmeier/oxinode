@@ -36,7 +36,9 @@ out, the last packet's RSSI and SNR, uptime, the battery, and what the charger
 is doing (`charging`, `full`, `unplugged`, `fault`, `latched off`). The
 battery reading is averaged over a few seconds and only moves when the cell
 has, so it does not flicker between two numbers. Menu: *Sleep Screen*,
-*Redraw*.
+*Redraw*, and in an image with the node *Announce Now*, which announces the
+board as soon as the announce budget allows (under a host it opens the same
+notice a radio edit does).
 
 **Radio.** The band first (`sub-GHz` on the SMA or `2.4 GHz` on the u.FL,
 decided by the frequency; a dash for a frequency in neither), then the
@@ -64,8 +66,9 @@ what turns it on. Menu: *GPS On/Off*.
 speaks, the device serial, the identity (`none`, `bad checksum`, `unsigned`,
 `signed`), and free RAM. In an image with the node, also its LXMF address and
 its Reticulum identity hash, each as two rows of sixteen hex digits: the
-address is what a Sideband or MeshChat user sends to. Menu: *Reboot*,
-*Bootloader*.
+address is what a Sideband or MeshChat user sends to; and `Announce`, the
+least time between two of its announces at the current configuration (`1 per
+26 s`). Menu: *Reboot*, *Bootloader*.
 
 Every field that can be unknown shows a dash. A board that has heard nothing
 shows `RSSI -`, not `RSSI 0 dBm`; one with no cell shows `Battery -`; the

@@ -53,6 +53,7 @@ use crate::rnode::air::Signal;
 
 pub use rns_crypto::Rng;
 
+pub mod announce;
 pub mod key;
 use key::{Hashes, NodeKey};
 
@@ -144,6 +145,8 @@ pub struct Node {
     /// `rnstransport.path.request`, where every path request is addressed.
     path_request: [u8; 16],
     hashes: Hashes,
+    /// The board's identity, to sign its announces with.
+    identity: rns_crypto::identity::Identity,
 }
 
 impl Node {
@@ -169,12 +172,57 @@ impl Node {
             engine,
             path_request,
             hashes,
+            identity: key.identity(),
         }
     }
 
     /// What the board is called on the network.
     pub fn hashes(&self) -> Hashes {
         self.hashes
+    }
+
+    /// The board's `lxmf.delivery` announce, ready for the air.
+    ///
+    /// `app_data` is what peers show as the board's name ([`lxmf_app_data`]).
+    /// `emitted_s` is the emission time a receiver compares paths by: Unix
+    /// seconds when the GPS has said what time it is, and zero, which
+    /// Reticulum reads as not known, when it has not. The board has no other
+    /// clock. A path response is the same announce marked as answering a
+    /// path request.
+    pub fn announce(
+        &self,
+        kind: announce::Kind,
+        app_data: &[u8],
+        emitted_s: u64,
+        rng: &mut dyn Rng,
+    ) -> Option<Vec<u8>> {
+        let mut random_hash = [0u8; 10];
+        rng.fill_bytes(&mut random_hash[..5]);
+        random_hash[5..].copy_from_slice(&emitted_s.to_be_bytes()[3..]);
+        let name_hash = rns_core::destination::name_hash("lxmf", &["delivery"]);
+        let (data, _) = rns_core::announce::AnnounceData::pack(
+            &self.identity,
+            &self.hashes.lxmf,
+            &name_hash,
+            &random_hash,
+            None,
+            Some(app_data),
+        )
+        .ok()?;
+        let flags = rns_core::packet::PacketFlags {
+            header_type: constants::HEADER_1,
+            context_flag: constants::FLAG_UNSET,
+            transport_type: constants::TRANSPORT_BROADCAST,
+            destination_type: constants::DESTINATION_SINGLE,
+            packet_type: constants::PACKET_TYPE_ANNOUNCE,
+        };
+        let context = match kind {
+            announce::Kind::Announce => constants::CONTEXT_NONE,
+            announce::Kind::PathResponse => constants::CONTEXT_PATH_RESPONSE,
+        };
+        RawPacket::pack(flags, 0, &self.hashes.lxmf, None, context, &data)
+            .ok()
+            .map(|p| p.raw)
     }
 
     /// A packet came off the air, already reassembled and with its header
@@ -211,7 +259,12 @@ impl Node {
             _ => true,
         });
         actions.append(&mut answers);
-        route(actions)
+        let mut out = route(actions);
+        // The board's own announce, relayed back by somebody, is not a peer;
+        // Reticulum ignores announces for its own destinations as well.
+        let ours = self.hashes.lxmf;
+        out.heard.retain(|h| h.destination != ours);
+        out
     }
 
     /// Housekeeping: timeouts, queued announces, table culls. The engine
@@ -223,6 +276,188 @@ impl Node {
     /// How many destinations the engine holds a path to.
     pub fn paths(&self) -> usize {
         self.engine.path_table_count()
+    }
+}
+
+/// LXMF's announce app data for a display name: a two-element msgpack array
+/// of the name as bytes and the stamp cost, which the board does not set.
+/// What Sideband and MeshChat put there, and what they read a name out of.
+pub fn lxmf_app_data(name: &str) -> Vec<u8> {
+    let name = &name.as_bytes()[..name.len().min(u8::MAX as usize)];
+    let mut out = Vec::with_capacity(name.len() + 4);
+    out.extend_from_slice(&[0x92, 0xc4, name.len() as u8]);
+    out.extend_from_slice(name);
+    out.push(0xc0);
+    out
+}
+
+/// How long the board's announce is with `app_data_len` bytes of app data:
+/// the header and the address, the public key, the name and random hashes,
+/// the signature, then the app data.
+pub const fn announce_len(app_data_len: usize) -> usize {
+    2 + 16 + 1 + 64 + 10 + 10 + 64 + app_data_len
+}
+
+/// Packets the node has to send, waiting for the air.
+///
+/// Bounded: [`Queue::CAPACITY`] packets, and when it is full the oldest goes,
+/// counted, as the pad's channel drops and counts. When a host arrives the
+/// whole queue goes the same way: nothing the node wanted to say is sent
+/// under somebody else's RNode.
+#[derive(Debug, Default)]
+pub struct Queue {
+    packets: alloc::collections::VecDeque<(Vec<u8>, Option<announce::Kind>)>,
+    dropped: u32,
+}
+
+impl Queue {
+    pub const CAPACITY: usize = 4;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a packet, with the kind of announce it is if it is one.
+    pub fn push(&mut self, packet: Vec<u8>, announce: Option<announce::Kind>) {
+        if self.packets.len() == Self::CAPACITY {
+            self.packets.pop_front();
+            self.dropped += 1;
+        }
+        self.packets.push_back((packet, announce));
+    }
+
+    /// The next packet to send.
+    pub fn pop(&mut self) -> Option<(Vec<u8>, Option<announce::Kind>)> {
+        self.packets.pop_front()
+    }
+
+    /// Everything waiting, gone; says how many.
+    pub fn clear(&mut self) -> usize {
+        let n = self.packets.len();
+        self.dropped += n as u32;
+        self.packets.clear();
+        n
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    /// Packets that never went: pushed out by newer ones, or cleared.
+    pub fn dropped(&self) -> u32 {
+        self.dropped
+    }
+}
+
+/// What the node has to send and when it may: the announce [`Schedule`] and
+/// the [`Queue`], and the rule that ties them to the mode.
+///
+/// The rule: the node sends only while it is running (`Mode::Node`, see
+/// [`crate::mode`]), and only while nobody is on the line who may be about
+/// to speak -- no port open, no phone linked -- because a host that opens the
+/// port sends its detect two seconds later and gives the board a fifth of a
+/// second to answer. When the node stops, whatever was waiting is dropped and
+/// counted, and the schedule stops asking; when it starts, an announce is
+/// due, inside the budget the last one bought.
+///
+/// [`Schedule`]: announce::Schedule
+#[derive(Debug, Default)]
+pub struct Sending {
+    schedule: announce::Schedule,
+    queue: Queue,
+    running: bool,
+}
+
+/// What [`Sending::follow`] saw happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Followed {
+    /// The node started: an announce is due.
+    Started,
+    /// The node stopped, and this many packets it had waiting went with it.
+    Stopped(usize),
+}
+
+impl Sending {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the node is running now; says when that changed.
+    pub fn follow(&mut self, running: bool, now_ms: u64) -> Option<Followed> {
+        let was = core::mem::replace(&mut self.running, running);
+        match (was, running) {
+            (false, true) => {
+                self.schedule.started(now_ms);
+                Some(Followed::Started)
+            }
+            (true, false) => {
+                self.schedule.withhold();
+                Some(Followed::Stopped(self.queue.clear()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Something asks for an announce. Nothing is asked for while stopped.
+    pub fn want(&mut self, kind: announce::Kind) {
+        if self.running {
+            self.schedule.want(kind);
+        }
+    }
+
+    /// The announce due now, if any, to be built and handed to [`push`].
+    ///
+    /// [`push`]: Sending::push
+    pub fn due(&mut self, now_ms: u64) -> Option<announce::Kind> {
+        if self.running {
+            self.schedule.due(now_ms)
+        } else {
+            None
+        }
+    }
+
+    /// A packet for the air: an announce of `kind`, or `None` for one of the
+    /// engine's own.
+    pub fn push(&mut self, packet: Vec<u8>, kind: Option<announce::Kind>) {
+        if self.running {
+            self.queue.push(packet, kind);
+        }
+    }
+
+    /// The next packet to send, if the node is running and nobody is on the
+    /// line.
+    pub fn next(&mut self, nobody_on_the_line: bool) -> Option<(Vec<u8>, Option<announce::Kind>)> {
+        if self.running && nobody_on_the_line {
+            self.queue.pop()
+        } else {
+            None
+        }
+    }
+
+    /// What became of a packet [`Sending::next`] gave out: `Some(airtime)`
+    /// if it went. An announce that went spends the budget; one that did not
+    /// -- refused by the radio, or given up because a host may be about to
+    /// speak -- is asked for again, and waits like any other.
+    pub fn sent(&mut self, kind: Option<announce::Kind>, went: Option<u32>, now_ms: u64) {
+        match (kind, went) {
+            (Some(_), Some(airtime_us)) => self.schedule.sent(now_ms, airtime_us),
+            (Some(kind), None) => self.want(kind),
+            (None, _) => {}
+        }
+    }
+
+    /// The earliest the budget lets the next announce go.
+    pub fn allowed_from(&self) -> u64 {
+        self.schedule.allowed_from()
+    }
+
+    /// Packets that never went, in all.
+    pub fn dropped(&self) -> u32 {
+        self.queue.dropped()
     }
 }
 
@@ -561,5 +796,267 @@ mod tests {
             [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
         );
         assert_eq!(out.ignored, 2);
+    }
+}
+
+#[cfg(test)]
+mod announcing {
+    use super::announce::Kind;
+    use super::*;
+    use rns_crypto::FixedRng;
+
+    const VECTORS: &str = include_str!("node/vectors/vectors.txt");
+    const PATH_REQUEST: &[u8] = include_bytes!("node/vectors/path_request.bin");
+    const BOARD_ANNOUNCE: &[u8] = include_bytes!("node/vectors/board_announce.bin");
+    const BOARD_PATH_RESPONSE: &[u8] = include_bytes!("node/vectors/board_path_response.bin");
+
+    /// The board in the vectors: a key from a fixed seed, its name, and an
+    /// emission time of 2026-10-24 00:00:00 UTC.
+    fn board() -> NodeKey {
+        NodeKey::generate(&mut Entropy::from_seed([0x0b; 32]))
+    }
+    const NAME: &str = "oxinode 7F23";
+    const EMITTED: u64 = 1_792_800_000;
+
+    fn peer() -> NodeKey {
+        NodeKey::generate(&mut Entropy::from_seed([0x0c; 32]))
+    }
+
+    fn rng() -> FixedRng {
+        FixedRng::new(&[0x5a; 64])
+    }
+
+    fn make(kind: Kind) -> Vec<u8> {
+        Node::new(1757, 0, &board())
+            .announce(kind, &lxmf_app_data(NAME), EMITTED, &mut rng())
+            .unwrap()
+    }
+
+    /// The announce a peer hears: verified by the same engine, in a node
+    /// with an identity of its own.
+    fn heard_by_a_peer(packet: &[u8]) -> Outcome {
+        Node::new(1757, 0, &peer()).heard(packet, None, 1_000, &mut rng())
+    }
+
+    #[test]
+    fn the_app_data_is_lxmfs_to_the_byte() {
+        let line = VECTORS
+            .lines()
+            .find_map(|l| l.strip_prefix("app_data "))
+            .unwrap();
+        let python: Vec<u8> = (0..line.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&line[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(lxmf_app_data("Bench peer"), python);
+    }
+
+    #[test]
+    fn a_peer_hears_the_board_by_its_address_and_name() {
+        let packet = make(Kind::Announce);
+        assert_eq!(packet.len(), announce_len(lxmf_app_data(NAME).len()));
+        let out = heard_by_a_peer(&packet);
+        let [heard] = out.heard.as_slice() else {
+            panic!("{out:?}");
+        };
+        let hashes = board().hashes();
+        assert_eq!(heard.destination, hashes.lxmf);
+        assert_eq!(heard.identity, hashes.identity);
+        assert_eq!(
+            heard.name_hash,
+            rns_core::destination::name_hash("lxmf", &["delivery"])
+        );
+        assert_eq!(heard.app_data.as_deref(), Some(&lxmf_app_data(NAME)[..]));
+    }
+
+    #[test]
+    fn a_path_response_is_the_same_announce_marked_as_one() {
+        let ordinary = make(Kind::Announce);
+        let response = make(Kind::PathResponse);
+        // Byte 18, the context, says which; nothing signed differs.
+        assert_eq!(ordinary[18], constants::CONTEXT_NONE);
+        assert_eq!(response[18], constants::CONTEXT_PATH_RESPONSE);
+        assert_eq!(ordinary[..18], response[..18]);
+        assert_eq!(ordinary[19..], response[19..]);
+        assert_eq!(heard_by_a_peer(&response).heard.len(), 1);
+    }
+
+    #[test]
+    fn the_random_hash_ends_in_the_emission_time_and_starts_random() {
+        let packet = make(Kind::Announce);
+        let at = 19 + 64 + 10;
+        assert_eq!(packet[at + 5..at + 10], EMITTED.to_be_bytes()[3..]);
+        let mut entropy = Entropy::from_seed([1; 32]);
+        let node = Node::new(1757, 0, &board());
+        let a = node
+            .announce(Kind::Announce, &[], EMITTED, &mut entropy)
+            .unwrap();
+        let b = node
+            .announce(Kind::Announce, &[], EMITTED, &mut entropy)
+            .unwrap();
+        assert_ne!(a[at..at + 5], b[at..at + 5]);
+        // And with no clock, zero, which Reticulum reads as not known.
+        let unknown = node.announce(Kind::Announce, &[], 0, &mut entropy).unwrap();
+        assert_eq!(unknown[at + 5..at + 10], [0; 5]);
+    }
+
+    #[test]
+    fn a_path_request_for_the_board_is_answered_with_one_a_peer_believes() {
+        // The vectors' path request asks for the Python peer's address, so
+        // the board here is that identity.
+        let python = key::NodeKey::from_private(core::array::from_fn(|i| i as u8));
+        let mut node = Node::new(1757, 0, &python);
+        let out = node.heard(PATH_REQUEST, None, 1_000, &mut rng());
+        assert_eq!(out.path_requests, [python.hashes().lxmf]);
+        let answer = node
+            .announce(Kind::PathResponse, &lxmf_app_data(NAME), 0, &mut rng())
+            .unwrap();
+        let heard = heard_by_a_peer(&answer);
+        assert_eq!(heard.heard.len(), 1);
+        assert_eq!(heard.heard[0].destination, python.hashes().lxmf);
+    }
+
+    #[test]
+    fn the_board_does_not_take_its_own_announce_for_a_peer() {
+        // Relayed back by a transport node, one hop on.
+        let mut echoed = make(Kind::Announce);
+        echoed[1] = 1;
+        let mut node = Node::new(1757, 0, &board());
+        let out = node.heard(&echoed, None, 1_000, &mut rng());
+        assert!(
+            !out.heard
+                .iter()
+                .any(|h| h.destination == board().hashes().lxmf),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_vectors_are_what_the_board_makes() {
+        // Ed25519 is deterministic and the rest is fixed, so the board's
+        // announce is the same bytes every time. They are committed for
+        // tools/test_peer.py, which holds them to the peer tool's reading
+        // and to Reticulum's. OXINODE_WRITE_VECTORS=1 rewrites them.
+        let announce = make(Kind::Announce);
+        let response = make(Kind::PathResponse);
+        if std::env::var_os("OXINODE_WRITE_VECTORS").is_some() {
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/node/vectors");
+            std::fs::write(format!("{dir}/board_announce.bin"), &announce).unwrap();
+            std::fs::write(format!("{dir}/board_path_response.bin"), &response).unwrap();
+            return;
+        }
+        assert_eq!(announce, BOARD_ANNOUNCE);
+        assert_eq!(response, BOARD_PATH_RESPONSE);
+    }
+
+    use announce::{gap_ms, INTERVAL_MS};
+
+    /// A node that started at `t` and sent its first announce at once.
+    fn sending_after_first_announce(t: u64, airtime_us: u32) -> Sending {
+        let mut s = Sending::new();
+        assert_eq!(s.follow(true, t), Some(Followed::Started));
+        assert_eq!(s.due(t), Some(Kind::Announce));
+        s.push(alloc::vec![1], Some(Kind::Announce));
+        let (_, kind) = s.next(true).unwrap();
+        s.sent(kind, Some(airtime_us), t);
+        s
+    }
+
+    #[test]
+    fn a_node_that_starts_announces_at_once() {
+        let mut s = Sending::new();
+        assert_eq!(s.due(0), None, "not before it is running");
+        assert_eq!(s.follow(true, 0), Some(Followed::Started));
+        assert_eq!(s.due(0), Some(Kind::Announce));
+        assert_eq!(
+            s.follow(true, 1),
+            None,
+            "running twice is not starting twice"
+        );
+    }
+
+    #[test]
+    fn nothing_goes_while_somebody_is_on_the_line() {
+        let mut s = Sending::new();
+        s.follow(true, 0);
+        s.push(alloc::vec![1], None);
+        assert_eq!(s.next(false), None, "a port open or a phone linked");
+        assert!(s.next(true).is_some(), "and it is still there afterwards");
+    }
+
+    #[test]
+    fn a_host_arriving_drops_what_was_waiting_and_stops_the_asking() {
+        let mut s = sending_after_first_announce(0, 1_000_000);
+        s.want(Kind::PathResponse);
+        s.push(alloc::vec![2], None);
+        s.push(alloc::vec![3], Some(Kind::Announce));
+        assert_eq!(s.follow(false, 5_000), Some(Followed::Stopped(2)));
+        assert_eq!(s.dropped(), 2);
+        assert_eq!(s.next(true), None);
+        assert_eq!(
+            s.due(INTERVAL_MS * 4),
+            None,
+            "no interval runs under a host"
+        );
+        s.want(Kind::Announce);
+        s.push(alloc::vec![4], None);
+        assert_eq!(s.next(true), None, "and nothing new is taken while stopped");
+    }
+
+    #[test]
+    fn a_host_arriving_while_a_packet_is_on_its_way_is_counted_as_not_sent() {
+        // The packet had been handed out when the port opened; the wait was
+        // given up, and the announce is wanted again -- for after the host.
+        let mut s = Sending::new();
+        s.follow(true, 0);
+        assert_eq!(s.due(0), Some(Kind::Announce));
+        s.push(alloc::vec![1], Some(Kind::Announce));
+        let (_, kind) = s.next(true).unwrap();
+        s.sent(kind, None, 100);
+        assert_eq!(s.follow(false, 100), Some(Followed::Stopped(0)));
+        assert_eq!(s.due(1_000), None, "not under the host");
+        assert_eq!(s.follow(true, 10_000), Some(Followed::Started));
+        assert_eq!(s.due(10_000), Some(Kind::Announce), "but once it has gone");
+    }
+
+    #[test]
+    fn resuming_after_a_host_waits_out_the_last_announces_gap() {
+        let air = 2_000_000; // 100 s of gap
+        let mut s = sending_after_first_announce(0, air);
+        s.follow(false, 10_000);
+        assert_eq!(s.follow(true, 20_000), Some(Followed::Started));
+        assert_eq!(s.due(20_000), None);
+        assert_eq!(s.due(gap_ms(air) - 1), None);
+        assert_eq!(s.due(gap_ms(air)), Some(Kind::Announce));
+    }
+
+    #[test]
+    fn a_failed_announce_is_tried_again_inside_the_budget() {
+        let mut s = Sending::new();
+        s.follow(true, 0);
+        assert_eq!(s.due(0), Some(Kind::Announce));
+        s.sent(Some(Kind::Announce), None, 0);
+        assert_eq!(s.due(1), Some(Kind::Announce));
+    }
+
+    #[test]
+    fn the_engines_own_packets_do_not_touch_the_budget() {
+        let mut s = sending_after_first_announce(0, 1_000_000);
+        s.sent(None, Some(5_000_000), 1_000);
+        assert_eq!(s.allowed_from(), gap_ms(1_000_000));
+    }
+
+    #[test]
+    fn the_queue_is_bounded_and_counts_what_it_loses() {
+        let mut q = Queue::new();
+        for i in 0..Queue::CAPACITY as u8 + 2 {
+            q.push(alloc::vec![i], None);
+        }
+        assert_eq!(q.len(), Queue::CAPACITY);
+        assert_eq!(q.dropped(), 2);
+        assert_eq!(q.pop().unwrap().0, [2], "the oldest went first");
+        assert_eq!(q.clear(), Queue::CAPACITY - 1);
+        assert!(q.is_empty());
+        assert_eq!(q.dropped(), 2 + Queue::CAPACITY as u32 - 1);
     }
 }

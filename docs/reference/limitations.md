@@ -48,6 +48,11 @@ has to rediscover it.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
 - **The QSPI flash** is not driven.
+- **An announce made without a GPS time says it was made at time zero.** The
+  board has no other clock, and zero is Reticulum's "not known". It costs
+  nothing over the air directly; a receiver holding a path to the board
+  through another node keeps that path until it expires rather than taking
+  the newer one.
 - **A board cannot be given a new Reticulum identity** without erasing its
   identity page with a probe. `rnodeconf --eeprom-wipe` leaves it alone on
   purpose (see [Provisioning and storage](../architecture/provisioning.md#the-nodes-identity)).
