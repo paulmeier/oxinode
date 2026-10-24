@@ -298,6 +298,38 @@ class Verdicts(unittest.TestCase):
                 peer.parse_hash(bad)
 
 
+def board_announce(name: str = "board_announce.bin") -> peer.Announce:
+    """The board's own announce, as `oxinode_core::node` builds it and its
+    test `the_vectors_are_what_the_board_makes` holds it to."""
+    return peer.parse_announce(peer.parse_packet(vector_bytes(name)))
+
+
+class TheBoardsAnnounce(unittest.TestCase):
+    """What the board puts on the air, read the way the peer reads it on the
+    bench, so a run of the peer against a board starts from bytes already
+    known to pass."""
+
+    def test_it_checks_out(self):
+        self.assertEqual(peer.announce_problems(board_announce()), [])
+
+    def test_it_carries_the_boards_name(self):
+        self.assertEqual(peer.lxmf_app_data(board_announce().app_data), ("oxinode 7F23", None))
+
+    def test_its_emission_time_is_the_one_it_was_given(self):
+        # 2026-10-24 00:00:00 UTC, the time the vector was made with.
+        self.assertEqual(board_announce().emitted, 1_792_800_000)
+
+    def test_it_is_not_a_path_response_and_its_twin_is(self):
+        self.assertFalse(board_announce().path_response)
+        response = board_announce("board_path_response.bin")
+        self.assertTrue(response.path_response)
+        self.assertEqual(peer.announce_problems(response), [])
+        self.assertEqual(response.signature, board_announce().signature, "nothing signed differs")
+
+    def test_it_is_one_hop_from_nowhere(self):
+        self.assertEqual(board_announce().hops, 0)
+
+
 @unittest.skipUnless(HAVE_LXMF, "Reticulum and LXMF are not installed for this Python")
 class AgainstReticulum(unittest.TestCase):
     """The same readings, held to the stack's own where it is installed."""
@@ -323,6 +355,19 @@ class AgainstReticulum(unittest.TestCase):
         identity.load_public_key(a.public_key)
         self.assertTrue(identity.validate(a.signature, a.signed_data))
         self.assertFalse(identity.validate(a.signature, a.signed_data + b"\x00"))
+
+    def test_the_boards_signature_verifies(self):
+        for name in ("board_announce.bin", "board_path_response.bin"):
+            a = board_announce(name)
+            identity = self.RNS.Identity(create_keys=False)
+            identity.load_public_key(a.public_key)
+            self.assertTrue(identity.validate(a.signature, a.signed_data), name)
+            self.assertFalse(identity.validate(a.signature, a.signed_data[:-1] + b"\x00"), name)
+
+    def test_lxmf_reads_the_boards_app_data_the_same(self):
+        a = board_announce()
+        self.assertEqual(self.LXMF.display_name_from_app_data(a.app_data), "oxinode 7F23")
+        self.assertIsNone(self.LXMF.stamp_cost_from_app_data(a.app_data))
 
     def test_lxmf_reads_the_app_data_the_same(self):
         for app_data in (vectors()["app_data"], b"Old style", peer.packb([b"Board", 8]), peer.packb([None, None])):

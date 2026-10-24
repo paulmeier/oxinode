@@ -139,6 +139,10 @@ pub enum TxOutcome {
     /// Somebody else's packet arrived while waiting; it is in the caller's
     /// buffer and the transmission has not happened.
     Heard(RxReport),
+    /// The caller said to give up while the channel was being waited for,
+    /// and nothing was sent. The node's packets do this when a host may be
+    /// about to speak; see `oxinode::node`.
+    Abandoned,
 }
 
 /// What arrived.
@@ -415,12 +419,18 @@ where
     /// Returns `Sent` when `TxDone` is pending, and returns an error rather
     /// than a report if some *other* interrupt fired — which is the case a
     /// bare timeout on the interrupt line reports as success.
+    ///
+    /// `abandon` is asked before every sense; when it says so, the wait ends
+    /// with [`TxOutcome::Abandoned`] and nothing goes. Once the packet is on
+    /// the air it finishes. A caller that never gives up passes `|| false`,
+    /// which costs nothing.
     pub async fn transmit(
         &mut self,
         config: &ValidConfig,
         payload: &[u8],
         backoff: &mut Backoff,
         rx_buf: &mut [u8],
+        abandon: impl Fn() -> bool,
     ) -> Result<TxOutcome, ModemError> {
         if payload.len() > MAX_PAYLOAD as usize {
             return Err(ModemError::PayloadTooLong(payload.len()));
@@ -441,6 +451,9 @@ where
 
         // Wait for the air to be clear, listening in between -- and during.
         loop {
+            if abandon() {
+                return Ok(TxOutcome::Abandoned);
+            }
             let heard = match self.sense(config, rx_buf).await? {
                 Sensed::Clear => Channel::Clear,
                 Sensed::Busy => Channel::Busy,

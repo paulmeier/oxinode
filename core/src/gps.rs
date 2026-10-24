@@ -91,6 +91,39 @@ pub struct Date {
     pub day: u8,
 }
 
+impl Date {
+    /// Seconds since the Unix epoch at `time` on this date, UTC -- which is
+    /// what the receiver reports.
+    ///
+    /// The board's only wall clock, and what its announces carry as their
+    /// emission time. `None` for a date or time no receiver would send.
+    /// Integer arithmetic only: days from the civil date by Howard Hinnant's
+    /// algorithm, which is exact for every proleptic Gregorian date.
+    pub const fn unix_seconds(&self, time: Time) -> Option<u64> {
+        if self.year < 1970
+            || self.month < 1
+            || self.month > 12
+            || self.day < 1
+            || self.day > 31
+            || time.hour > 23
+            || time.minute > 59
+            || time.second > 60
+        {
+            return None;
+        }
+        let y = self.year as i64 - if self.month <= 2 { 1 } else { 0 };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let m = self.month as i64;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + self.day as i64 - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let s =
+            days * 86_400 + time.hour as i64 * 3_600 + time.minute as i64 * 60 + time.second as i64;
+        Some(s as u64)
+    }
+}
+
 /// Where the receiver last said it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fix {
@@ -851,6 +884,27 @@ pub fn attempts() -> impl Iterator<Item = Attempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_seconds_are_pythons() {
+        // calendar.timegm of each, in Python.
+        let at = |year, month, day, hour, minute, second| {
+            Date { year, month, day }.unix_seconds(Time {
+                hour,
+                minute,
+                second,
+            })
+        };
+        assert_eq!(at(1970, 1, 1, 0, 0, 0), Some(0));
+        assert_eq!(at(2000, 1, 1, 0, 0, 0), Some(946_684_800));
+        assert_eq!(at(2024, 2, 29, 23, 59, 59), Some(1_709_251_199));
+        assert_eq!(at(2026, 10, 24, 0, 0, 0), Some(1_792_800_000));
+        assert_eq!(at(2099, 12, 31, 23, 59, 59), Some(4_102_444_799));
+        assert_eq!(at(2026, 13, 1, 0, 0, 0), None);
+        assert_eq!(at(2026, 1, 0, 0, 0, 0), None);
+        assert_eq!(at(2026, 1, 1, 24, 0, 0), None);
+        assert_eq!(at(1969, 12, 31, 23, 59, 59), None);
+    }
 
     // Captured from a Quectel L76K-class module at 9600 baud, in order,
     // through the first fix; a u-blox M8 from an older log; and the lines a

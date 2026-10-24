@@ -1123,10 +1123,12 @@ async fn tx_packet<S, B>(
     let mut rx_buf = [0u8; config::MAX_PAYLOAD as usize];
     let sent = loop {
         match modem
-            .transmit(&valid, payload, &mut backoff, &mut rx_buf)
+            .transmit(&valid, payload, &mut backoff, &mut rx_buf, || false)
             .await
         {
             Ok(TxOutcome::Sent(report)) => break Ok(report),
+            // Never: nothing here gives up.
+            Ok(TxOutcome::Abandoned) => continue,
             Ok(TxOutcome::Heard(report)) => {
                 defmt::info!(
                     "tx: heard {=usize} bytes while waiting; trying again",

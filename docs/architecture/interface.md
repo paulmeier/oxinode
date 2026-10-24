@@ -219,6 +219,40 @@ on its way out (`RNodeInterface` sends `CMD_LEAVE`). A board with nothing
 stored has no configuration anybody chose for it to be a node on, so the node
 does not run and nothing touches the radio.
 
+### What the node sends
+
+Its own announce, `lxmf.delivery` under the board's identity, with the name
+`oxinode` and the board's four hex digits in LXMF's app data, so Sideband and
+MeshChat list it by name. It goes when the node starts or resumes, every half
+hour, on *Announce Now*, and in answer to a path request for the board's
+address (marked as a path response, so a peer that knows only the hash finds
+it). Each goes through the same transmit path as a host's packet: the stock
+air header, the split at 254, carrier sense.
+
+**A budget, before anything else.** Reticulum caps announce traffic at 2% of
+an interface's time, and the board holds its own announces to the same cap:
+an announce that took *t* on the air is followed by 50 *t* of quiet before
+the next, whatever asks. At SF8 and 125 kHz that is 26 s, at SF12 a little
+over four minutes, and at the slowest configuration the radio accepts, SF12
+at 62.5 kHz and 4/8, about seventeen. The System screen shows the figure for
+the configuration in force. Reasons that arrive during the quiet wait for it,
+and several are one announce.
+
+**It never sends under a host, nor when one may be about to speak.**
+`RNodeInterface` opens the port, waits two seconds, sends a detect, and
+gives the board a fifth of a second to answer before deciding there is no
+RNode there. So the node starts a transmission only while no port is open and
+no phone is linked, though it goes on listening; a transmission still waiting
+for a clear channel gives up at its next sense when the port opens; and when
+a host arrives whatever was queued is dropped and counted. A packet already on
+the air finishes, which at SF8 is about half a second.
+
+**The emission time is the GPS's.** An announce carries the time it was
+made, and a receiver that already holds a path through another node replaces
+it only with a strictly newer one. The board's only clock is its GPS receiver,
+so the time is Unix seconds from it when it has said what time it is, and
+zero, which Reticulum reads as not known, when it has not.
+
 ## Redraw stays incremental
 
 The modem loop's `Ui` holds two frames: `live`, which is what the controller

@@ -19,7 +19,7 @@ Reticulum runs under, and the log reader, which calls libusb through
 | `touch_series.py` | Reflashes a board by 1200-baud touch, round after round, each touch taken with a phone's Bluetooth link up, and counts the times serial DFU does not answer. The recipe for issue #23. |
 | `air_exchange.py` | Two RNodes on the bench exchanging packets through Reticulum: a size under 254 bytes and one over, each way, with every log kept. See [Testing](../development/testing.md#the-exchange-with-another-rnode). |
 | `peer.py` | A Reticulum and LXMF peer on the bench, through the second board: checks the board's announces, sends it messages and times the proofs, and checks the messages it sends back. The other end of every messaging test. See [below](#peerpy). |
-| `node_vectors.py` | Writes the Reticulum packets `oxinode_core::node` is tested against, from stock Python Reticulum: an `lxmf.delivery` announce and a path request. Run by hand; its output is committed. |
+| `node_vectors.py` | Writes the Reticulum packets `oxinode_core::node` is tested against, from stock Python Reticulum: an `lxmf.delivery` announce and a path request. Run by hand; its output is committed. The board's own announce and path response beside them are written the other way, by `cargo test -p oxinode-core --features node` with `OXINODE_WRITE_VECTORS=1`, and `test_peer.py` holds them to the peer's reading and Reticulum's. |
 | `layout.py` | Reads `memory.x` for the other tools: `tools/layout.py memory.x --field FLASH.origin`. |
 | `check_layout.py` | Validates a built ELF (and optionally its UF2) against `memory.x`, and with `--max-flash` and `--max-ram` against a budget. See [Memory layout](../hardware/memory-layout.md). |
 | `crate_version.py` | Reads the version out of `Cargo.toml`. |
