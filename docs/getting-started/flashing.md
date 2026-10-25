@@ -84,8 +84,9 @@ firmware ignores the touch for the first two seconds after boot, because macOS
 caches the 1200-baud line setting per device path and would otherwise send a
 freshly flashed board straight back to its bootloader.
 
-A board already sitting in its bootloader on a host that cannot mount the UF2
-drive needs to be told so:
+A board already sitting in its bootloader is recognised by its USB serial
+number, so with two boards attached the other one's state does not confuse
+it. On a host without macOS's `ioreg`, with two boards attached, tell it:
 
 ```bash
 OXINODE_DFU_IN_DFU=1 tools/dfu-flash.sh target/thumbv7em-none-eabihf/release/rnode
@@ -97,6 +98,8 @@ OXINODE_DFU_IN_DFU=1 tools/dfu-flash.sh target/thumbv7em-none-eabihf/release/rno
     was connected over Bluetooth did that twice on an earlier image, and has
     not since; see [Known limitations](../reference/limitations.md). If it
     happens again, `tools/touch_series.py` is the recipe for repeating it.
+    What is known about it from the bench is in
+    [Serial DFU reliability](../development/flashing.md).
 
 ## Checking what is on the chip
 

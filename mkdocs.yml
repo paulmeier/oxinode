@@ -80,6 +80,7 @@ nav:
       - Testing: development/testing.md
       - The simulator: development/simulator.md
       - Debugging without a probe: development/debugging.md
+      - Serial DFU reliability: development/flashing.md
       - Releasing: development/releasing.md
       - Contributing: development/contributing.md
   - Reference:

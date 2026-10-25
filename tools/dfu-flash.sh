@@ -16,6 +16,10 @@
 #   OXINODE_DFU_PORT       use this serial port instead of searching
 #   OXINODE_DFU_IN_DFU     1/0 to assert bootloader state instead of detecting it
 #   OXINODE_DFU_BOOTLOADER 1/0 to answer the bootloader probe directly
+#   OXINODE_DFU_IOREG      a command to run instead of `ioreg -r -c
+#                          IOUSBHostDevice -l`, which is how the board behind
+#                          the port, and whether it is in its bootloader, is told
+#   OXINODE_PYTHON         try this interpreter first for reopening the port
 #   OXINODE_DFU_RETRY_DELAY seconds to wait between retries (default 2)
 #   OXINODE_DFU_SETTLE     seconds to wait after a flash before reopening the
 #                          port to reset the host's cached baud rate (default 3)
@@ -40,6 +44,46 @@ if [[ -z "$nrfutil" ]]; then
     fi
     nrfutil="$venv/bin/adafruit-nrfutil"
 fi
+
+# A Python that can `import serial`, for clear_cached_baud below.
+#
+# This used to be whatever `python3` was, with its errors discarded. On a Mac
+# where `python3` is a conda or Homebrew interpreter without pyserial, the
+# ImportError went to /dev/null, the cached 1200 baud was never cleared, and
+# the next thing to open the port -- macOS probing the re-enumerated device
+# included -- touched the board back into its bootloader. Nothing said why.
+#
+# adafruit-nrfutil depends on pyserial, so the interpreter on its own `#!`
+# line is a good bet; the rest are the usual suspects.
+pythons=()
+if [[ -n "${OXINODE_PYTHON:-}" ]]; then pythons+=("$OXINODE_PYTHON"); fi
+shebang="$(head -n 1 "$nrfutil" 2>/dev/null || true)"
+if [[ "$shebang" == "#!"* ]]; then
+    # `#!/path/python3.11` or `#!/usr/bin/env python3`: the last word.
+    interp="${shebang#\#!}"
+    interp="${interp##* }"
+    case "${interp##*/}" in python*) pythons+=("$interp") ;; esac
+fi
+pythons+=(python3.11 python3)
+python=""
+for c in "${pythons[@]}"; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import serial' 2>/dev/null; then
+        python="$c"
+        break
+    fi
+done
+
+warn_no_python() {
+    cat >&2 <<MSG
+
+dfu-flash: WARNING: no Python with pyserial found (tried: ${pythons[*]}).
+  The 1200 baud of the touch stays cached on the host for $port, and the
+  next thing to open it -- including macOS probing the board after it
+  re-enumerates -- will reboot it back into its bootloader. Install pyserial
+  for one of those, or point OXINODE_PYTHON at an interpreter that has it.
+
+MSG
+}
 
 # Choosing a port used to mean "the first one that matches the glob", which was
 # fine with one board attached and actively dangerous with two: a second Base
@@ -81,13 +125,62 @@ fi
 # Is the board already in its bootloader? If so, do not ask the tool to perform
 # a 1200-baud touch: there is no application to reset, and it would sit waiting
 # for a re-enumeration that never comes.
-# Named because the retry below asks the same question again, after the touch
-# has had a chance to do its work.
+#
+# *This* board, that is. The question used to be "is any bootloader drive
+# mounted", and with two boards attached and the other one in its bootloader,
+# the answer was yes for the wrong board: the touch was skipped and the flash
+# failed against a running application. So the board is told apart by its USB
+# serial number, which the bootloader shares with the application -- it
+# enumerates as VID 0x239A PID 0x0081 ("muzi Base") under the same serial.
+
+# One line per USB device: "<serial> <vid> <pid> <callout>...", with VID and
+# PID in decimal, as ioreg prints them. A callout belongs to the nearest
+# device above it, which is right behind a hub too: a device's own properties
+# come before its children.
+usb_devices() {
+    if [[ -n "${OXINODE_DFU_IOREG:-}" ]]; then
+        "$OXINODE_DFU_IOREG"
+    else
+        ioreg -r -c IOUSBHostDevice -l
+    fi 2>/dev/null | awk '
+        function flush() { if (have) print serial, vid, pid callouts; have = 0 }
+        /\+-o .*<class IOUSBHostDevice/ {
+            flush(); have = 1; serial = "-"; vid = "-"; pid = "-"; callouts = ""; next
+        }
+        !have { next }
+        serial == "-" && /"USB Serial Number" = "/ { split($0, a, "\""); serial = a[4] }
+        vid == "-" && /"idVendor" = [0-9]/ { vid = $NF }
+        pid == "-" && /"idProduct" = [0-9]/ { pid = $NF }
+        /"IOCalloutDevice" = "/ { split($0, a, "\""); callouts = callouts " " a[4] }
+        END { flush() }'
+}
+
+can_ask_usb() { [[ -n "${OXINODE_DFU_IOREG:-}" ]] || command -v ioreg >/dev/null; }
+
+# The serial number behind the port, read once: after a touch the port goes
+# away and comes back as the bootloader, and the serial is how it is found.
+board_serial=""
+if can_ask_usb; then
+    # ioreg names the callout (cu.) node; accept the dial-in (tty.) one too.
+    callout="${port/\/tty./\/cu.}"
+    board_serial="$(usb_devices | awk -v p="$callout" \
+        '{ for (i = 4; i <= NF; i++) if ($i == p) { print $1; exit } }')"
+fi
+
 bootloader_present() {
     if [[ -n "${OXINODE_DFU_BOOTLOADER:-}" ]]; then
         echo "${OXINODE_DFU_BOOTLOADER}"
         return
     fi
+    if can_ask_usb; then
+        # 0x239A = 9114, 0x0081 = 129. With no serial there is nothing to
+        # match, and the answer is no rather than someone else's bootloader.
+        usb_devices | awk -v s="$board_serial" \
+            's != "" && $1 == s && $2 == 9114 && $3 == 129 { f = 1 } END { print f + 0 }'
+        return
+    fi
+    # No ioreg: not macOS. Fall back to the drive, which cannot say whose it
+    # is -- so with two boards attached, set OXINODE_DFU_IN_DFU yourself.
     local found=0
     shopt -s nullglob
     for d in /Volumes/* /media/"${USER:-}"/* /run/media/"${USER:-}"/*; do
@@ -167,17 +260,34 @@ clear_cached_baud() {
     # An explicit open at 115200 rather than `stty`, because stty applies the
     # cached settings on the way in and the point is to not do that. pyserial
     # sets the rate as part of opening.
-    "${OXINODE_PYTHON:-python3}" - "$port" <<'EOF' 2>/dev/null || true
+    if [[ -z "$python" ]]; then
+        warn_no_python
+        return 0
+    fi
+    # Its errors are shown, not discarded: a port that will not open at
+    # 115200 leaves the 1200 in place, and that needs saying.
+    if ! "$python" - "$port" <<'EOF'
 import sys, time
 import serial
 s = serial.Serial(sys.argv[1], 115200, timeout=0.1)
 time.sleep(0.2)
 s.close()
 EOF
+    then
+        echo "dfu-flash: WARNING: could not reopen $port at 115200 with $python;" \
+            "the touch's 1200 baud may still be cached for it." >&2
+    fi
 }
 
 size="$(wc -c < "$bin" | tr -d ' ')"
 echo "dfu-flash: $port  ($size bytes at $base)"
+if [[ -n "$board_serial" ]]; then
+    if [[ "$in_dfu" == 1 ]]; then state="in its bootloader"; else state="running an application"; fi
+    echo "dfu-flash: USB serial $board_serial, $state"
+fi
+# Before flashing as well as after: the warning is the same, and it is more
+# use while there is still time to Ctrl-C.
+if [[ -z "$python" ]]; then warn_no_python; fi
 
 if run_dfu "$in_dfu"; then
     # The board is re-enumerating; give it a moment before touching the port.
@@ -194,8 +304,9 @@ fi
 # bootloader does. It gives up, and leaves the board sitting in DFU with the
 # application already gone.
 #
-# That state is recoverable and obvious: the bootloader mounts a drive with
-# INFO_UF2.TXT on it. So rather than reporting a failure that needs a human to
+# That state is recoverable and obvious: the bootloader enumerates under the
+# board's own USB serial number (and mounts a drive with INFO_UF2.TXT on it,
+# which is the fallback where there is no ioreg). So rather than reporting a failure that needs a human to
 # re-run the same command with OXINODE_DFU_IN_DFU=1, look for the bootloader
 # and finish the job. The touch is not repeated, because there is no longer an
 # application to touch.

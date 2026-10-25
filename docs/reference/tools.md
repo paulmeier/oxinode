@@ -45,12 +45,28 @@ With one board attached it finds the port itself. With two it refuses to
 guess, because a second Base Duo running someone else's firmware enumerates
 on the same glob and flashing it would overwrite that firmware.
 
+Whether the board is already in its bootloader is decided for that board, by
+its USB serial number: the bootloader enumerates under the same serial as the
+application, as `239A:0081` ("muzi Base"), and `ioreg` shows which device is
+behind the port. Another board sitting in its bootloader changes nothing.
+Hosts without `ioreg` fall back to looking for a mounted `INFO_UF2.TXT`, which
+cannot say whose bootloader it is.
+
+Resetting the cached line setting needs a Python with pyserial. The script
+tries `OXINODE_PYTHON`, the interpreter on `adafruit-nrfutil`'s own `#!` line
+(which has pyserial, since the tool needs it), `python3.11` and `python3`, in
+that order, and warns before and after the flash if none of them can
+`import serial`. That warning means the board will likely be touched back into
+its bootloader by the next thing that opens its port.
+
 | Variable | |
 |---|---|
 | `OXINODE_DFU_PORT` | use this serial port instead of searching |
 | `OXINODE_DFU_PORT_GLOB` | the glob to search (default `/dev/cu.usbmodem*`) |
-| `OXINODE_DFU_IN_DFU` | `1`/`0` to assert the board is already in its bootloader instead of detecting it (needed on a host that cannot mount the UF2 drive) |
+| `OXINODE_DFU_IN_DFU` | `1`/`0` to assert the board is already in its bootloader instead of detecting it (needed with two boards on a host without `ioreg`) |
 | `OXINODE_DFU_BOOTLOADER` | `1`/`0` to answer the bootloader probe directly |
+| `OXINODE_DFU_IOREG` | a command to run instead of `ioreg -r -c IOUSBHostDevice -l` (for the tests) |
+| `OXINODE_PYTHON` | the first interpreter to try for resetting the cached baud rate |
 | `OXINODE_DFU_RETRY_DELAY` | seconds between retries (default 2) |
 | `OXINODE_DFU_SETTLE` | seconds to wait after a flash before reopening the port to reset the cached baud rate (default 3) |
 
