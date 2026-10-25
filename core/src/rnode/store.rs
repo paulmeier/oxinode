@@ -3,7 +3,9 @@
 //!
 //! Four things persist: the [`Eeprom`] image, the device signature
 //! `rnodeconf --sign` produces, the firmware hash `--firmware-hash` sets, and
-//! the Bluetooth bonds a phone has made with this board.
+//! the Bluetooth bonds a phone has made with this board. A fifth rides along
+//! in the flags byte: whether the node sounds its alert for a message
+//! ([`DeviceStore::alert`]).
 //! The EEPROM is the only one the host can read back byte for byte; the other
 //! two are answered through their own commands. They are stored together
 //! because they are written together, by the same tool, in the same minute.
@@ -47,6 +49,13 @@ const RECORD_LEN_V1: usize = OFF_FW_HASH + HASH_LEN;
 const FLAG_DEVICE_SIGNATURE: u8 = 1 << 0;
 /// Bit 1: a target firmware hash is present.
 const FLAG_FIRMWARE_HASH: u8 = 1 << 1;
+/// Bit 2: the alert for a message is **off**. Set for off rather than for on,
+/// so that every record written before the setting existed -- by this
+/// version or the one before, which leave the bit clear -- reads as on, the
+/// default. A firmware that predates the bit ignores it, and writes it clear
+/// the next time it writes the record: a downgrade turns the alert back on,
+/// and loses nothing else.
+const FLAG_ALERT_OFF: u8 = 1 << 2;
 
 const OFF_MAGIC: usize = 0;
 const OFF_VERSION: usize = 4;
@@ -149,6 +158,9 @@ pub struct DeviceStore {
     pub target_firmware_hash: Option<[u8; HASH_LEN]>,
     /// Phones that have paired, oldest first.
     pub bonds: [Option<Bond>; MAX_BONDS],
+    /// Whether the node sounds the buzzer when a message arrives. See
+    /// `crate::alert`. On unless someone turned it off.
+    pub alert: bool,
 }
 
 impl Default for DeviceStore {
@@ -165,6 +177,7 @@ impl DeviceStore {
             device_signature: None,
             target_firmware_hash: None,
             bonds: [None; MAX_BONDS],
+            alert: true,
         }
     }
 
@@ -224,6 +237,9 @@ impl DeviceStore {
         if let Some(hash) = self.target_firmware_hash {
             flags |= FLAG_FIRMWARE_HASH;
             out[OFF_FW_HASH..OFF_FW_HASH + HASH_LEN].copy_from_slice(&hash);
+        }
+        if !self.alert {
+            flags |= FLAG_ALERT_OFF;
         }
         out[OFF_FLAGS] = flags;
         out[OFF_EEPROM..OFF_EEPROM + EEPROM_SIZE].copy_from_slice(self.rom.as_bytes());
@@ -300,6 +316,7 @@ impl DeviceStore {
             device_signature,
             target_firmware_hash,
             bonds,
+            alert: flags & FLAG_ALERT_OFF == 0,
         })
     }
 }
@@ -465,6 +482,37 @@ mod tests {
         assert_eq!(store.device_signature, None);
         assert_eq!(store.target_firmware_hash, None);
         assert!(!store.rom.is_provisioned());
+    }
+
+    #[test]
+    fn the_alert_is_on_until_turned_off_and_stays_off() {
+        let store = DeviceStore::new();
+        assert!(store.alert);
+        // A record from before the setting: the bit is clear, so on.
+        let mut v1 = populated().encode();
+        v1[OFF_VERSION] = VERSION_1;
+        let crc = record_crc(&v1[..RECORD_LEN_V1]);
+        v1[OFF_CRC..OFF_CRC + 4].copy_from_slice(&crc.to_le_bytes());
+        assert!(DeviceStore::decode(&v1).unwrap().alert);
+
+        let mut off = populated();
+        off.alert = false;
+        let encoded = off.encode();
+        assert_eq!(encoded[OFF_FLAGS] & FLAG_ALERT_OFF, FLAG_ALERT_OFF);
+        let back = DeviceStore::decode(&encoded).unwrap();
+        assert!(!back.alert);
+        // Nothing else moved with it.
+        assert_eq!(back, off);
+        assert_eq!(back.device_signature, populated().device_signature);
+        assert_eq!(encoded[OFF_BODY..], populated().encode()[OFF_BODY..]);
+    }
+
+    #[test]
+    fn a_wipe_turns_the_alert_back_on() {
+        let mut store = populated();
+        store.alert = false;
+        store.wipe();
+        assert!(store.alert);
     }
 }
 

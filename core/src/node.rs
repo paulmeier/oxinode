@@ -580,6 +580,25 @@ pub enum Event {
     },
 }
 
+/// How many of `events` are messages the board did not have: what
+/// [`crate::alert::Alert::arrived`] is told. Not a retry of one it has, not a
+/// forgery, and nothing that is not a message. One from a stranger counts:
+/// it is kept, proved and shown, unverified.
+pub fn arrivals(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::Message {
+                    arrival: Arrival::New(_),
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
 /// Why [`Station::compose`] did not queue a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsent {
@@ -1938,6 +1957,29 @@ mod receiving {
             ProofResult::Valid
         );
         assert_eq!(station.messages.len(), 1);
+    }
+
+    #[test]
+    fn only_a_message_the_board_did_not_have_is_an_arrival() {
+        let (mut node, mut station) = knowing_the_peer();
+        let (_, events) = hear(&mut node, &mut station, MESSAGE, 5_000);
+        assert_eq!(arrivals(&events), 1);
+        let (_, events) = hear(&mut node, &mut station, RETRY, 9_000);
+        assert_eq!(arrivals(&events), 0, "a retry: {events:?}");
+        let (_, events) = hear(&mut node, &mut station, ANNOUNCE, 10_000);
+        assert_eq!(arrivals(&events), 0, "an announce: {events:?}");
+        // A stranger's: kept unverified, and news all the same.
+        let (mut node, mut station) = fresh();
+        let (_, events) = hear(&mut node, &mut station, STRANGER, 5_000);
+        assert_eq!(arrivals(&events), 1);
+        assert_eq!(
+            arrivals(&[Event::Message {
+                hash: [0; 32],
+                source: [0; 16],
+                arrival: Arrival::Forged,
+            }]),
+            0
+        );
     }
 
     #[test]

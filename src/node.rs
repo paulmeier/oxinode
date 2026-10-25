@@ -37,7 +37,9 @@
 //! sender shows it delivered; one from a sender not yet heard is kept
 //! unverified while the board asks for the sender's key. What is done with
 //! each is [`oxinode_core::node::Station::take`]'s, and is tested there; this
-//! logs it. A new message wakes the panel.
+//! logs it. A new message wakes the panel, and sounds the buzzer when
+//! [`oxinode_core::alert`] says to: once for messages that come together,
+//! and not with the setting off.
 //!
 //! A message the board writes -- a reply from a conversation's menu -- is
 //! queued in the station's outbox and followed until its proof comes back
@@ -72,6 +74,7 @@ mod imp {
     use embassy_time::Instant;
     use embedded_alloc::LlffHeap as Heap;
 
+    use oxinode_core::alert::Alert;
     use oxinode_core::lr1121::config::ValidConfig;
     use oxinode_core::mode::Presence;
     use oxinode_core::node::announce::{self, Kind};
@@ -80,8 +83,8 @@ mod imp {
     use oxinode_core::node::outbox::give_up_ms;
     use oxinode_core::node::peers::{Learned, Table};
     use oxinode_core::node::{
-        announce_len, lxmf_app_data, Attempt, Entropy, Event, Followed, Inbox, Node, Outcome,
-        Sending, Station, Step, Unreadable, Unsent, TICK_MS,
+        announce_len, arrivals, lxmf_app_data, Attempt, Entropy, Event, Followed, Inbox, Node,
+        Outcome, Sending, Station, Step, Unreadable, Unsent, TICK_MS,
     };
     use oxinode_core::screens::{Failure, Wait};
 
@@ -126,6 +129,9 @@ mod imp {
         /// An attempt at one of the board's messages, built and waiting for
         /// the air, with the message's hash.
         ready: Option<([u8; 32], Attempt)>,
+        /// The setting, as stored, and when a message last came: whether
+        /// the next one sounds the buzzer.
+        alert: Alert,
         entropy: Entropy,
         last_tick_ms: u64,
         reported_peak: usize,
@@ -170,6 +176,8 @@ mod imp {
                 inbox: Inbox::new(),
                 station: Station::new(),
                 ready: None,
+                // On until the record says otherwise: see `set_alert`.
+                alert: Alert::new(true),
                 entropy: Entropy::from_seed(seed),
                 last_tick_ms: now_ms(),
                 reported_peak: 0,
@@ -463,6 +471,12 @@ mod imp {
             gps_seconds().unwrap_or(0)
         }
 
+        /// The alert setting, from the device record: at boot, and when it
+        /// is changed on the panel.
+        pub fn set_alert(&mut self, on: bool) {
+            self.alert.set(on);
+        }
+
         /// Which of the two the board is, for the Home screen.
         pub fn mode(&self) -> Option<Mode> {
             Some(self.presence.mode(self.stored_config))
@@ -555,6 +569,14 @@ mod imp {
                         self.station
                             .take(node, &mut out, inbound.at_ms, &mut self.entropy);
                     self.learn(&events);
+                    let mode = self.presence.mode(self.stored_config);
+                    if self.alert.arrived(arrivals(&events), inbound.at_ms, mode) {
+                        crate::buzzer::sound();
+                        defmt::info!(
+                            "node: the alert sounded, {=u32} since boot",
+                            self.alert.sounded()
+                        );
+                    }
                     self.report(out);
                 } else if self.ready.is_none() {
                     if let Some(node) = self.node.as_mut() {
@@ -944,6 +966,9 @@ impl Listener {
     ) -> Option<Change> {
         None
     }
+
+    #[inline(always)]
+    pub fn set_alert(&mut self, _on: bool) {}
 
     #[inline(always)]
     pub fn mode(&self) -> Option<Mode> {

@@ -167,10 +167,22 @@ const BLUETOOTH_MENU: [Item<Action>; 2] =
 const POSITION_MENU: [Item<Action>; 2] = [Item::BACK, Item::new("GPS On/Off", Action::ToggleGps)];
 
 /// What [`Screen::System`] offers.
+#[cfg(not(feature = "node"))]
 const SYSTEM_MENU: [Item<Action>; 3] = [
     Item::BACK,
     Item::new("Reboot", Action::Reboot),
     Item::new("Bootloader", Action::Bootloader),
+];
+
+/// With the node, also the alert for a message. Only there, for the reason
+/// *Announce Now* is only on Home there: an RNode has no messages of its
+/// own. Last, so the restarts are where they are in every image.
+#[cfg(feature = "node")]
+const SYSTEM_MENU: [Item<Action>; 4] = [
+    Item::BACK,
+    Item::new("Reboot", Action::Reboot),
+    Item::new("Bootloader", Action::Bootloader),
+    Item::new("Alert On/Off", Action::ToggleAlert),
 ];
 
 /// The icons, one per screen.
@@ -344,6 +356,9 @@ pub enum Action {
     /// Power the GPS receiver up or down. The rule: the switch decides
     /// when it moves, and this decides in between.
     ToggleGps,
+    /// Turn the buzzer's alert for a message on or off, and store it. Only
+    /// offered in an image with the node; see [`crate::alert`].
+    ToggleAlert,
     /// Restart into the application.
     Reboot,
     /// Restart into the UF2 bootloader.
@@ -393,6 +408,7 @@ impl Action {
             Action::Set(setting) => setting.name(),
             Action::ForgetBonds => "forget phones",
             Action::ToggleGps => "gps on/off",
+            Action::ToggleAlert => "alert on/off",
             Action::Reboot => "reboot",
             Action::Bootloader => "bootloader",
             Action::Announce => "announce now",

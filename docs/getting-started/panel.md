@@ -170,9 +170,22 @@ what turns it on. Menu: *GPS On/Off*.
 speaks, the device serial, the identity (`none`, `bad checksum`, `unsigned`,
 `signed`), and free RAM. In an image with the node, also its LXMF address and
 its Reticulum identity hash, each as two rows of sixteen hex digits: the
-address is what a Sideband or MeshChat user sends to; and `Announce`, the
+address is what a Sideband or MeshChat user sends to; `Announce`, the
 least time between two of its announces at the current configuration (`1 per
-26 s`). Menu: *Reboot*, *Bootloader*.
+26 s`); and `Alert`, `On` or `Off`, whether a message sounds the buzzer
+(below). Menu: *Reboot*, *Bootloader*, and in an image with the node *Alert
+On/Off*.
+
+**The alert.** A message the board did not have, arriving while it is a
+node of its own, sounds the Super IO's buzzer: two 80 ms beeps, a quarter of
+a second in all. Messages that come together sound it once: each that
+arrives within ten seconds of the one before is part of the same lot, so a
+steady conversation beeps at its start and not at every line. Nothing else
+sounds it: not a retry of a message the board already has, not a forgery,
+not an announce, a delivery proof or a path request, and never under a
+host, whose own app tells its user. A message from a sender the board has
+not heard yet does sound it; it is kept and shown, marked unverified. *Alert
+On/Off* turns it off and on again; it is on until someone turns it off.
 
 Every field that can be unknown shows a dash. A board that has heard nothing
 shows `RSSI -`, not `RSSI 0 dBm`; one with no cell shows `Battery -`; the
@@ -270,7 +283,8 @@ With nobody on the line the panel is a controller, and the edit goes through
 the same setters and validation a host gets. What the panel may do under a
 host is what the host does not own: *Save Config* (store the live
 configuration as the boot one, which is `CMD_CONF_SAVE` from the panel and
-makes the board a TNC), *Forget Phones*, the screen, and the restarts.
+makes the board a TNC), *Forget Phones*, *Alert On/Off*, the screen, and the
+restarts.
 
 ## What survives a reboot
 
@@ -279,6 +293,13 @@ stored configuration as well as the live one, so it is what the board boots
 with, and a reflash does not touch it. Under host control nothing is stored:
 the host sets its configuration again on every connect, and a stored copy of a
 panel edit would be a boot configuration nobody asked for.
+
+The alert setting is stored a quarter of a second after it is changed, in
+any mode, in the
+same device record as the stored configuration, so a reboot and a reflash
+keep it. `rnodeconf --eeprom-wipe` turns it back on with everything else,
+and so does running a firmware from before the setting: it keeps the rest of
+the record and writes the setting back to on the next time it writes.
 
 The GPS receiver's on/off state is not stored. The mode switch is the
 persistent default; a menu choice lasts until the next boot or the next move

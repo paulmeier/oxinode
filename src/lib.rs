@@ -22,6 +22,7 @@ pub mod ble;
 pub mod board;
 pub mod boot;
 pub mod bringup;
+pub mod buzzer;
 pub mod display;
 pub mod ext_flash;
 pub mod gps;

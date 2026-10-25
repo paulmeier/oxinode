@@ -192,7 +192,7 @@ The rule is one function, `Action::changes_the_radio`, applied in one place
 in the firmware, and the simulator's scene applies the same function so the
 golden images of the notice are the board's behaviour. What it leaves the
 panel free to do under a host is what the host does not own: *Save Config*,
-*Forget Phones*, the screen, and the restarts.
+*Forget Phones*, *Alert On/Off*, the screen, and the restarts.
 
 Persistence follows the same rule. In TNC mode a panel edit goes into the
 stored configuration as well as the live one; under host control nothing is

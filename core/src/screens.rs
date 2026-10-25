@@ -261,6 +261,9 @@ pub struct System {
     /// budget at the current configuration, in seconds. Drawn only with a
     /// node; `None` there is a radio with no configuration.
     pub announce_gap_s: Option<u32>,
+    /// Whether a message sounds the buzzer: drawn only with a node, as a
+    /// word.
+    pub alert: bool,
     /// Bytes between the top of static data and the stack pointer.
     pub free_ram: Option<u32>,
 }
@@ -274,6 +277,7 @@ impl Default for System {
             identity: Identity::None,
             node: None,
             announce_gap_s: None,
+            alert: true,
             free_ram: None,
         }
     }
@@ -1483,6 +1487,7 @@ impl System {
                 }
             }
             out.row("Announce", gap.as_str());
+            out.row("Alert", if self.alert { "On" } else { "Off" });
         }
         v.clear();
         match self.free_ram {
@@ -2059,6 +2064,7 @@ mod tests {
                     lxmf: core::array::from_fn(|i| 0x10 + i as u8),
                 }),
                 announce_gap_s: Some(252),
+                alert: true,
                 free_ram: Some(123_456),
             },
             peers: three_peers(),
@@ -2941,6 +2947,7 @@ mod tests {
         assert_eq!(lines[at + 4], "a1".repeat(8));
         assert_eq!(lines[at + 5], "a1".repeat(8));
         assert_eq!(lines[at + 6], "Announce 1 per 4m12s");
+        assert_eq!(lines[at + 7], "Alert             On");
 
         state.system.node = None;
         let rnode = lines_of(&state, Screen::System);
@@ -2950,8 +2957,10 @@ mod tests {
                 .any(|l| l.contains("LXMF") || l.contains("RNS")),
             "{rnode:?}"
         );
-        assert!(!rnode.iter().any(|l| l.starts_with("Announce")));
-        assert_eq!(rnode.len(), lines.len() - 7);
+        assert!(!rnode
+            .iter()
+            .any(|l| l.starts_with("Announce") || l.starts_with("Alert")));
+        assert_eq!(rnode.len(), lines.len() - 8);
     }
 
     /// **The position screen with no fix says so, and shows no coordinate.**
@@ -3142,7 +3151,7 @@ mod tests {
             assert_ne!(all(&changed), reference, "changing {name} changed no line");
         }
         // And the rest, which change the picture rather than a line.
-        let system: [Mutation; 9] = [
+        let system: [Mutation; 10] = [
             ("version", |s| s.system.version = "9.9.9"),
             ("build", |s| s.system.build = "fffffff-dirty"),
             ("serial", |s| s.system.serial = None),
@@ -3155,6 +3164,7 @@ mod tests {
                 s.system.node.as_mut().unwrap().identity[0] ^= 1
             }),
             ("announce gap", |s| s.system.announce_gap_s = Some(45)),
+            ("alert", |s| s.system.alert = false),
             ("ram", |s| s.system.free_ram = Some(1)),
         ];
         for (name, mutate) in system {

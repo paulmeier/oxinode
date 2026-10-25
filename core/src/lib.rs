@@ -20,6 +20,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod alert;
 pub mod battery;
 pub mod ble;
 pub mod edit;
