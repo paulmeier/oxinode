@@ -28,7 +28,8 @@
 //! ([`NavExt::refuse`]), where the text is kept for another go.
 //!
 //! The other is the crate's [`Detail`]: oxinode's is a [`Conversation`],
-//! the thread with one peer, opened from the Messages screen's list. Like an
+//! the thread with one peer, opened from the Messages screen's list or the
+//! Peers screen's -- from the second, before anything has been said. Like an
 //! editor it is opened by the caller ([`NavExt::open_conversation`]), in
 //! answer to [`Action::Open`], because which peer the highlighted line is
 //! is the caller's to know.
@@ -138,12 +139,6 @@ const REPLY_MENU: [Item<Action>; 10] = [
     Item::new("Retry Failed", Action::RetryFailed),
 ];
 
-/// What [`Screen::Peers`] offers: nothing yet but the way out. Writing to a
-/// peer from here is not there yet, and is not listed before it does
-/// anything; a conversation starts when the peer writes first.
-#[cfg(feature = "node")]
-const PEERS_MENU: [Item<Action>; 1] = [Item::BACK];
-
 /// What [`Screen::Radio`] offers: the band, an editor for each of the five
 /// parameters a host sets, then the three things that act on the
 /// configuration whole. The band first, as it is on the screen.
@@ -217,10 +212,10 @@ pub const SCREENS: [Spec<Action>; Screen::COUNT] = [
     #[cfg(feature = "node")]
     Spec {
         title: "Peers",
-        menu_title: "Peers Action",
+        menu_title: "",
         icon: PEOPLE,
-        menu: &PEERS_MENU,
-        open: None,
+        menu: &[],
+        open: Some(Action::Open),
     },
     Spec {
         title: "Radio",
@@ -357,8 +352,9 @@ pub enum Action {
     /// offered in an image with the node.
     Announce,
     /// Open the conversation on the highlighted line of the Messages
-    /// screen. The caller answers with [`NavExt::open_conversation`]; see
-    /// the module docs.
+    /// screen, or with the highlighted peer of the Peers screen, whether or
+    /// not anything has been said. The caller answers with
+    /// [`NavExt::open_conversation`]; see the module docs.
     Open,
     /// Open the keyboard over the open conversation. The caller answers
     /// with [`NavExt::compose`], as it does [`Action::Edit`].
@@ -684,8 +680,8 @@ pub trait NavExt {
     fn conversation(&self) -> Option<&Conversation>;
     /// The conversation, to tell it what was drawn.
     fn conversation_mut(&mut self) -> Option<&mut Conversation>;
-    /// Open the conversation with `peer` over the Messages screen: the
-    /// caller's answer to [`Action::Open`].
+    /// Open the conversation with `peer` over the Messages or the Peers
+    /// screen: the caller's answer to [`Action::Open`].
     fn open_conversation(&mut self, peer: [u8; 16]);
 }
 
@@ -946,6 +942,35 @@ mod tests {
         nav.handle(Input::Back);
         assert_eq!(nav.conversation(), None);
         assert_eq!(nav.selected(), Some(1), "back on the line it opened");
+    }
+
+    /// The Peers screen is a list too, of two lines a peer, and hands back
+    /// `Open` for its highlighted peer: the conversation the caller opens
+    /// over it has the reply menu, and back is the peer it was opened on.
+    #[cfg(feature = "node")]
+    #[test]
+    fn peers_is_a_list_that_opens_a_conversation() {
+        assert_eq!(Screen::Peers.spec().open, Some(Action::Open));
+        assert!(Screen::Peers.menu().is_empty(), "select is taken");
+        let mut nav = nav();
+        while nav.current() != Screen::Peers {
+            nav.handle(Input::Right);
+        }
+        nav.set_content(6, LAYOUT.visible_lines());
+        nav.set_entries_of(3, crate::screens::PEER_LINES);
+        nav.handle(Input::Down);
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), Some(Action::Open));
+        assert_eq!(nav.selected(), Some(2));
+        nav.open_conversation([9; 16]);
+        assert_eq!(nav.title(), "Thread");
+        assert_eq!(nav.current(), Screen::Peers);
+        nav.handle(Input::Select);
+        assert_eq!(nav.menu(), ("Reply", &REPLY_MENU[..]));
+        nav.handle(Input::Back);
+        nav.handle(Input::Back);
+        assert_eq!(nav.conversation(), None);
+        assert_eq!(nav.selected(), Some(2), "back on the peer it opened");
     }
 
     /// The reply menu: Back, the keyboard, every canned line in order, the

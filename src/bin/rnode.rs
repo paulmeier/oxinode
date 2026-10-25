@@ -871,9 +871,11 @@ where
     // The node's count of messages arrived, as the panel last saw it: when
     // it moves, a message came, and the panel lights.
     let mut arrived = node.arrived();
-    // The conversations as last drawn: what the highlighted line was when
-    // OK was pressed on it, whatever has arrived since.
+    // The conversations and the peers as last drawn: what the highlighted
+    // line was when OK was pressed on it, whatever has arrived since.
     let mut drawn = screens::Conversations::default();
+    #[cfg(feature = "node")]
+    let mut drawn_peers = screens::Peers::default();
     let mut last_signal: Option<(i16, i8)> = None;
     // When a frame last passed between the modem and a host, on either
     // transport and in either direction, for the Home screen's "talking".
@@ -1207,14 +1209,17 @@ where
                     _ => {}
                 }
             }
-            // Which conversation the line was is the loop's to know.
+            // Which conversation the line was is the loop's to know: a
+            // conversation's on the Messages screen, a peer's on the Peers
+            // screen, whether or not anything has been said.
             if action == ui::Action::Open {
-                let row = ui
-                    .nav
-                    .selected()
-                    .and_then(|n| drawn.rows.get(n).copied().flatten());
-                if let Some(row) = row {
-                    ui.nav.open_conversation(row.peer);
+                let peer = ui.nav.selected().and_then(|n| match ui.nav.current() {
+                    #[cfg(feature = "node")]
+                    ui::Screen::Peers => drawn_peers.nth(n).map(|row| row.destination),
+                    _ => drawn.rows.get(n).copied().flatten().map(|row| row.peer),
+                });
+                if let Some(peer) = peer {
+                    ui.nav.open_conversation(peer);
                 }
             }
             let change = perform(
@@ -1279,6 +1284,10 @@ where
                     state.home.unread = node.unread();
                     state.conversations = node.conversations();
                     drawn = state.conversations;
+                    #[cfg(feature = "node")]
+                    {
+                        drawn_peers = state.peers;
+                    }
                     let open = ui.nav.conversation().map(ui::Conversation::peer);
                     let read = node.with_thread(open, |thread| {
                         screens::render_with(&mut ui.scratch, &mut ui.nav, &state, thread)

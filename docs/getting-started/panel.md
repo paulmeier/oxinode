@@ -66,7 +66,9 @@ message `(bad signature)`. An attachment shows as `(attachment)`. Up and
 down scroll a line; left and right jump to the previous or next message;
 back returns to Messages on the line it was opened from. A message is read
 once the lit panel has shown its last line, and Home's count and the `*`
-on Messages follow. OK opens the reply menu.
+on Messages follow. OK opens the reply menu. A thread opened from Peers
+with nothing said yet says *No messages.*, and back returns to Peers on the
+peer it was opened from.
 
 **Replying.** The reply menu starts with *Type a Message*, which opens the
 keyboard (below). Then come six lines that are sent as they read --
@@ -121,9 +123,14 @@ hops it came if it was relayed (`2 hops`). A peer that announced no name
 shows the start of its address in angle brackets, `<3b079e41d2>`, and a
 character the font cannot draw shows as a box. The board keeps sixteen
 peers, in RAM until a reboot; when a seventeenth is heard, the one heard
-longest ago goes, unless every peer has sent the board a message, in which
-case the newcomer is not kept. Menu: only *Back* for now. A conversation
-starts when a peer writes first; writing to one from here is not there yet.
+longest ago goes, unless every peer has a conversation with the board, in
+which case the newcomer is not kept. The highlighted peer, both its lines,
+is knocked out of a bar; up and down move it, and OK opens the thread with
+that peer, empty if nothing has been said yet, with the reply menu as on
+Messages: this is how the board writes first. Writing to a peer gives it a
+conversation, so it is on Messages from then on and is not dropped for a
+newcomer. With no peers yet, the screen says so and OK does nothing. Menu:
+none, since OK opens the thread.
 
 **A message arriving** lights the panel if it was out, and keeps it lit for
 the same minute a press would. The first press after that acts as usual;

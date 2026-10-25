@@ -25,7 +25,9 @@
 //! ([`dir`]), built with the `node` feature: that image's strip has the
 //! Messages and Peers screens in it, so none of its pictures is the RNode's.
 //! Its set adds the Peers screen with one peer, a full screen of them, one
-//! with no name and one with nothing known but its address; and the
+//! with no name and one with nothing known but its address, one with its
+//! second peer highlighted, and a thread opened from it, empty and then with
+//! a message typed; and the
 //! Messages screen with one conversation and a full screen of them, and a
 //! conversation open, drawn from the recorded ones in
 //! [`crate::conversation`].
@@ -203,6 +205,32 @@ pub fn cases() -> Vec<Case> {
             state,
             size: square,
         });
+    }
+    // And the Peers screen as a way to write first: the second peer
+    // highlighted; OK on a peer nothing has been said with, its thread
+    // empty; and a message typed there, queued, its first.
+    #[cfg(feature = "node")]
+    {
+        let peers = format!("right*{}", Screen::Peers.index());
+        let mut strangers = scene::standalone();
+        strangers.peers = scene::full_of_peers();
+        let typed = script::typing("Hi, it's 7F23", true).expect("typeable");
+        for (name, state, then) in [
+            ("highlighted", scene::standalone(), "down".to_string()),
+            ("thread-empty", strangers, "down select".to_string()),
+            (
+                "thread-typed-sent",
+                strangers,
+                format!("down select select down select {typed}"),
+            ),
+        ] {
+            cases.push(Case {
+                name: format!("peers-{name}"),
+                script: format!("{peers} {then}"),
+                state,
+                size: square,
+            });
+        }
     }
 
     // The Messages screen beyond empty and populated: one conversation and
@@ -621,13 +649,13 @@ mod tests {
         // menu windows, a scroll, every editor, three refusals, a notice and
         // a pairing on the second panel. Then the receiver searching, the
         // other band's screen and editor, and the band switch open and
-        // confirmed. With the node, four more of the Peers screen, Home
+        // confirmed. With the node, seven more of the Peers screen, Home
         // with messages unread, two more of the Messages screen, thirteen
         // conversations and every item of the reply menu, two refused and
         // one held reply, six of the keyboard, and a conversation and the
         // keyboard on the second panel.
         let node = if cfg!(feature = "node") {
-            4 + 1 + 2 + 13 + oxinode_core::ui::Conversation::new([0; 16]).menu().len() + 2 + 6
+            7 + 1 + 2 + 13 + oxinode_core::ui::Conversation::new([0; 16]).menu().len() + 2 + 6
         } else {
             0
         };

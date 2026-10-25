@@ -25,11 +25,12 @@
 //!   sits.
 //!
 //!   A screen can instead be a **list** ([`Screen::open`]): each of its
-//!   lines is one entry, up and down move a highlight over them (the view
-//!   follows it), and select hands back the screen's `open` action for the
-//!   caller to act on the highlighted entry, [`Nav::selected`]. A list
-//!   with no entries yet is an ordinary screen until it has some. A list has
-//!   no menu, because select is taken.
+//!   lines is one entry, or each few ([`Nav::set_entries_of`]), up and
+//!   down move a highlight over them (the view follows it), and select
+//!   hands back the screen's `open` action for the caller to act on the
+//!   highlighted entry, [`Nav::selected`]. A list with no entries yet is an
+//!   ordinary screen until it has some. A list has no menu, because select
+//!   is taken.
 //! * **A menu.** Select opens the current screen's action menu over the
 //!   content. Up and down move the highlight, select activates it, back
 //!   closes it. Left and right are ignored rather than being made to mean
@@ -278,6 +279,8 @@ struct Place {
     selected: usize,
     /// Entries the list has, set by the renderer.
     entries: usize,
+    /// Lines each entry takes, set by the renderer; zero is read as one.
+    per: usize,
 }
 
 /// A detail, and the place of the screen under it.
@@ -325,6 +328,7 @@ impl<A: 'static, M, D> Nav<A, M, D> {
                 lines: 0,
                 selected: 0,
                 entries: 0,
+                per: 1,
             },
             visible: 0,
             detail: None,
@@ -484,23 +488,37 @@ impl<A: 'static, M, D> Nav<A, M, D> {
     /// On anything but a list it does nothing: there is no highlight to
     /// keep.
     pub fn set_entries(&mut self, entries: usize) {
+        self.set_entries_of(entries, 1);
+    }
+
+    /// [`Nav::set_entries`], for a list whose entries take `per` lines
+    /// each: the first `entries * per` lines, an entry to every `per`. The
+    /// view follows the whole of the highlighted one.
+    pub fn set_entries_of(&mut self, entries: usize, per: usize) {
         if !self.is_list() {
             return;
         }
         self.place.entries = entries;
+        self.place.per = per;
         self.place.selected = self.place.selected.min(entries.saturating_sub(1));
         if entries > 0 {
             self.follow();
         }
     }
 
+    /// Lines each entry of the list takes.
+    pub fn entry_lines(&self) -> usize {
+        self.place.per.max(1)
+    }
+
     /// Scroll just far enough that the highlight is in view.
     fn follow(&mut self) {
-        let selected = self.place.selected;
-        if selected < self.place.scroll {
-            self.place.scroll = selected;
-        } else if self.visible > 0 && selected >= self.place.scroll + self.visible {
-            self.place.scroll = selected + 1 - self.visible;
+        let per = self.entry_lines();
+        let top = self.place.selected * per;
+        if top < self.place.scroll {
+            self.place.scroll = top;
+        } else if self.visible > 0 && top + per > self.place.scroll + self.visible {
+            self.place.scroll = (top + per).saturating_sub(self.visible);
         }
         self.place.scroll = self.place.scroll.min(self.max_scroll());
     }
@@ -1104,6 +1122,35 @@ mod tests {
             nav.handle(Input::Up);
         }
         assert_eq!((nav.selected(), nav.scroll()), (Some(7), 7), "back up");
+    }
+
+    /// A list of two-line entries moves its highlight an entry at a time,
+    /// and the view follows the whole of the entry: both its lines in view.
+    #[test]
+    fn a_list_of_two_line_entries_follows_both_lines() {
+        let mut nav = nav();
+        for _ in 0..INBOX {
+            nav.handle(Input::Right);
+        }
+        nav.set_content(20, 11);
+        nav.set_entries_of(10, 2);
+        assert_eq!(nav.entry_lines(), 2);
+        for _ in 0..4 {
+            nav.handle(Input::Down);
+        }
+        // Lines 8 and 9 of 0..11: in view.
+        assert_eq!((nav.selected(), nav.scroll()), (Some(4), 0));
+        nav.handle(Input::Down);
+        // Lines 10 and 11: the view moves one line, to have 11 too.
+        assert_eq!((nav.selected(), nav.scroll()), (Some(5), 1));
+        for _ in 0..30 {
+            nav.handle(Input::Down);
+        }
+        assert_eq!((nav.selected(), nav.scroll()), (Some(9), 9), "stops");
+        for _ in 0..5 {
+            nav.handle(Input::Up);
+        }
+        assert_eq!((nav.selected(), nav.scroll()), (Some(4), 8), "back up");
     }
 
     /// Select on a list hands back its `open` action, once, and opens no
