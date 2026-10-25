@@ -69,6 +69,11 @@ impl Mode {
     pub const fn is_node(self) -> bool {
         matches!(self, Mode::Node)
     }
+
+    /// Whether a host is on the line to read what the RNode would tell it.
+    pub const fn has_host(self) -> bool {
+        matches!(self, Mode::Rnode(_))
+    }
 }
 
 /// What the modem loop saw since it last asked.

@@ -112,7 +112,7 @@ use oxinode_core::rnode::air::{self, Reassembler, Sequence, Split};
 use oxinode_core::rnode::command::{self, error};
 use oxinode_core::rnode::display as rnode_display;
 use oxinode_core::rnode::eeprom;
-use oxinode_core::rnode::hosts::{Hosts, Transport};
+use oxinode_core::rnode::hosts::{Hosts, Transport, Unsolicited};
 use oxinode_core::rnode::kiss;
 use oxinode_core::rnode::outbox::Outbox;
 use oxinode_core::rnode::protocol::{Action, PanelChange, Protocol, Sink};
@@ -1069,7 +1069,7 @@ where
                             // otherwise. The same question `heard` asks.
                             protocol.report_error(
                                 error::MODEM_TIMEOUT,
-                                hosts.listener(phone_connected()),
+                                &mut hosts.listener(phone_connected()),
                             );
                         }
                     }
@@ -1119,6 +1119,9 @@ where
             )
             .await;
         }
+        // With no host, what is heard is the node's alone, and nothing is
+        // framed for a host that is not there; see `oxinode_core::rnode::hosts`.
+        hosts.attend(node.mode());
         node.tick(radio_quiet);
 
         // The node's own packets: only when it is a node, the radio is
@@ -1342,8 +1345,8 @@ where
 
 /// A frame off the air: through the reassembler, and if it completes a
 /// packet, to whoever is the host right now -- the phone if there is one,
-/// USB otherwise -- with its signal. Hands back the packet it delivered, for
-/// the node.
+/// USB otherwise, and nobody when the board has no host -- with its signal.
+/// Hands back the packet it delivered, for the node.
 ///
 /// Both places a packet can come from end here: the idle receive and the
 /// transmit wait's hand-up. The log names the transport it went to, so a
@@ -1387,12 +1390,14 @@ fn heard<'a>(
     match air_in.feed(&rx_buf[..report.len], signal, Instant::now().as_micros()) {
         Some(packet) => {
             let phone = phone_connected();
+            let mut to = hosts.listener(phone);
             defmt::debug!(
                 "rx: {=usize} byte packet to {=str}, from {=str}",
                 packet.payload.len(),
-                match Transport::listener(phone) {
-                    Transport::Bluetooth => "the phone",
-                    Transport::Usb => "USB",
+                match (&to, Transport::listener(phone)) {
+                    (Unsolicited::Nobody, _) => "no host",
+                    (Unsolicited::To(_), Transport::Bluetooth) => "the phone",
+                    (Unsolicited::To(_), Transport::Usb) => "USB",
                 },
                 if air::is_split(header) {
                     "two frames joined"
@@ -1404,7 +1409,7 @@ fn heard<'a>(
                 packet.signal.rssi_dbm,
                 packet.signal.snr_quarter_db,
                 packet.payload,
-                hosts.listener(phone),
+                &mut to,
             );
             Some(packet)
         }

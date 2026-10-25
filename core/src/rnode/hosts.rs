@@ -16,8 +16,19 @@
 //! [`Hosts::listener`], whose only input is whether a phone is connected.
 //! Who asked for the transmission is not an input, and so cannot be the
 //! answer.
+//!
+//! # With no host, nobody
+//!
+//! With the node, the board can have no host at all ([`Mode::Node`] and
+//! [`Mode::Idle`]), and then a frame nobody asked for goes nowhere: there is
+//! nobody to read it, and an outbox nobody reads is abandoned at its next
+//! flush and logged as a drop. The modem loop says which mode it is in with
+//! [`Hosts::attend`]; until it does, as in the RNode image, which has no
+//! modes, there is always a host, and every frame goes where it always went.
 
+use crate::mode::Mode;
 use crate::rnode::outbox::Outbox;
+use crate::rnode::protocol::Sink;
 
 /// One of the two ways a host reaches the modem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +63,23 @@ impl Transport {
 pub struct Hosts<const N: usize> {
     usb: Outbox<N>,
     bluetooth: Outbox<N>,
+    /// Whether a host may be on the line. See [`Hosts::attend`].
+    attended: bool,
+}
+
+/// Where a frame nobody asked for goes: one host's outbox, or, with no host,
+/// nowhere.
+pub enum Unsolicited<'a, const N: usize> {
+    To(&'a mut Outbox<N>),
+    Nobody,
+}
+
+impl<const N: usize> Sink for Unsolicited<'_, N> {
+    fn frame(&mut self, command: u8, payload: &[u8]) {
+        if let Unsolicited::To(outbox) = self {
+            outbox.frame(command, payload);
+        }
+    }
 }
 
 impl<const N: usize> Default for Hosts<N> {
@@ -65,6 +93,7 @@ impl<const N: usize> Hosts<N> {
         Self {
             usb: Outbox::new(),
             bluetooth: Outbox::new(),
+            attended: true,
         }
     }
 
@@ -77,16 +106,27 @@ impl<const N: usize> Hosts<N> {
         }
     }
 
-    /// Where a frame nobody asked for goes. See [`Transport::listener`].
-    pub fn listener(&mut self, phone_connected: bool) -> &mut Outbox<N> {
-        self.outbox(Transport::listener(phone_connected))
+    /// Which mode the board is in, as the node says (`None` for an image
+    /// without one). With no host, a frame nobody asked for goes nowhere.
+    pub fn attend(&mut self, mode: Option<Mode>) {
+        self.attended = mode.is_none_or(Mode::has_host);
+    }
+
+    /// Where a frame nobody asked for goes: nowhere with no host, and
+    /// otherwise as [`Transport::listener`] says.
+    pub fn listener(&mut self, phone_connected: bool) -> Unsolicited<'_, N> {
+        if self.attended {
+            Unsolicited::To(self.outbox(Transport::listener(phone_connected)))
+        } else {
+            Unsolicited::Nobody
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rnode::command::{cmd, Command, RadioState};
+    use crate::rnode::command::{cmd, error, Command, RadioState};
     use crate::rnode::kiss;
     use crate::rnode::protocol::{Action, Protocol, Sink};
 
@@ -163,7 +203,7 @@ mod tests {
             -80,
             20,
             b"heard while waiting",
-            hosts.listener(phone_connected),
+            &mut hosts.listener(phone_connected),
         );
         p.transmitted(hosts.outbox(via));
 
@@ -172,7 +212,7 @@ mod tests {
             -90,
             12,
             b"heard while idle",
-            hosts.listener(phone_connected),
+            &mut hosts.listener(phone_connected),
         );
 
         assert_eq!(
@@ -192,5 +232,72 @@ mod tests {
             vec![cmd::RADIO_STATE, cmd::READY],
             "the USB host gets the answers to its own commands and nothing else"
         );
+    }
+
+    /// What #73 found on the bench: with no host, every heard packet was
+    /// framed into the USB outbox, which nobody read, so its next flush
+    /// abandoned it and logged a drop. Now nothing is framed, in either mode
+    /// without a host, and the packet is still counted as heard.
+    #[test]
+    fn with_no_host_a_frame_nobody_asked_for_goes_nowhere() {
+        for mode in [Mode::Node, Mode::Idle] {
+            for phone_connected in [false, true] {
+                let mut p = Protocol::new();
+                let mut hosts = Hosts::<1024>::new();
+                hosts.attend(Some(mode));
+                p.received(-80, 20, b"heard", &mut hosts.listener(phone_connected));
+                p.report_error(error::MODEM_TIMEOUT, &mut hosts.listener(phone_connected));
+                for transport in [Transport::Usb, Transport::Bluetooth] {
+                    let out = hosts.outbox(transport);
+                    assert!(out.is_empty(), "{mode:?}, {transport:?}");
+                    // What the flush of an outbox nobody reads does.
+                    out.abandon();
+                    assert_eq!(out.take_dropped(), 0, "{mode:?}, {transport:?}");
+                }
+                assert_eq!(p.counters().0, 1, "still heard, for a host that asks later");
+            }
+        }
+    }
+
+    /// With a host, and in the RNode image, which never says, nothing
+    /// changes: the same frames go to the same outbox.
+    #[test]
+    fn with_a_host_a_heard_packet_goes_where_it_always_went() {
+        for mode in [
+            None,
+            Some(Mode::Rnode(Transport::Usb)),
+            Some(Mode::Rnode(Transport::Bluetooth)),
+        ] {
+            for phone_connected in [false, true] {
+                let mut p = Protocol::new();
+                let mut hosts = Hosts::<1024>::new();
+                hosts.attend(mode);
+                p.received(-80, 20, b"heard", &mut hosts.listener(phone_connected));
+                let to = Transport::listener(phone_connected);
+                assert_eq!(
+                    commands(hosts.outbox(to)),
+                    vec![cmd::STAT_RSSI, cmd::STAT_SNR, cmd::DATA],
+                    "{mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_host_arriving_gets_the_next_packet() {
+        let mut p = Protocol::new();
+        let mut hosts = Hosts::<1024>::new();
+        hosts.attend(Some(Mode::Node));
+        p.received(-80, 20, b"before", &mut hosts.listener(false));
+        hosts.attend(Some(Mode::Rnode(Transport::Usb)));
+        p.received(-80, 20, b"after", &mut hosts.listener(false));
+        assert_eq!(
+            commands(hosts.outbox(Transport::Usb)),
+            vec![cmd::STAT_RSSI, cmd::STAT_SNR, cmd::DATA],
+            "only the packet heard after the host spoke"
+        );
+        hosts.attend(Some(Mode::Node));
+        p.received(-80, 20, b"gone", &mut hosts.listener(false));
+        assert_eq!(commands(hosts.outbox(Transport::Usb)).len(), 3);
     }
 }
