@@ -139,7 +139,8 @@ done
 # layout and wrapping, the windowed page and the loop's part. 608 KiB leaves
 # about 29 KB, room for sending (#63) and no more. Sending took 22,096 bytes
 # and the keyboard (#66) 2,712, to 618,192; writing first from the Peers
-# screen (#80) 216, to 618,408. The store (#65) makes its own case.
+# screen (#80) 216, to 618,408; framing nothing with no host (#73) 80, to
+# 618,488. The store (#65) makes its own case.
 NODE_MAX_FLASH=622592   # 608 KiB of the 784 KiB the bootloader leaves
 NODE_MAX_RAM=131072     # 128 KiB of 256 KiB; the stack has the rest
 step "build firmware (ble + node: rnode)"

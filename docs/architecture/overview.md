@@ -92,7 +92,9 @@ rule: **a connected phone is the host.** Answers to commands always go back
 the way the command came; unsolicited frames go to the phone while there is
 one, and to USB otherwise. The rule is one function in `oxinode-core`
 (`rnode::hosts`), asked by both paths a heard packet can come up: the idle
-receive, and the carrier-sense wait before a transmission.
+receive, and the carrier-sense wait before a transmission. In an image with
+the node, a board with no host frames nothing for one: a heard packet is the
+node's alone, and still counted for a host that asks for the counters later.
 
 ## Boot
 
