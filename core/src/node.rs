@@ -2500,6 +2500,90 @@ mod sending {
         assert_eq!(got.message.content, "Hi 2");
     }
 
+    /// Written first, from the Peers screen: OK on the peer as the screen
+    /// lists it opens a thread with nothing in it, the keyboard types "Hi",
+    /// and the peer reads exactly that -- and from then on the peer has a
+    /// conversation, so it is on the Messages screen and kept in the table.
+    #[test]
+    fn a_peer_written_to_first_from_the_peers_screen_reads_it() {
+        use crate::screens::{self, State};
+        use crate::sh1107::Frame;
+        use crate::ui::{self, Input, NavExt, Screen};
+        use Input::{Down, Right, Select, Up};
+        let mut b = bench();
+        assert!(!b.station.peers.get(&to()).unwrap().conversation);
+        assert_eq!(b.station.conversations(1_000).rows[0], None);
+        let state = State {
+            peers: b.station.peers.screen(1_000),
+            ..State::default()
+        };
+        let mut nav = ui::nav();
+        while nav.current() != Screen::Peers {
+            nav.handle(Right);
+        }
+        screens::render(&mut Frame::new(), &mut nav, &state);
+        assert_eq!(nav.handle(Select), Some(ui::Action::Open));
+        // The modem loop's answer: the peer on the line as last drawn.
+        let peer = nav.selected().and_then(|n| state.peers.nth(n)).unwrap();
+        assert_eq!(peer.destination, to());
+        nav.open_conversation(peer.destination);
+        let entries = b.station.entries(&to(), 1_000);
+        assert!(entries.is_empty(), "nothing said yet");
+        nav.handle(Select);
+        nav.handle(Down);
+        assert_eq!(nav.handle(Select), Some(ui::Action::Compose));
+        nav.compose();
+        // From h, Shift on the bottom row; up and round to h; i; Send.
+        let presses = [
+            Down,
+            Input::Left,
+            Input::Left,
+            Input::Left,
+            Input::Left,
+            Input::Left,
+            Input::Left,
+            Select, // Shift
+            Up,
+            Right,
+            Right,
+            Right,
+            Right,
+            Right,
+            Right,
+            Select, // H
+            Up,
+            Right,
+            Right,
+            Select, // i
+            Right,
+            Right,
+            Right,
+            Select, // Send
+        ];
+        let mut chosen = Vec::new();
+        for input in presses {
+            chosen.extend(nav.handle(input));
+        }
+        assert_eq!(chosen, [ui::Action::SendTyped]);
+        let peer = nav.conversation().unwrap().peer();
+        let text = nav.typing().unwrap().text();
+        assert_eq!(text, "Hi");
+        let hash = b
+            .station
+            .compose(&b.board, &peer, text, 0, 1_000, None)
+            .unwrap();
+        nav.written();
+        assert!(b.station.peers.get(&to()).unwrap().conversation);
+        assert_eq!(
+            b.station.conversations(1_000).rows[0].map(|r| r.peer),
+            Some(to())
+        );
+        let (_, attempt) = attempt(&mut b, 1_000);
+        let (_, _) = peer_hears(&mut b, &attempt.packet, 1_500);
+        let got = b.peers_station.messages.get(&hash).unwrap();
+        assert_eq!(got.message.content, "Hi");
+    }
+
     /// The keyboard's limit is exactly what fits: a full keyboard's text
     /// is written, and nothing typed can be refused as too long.
     #[test]

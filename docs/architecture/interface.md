@@ -61,9 +61,10 @@ Five modules, no dependencies, `no_std`, `forbid(unsafe_code)`:
   picks one and never interprets it.
 - **`draw`**: the title bar, the icon strip, the menu (windowed around its
   highlight when it does not fit), the scrollbar, and `page`, which composes
-  them. `page_of` takes the content as a `Content`: every line, a list with
-  nothing in it yet, or a window onto content too long to hold, whose total
-  the scrollbar is drawn from.
+  them. `page_of` takes the content as a `Content`: every line, a list
+  whose entries take several lines each, a list with nothing in it yet, or
+  a window onto content too long to hold, whose total the scrollbar is
+  drawn from.
 - **`font`**: the 5 × 7 font.
 
 And one optional module, `eg`, behind the `embedded-graphics` feature, which
@@ -86,7 +87,9 @@ waiting for a second device.
    list of text lines the application formats into its own buffers; `page`
    draws the ones that fit from the scroll position with a scrollbar when
    there are more. A screen whose descriptor has `open` set is a **list**:
-   each line is an entry, up and down move a highlight drawn as a bar with
+   each line is an entry, or each few lines (`Content::Entries`,
+   `Nav::set_entries_of`: the Peers screen's are two), up and down move a
+   highlight drawn as a bar with
    the text knocked out of it (the view follows it, and it stops at the
    ends), and OK hands back the `open` action for the caller to act on
    `Nav::selected`. A list has no menu, which `Nav::new` asserts, and with
@@ -394,6 +397,15 @@ screen. Choosing one hands back `Action::Open`; the modem loop answers it
 with `NavExt::open_conversation` for the peer on that line of the list as
 it was last drawn, so a message arriving between the drawing and the press
 cannot change which conversation opens.
+
+The Peers screen is a list too, two lines a peer, with the same
+`Action::Open`: the modem loop tells the two apart by the screen under the
+highlight and answers with the peer on that entry as last drawn
+(`Peers::nth`). That is how the board writes first. The thread it opens may
+have nothing in it, and says so; the reply menu works as on any other.
+`Station::compose` marks the peer as having a conversation, so from the
+first message written it is on the Messages screen and the peer table does
+not evict it for a stranger.
 
 A thread is not copied: sixteen messages of up to 295 bytes would be a
 State five kilobytes larger on every redraw. `screens::render_with` takes

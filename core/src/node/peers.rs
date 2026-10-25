@@ -13,8 +13,9 @@
 //! heard and the table is full, the peer heard longest ago goes, unless it
 //! has a conversation: a peer somebody has written to or heard from is never
 //! pushed out for one nobody has. If every peer has one, the stranger is not
-//! kept, and that is counted. Nothing sets a conversation yet; the messages
-//! that do are the next pieces of the node.
+//! kept, and that is counted. A message received from a peer gives it a
+//! conversation, and so does one written to it, from the Messages screen or
+//! the Peers screen.
 //!
 //! # Names
 //!

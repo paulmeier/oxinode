@@ -823,7 +823,9 @@ impl State {
                 self.conversations.lines(out);
             }
             #[cfg(feature = "node")]
-            Screen::Peers => self.peers.lines(out),
+            Screen::Peers => {
+                self.peers.lines(out);
+            }
             Screen::Radio => self.radio.lines(out),
             Screen::Bluetooth => self.bluetooth.lines(out),
             Screen::Position => self.position.lines(out),
@@ -912,20 +914,31 @@ impl Home {
 }
 
 impl Peers {
-    /// Two lines a peer: its name with how long ago it was heard, then how
-    /// it was heard -- the signal if it came straight off the air, the hops
-    /// if it was relayed.
-    pub fn lines(&self, out: &mut Lines) {
-        let mut any = false;
+    /// Two lines a peer, [`PEER_LINES`]: its name with how long ago it was
+    /// heard, then how it was heard -- the signal if it came straight off
+    /// the air, the hops if it was relayed. Returns how many peers there
+    /// are, which is how many entries the lines are; with none, a sentence
+    /// that says so.
+    pub fn lines(&self, out: &mut Lines) -> usize {
+        let mut entries = 0;
         for row in self.rows.iter().flatten() {
-            any = true;
+            entries += 1;
             row.lines(out);
         }
-        if !any {
+        if entries == 0 {
             out.wrapped("No peers heard yet.");
         }
+        entries
+    }
+
+    /// The peer on entry `n` of the screen, as [`Peers::lines`] lists it.
+    pub fn nth(&self, n: usize) -> Option<&PeerRow> {
+        self.rows.iter().flatten().nth(n)
     }
 }
+
+/// The lines each peer takes on the Peers screen.
+pub const PEER_LINES: usize = 2;
 
 impl PeerRow {
     fn lines(&self, out: &mut Lines) {
@@ -1958,11 +1971,19 @@ pub fn render_with(
         let strs = lines.as_strs();
         let strs = &strs[..lines.len()];
         #[cfg(feature = "node")]
-        if screen == Screen::Messages && state.conversations.rows.iter().all(Option::is_none) {
-            page_of(canvas, nav, left.as_str(), name, Content::Empty(strs));
-        } else {
-            page(canvas, nav, left.as_str(), name, strs);
-        }
+        let content = match screen {
+            Screen::Messages if state.conversations.rows.iter().all(Option::is_none) => {
+                Content::Empty(strs)
+            }
+            Screen::Peers if state.peers.rows.iter().all(Option::is_none) => Content::Empty(strs),
+            Screen::Peers => Content::Entries {
+                lines: strs,
+                per: PEER_LINES,
+            },
+            _ => Content::Lines(strs),
+        };
+        #[cfg(feature = "node")]
+        page_of(canvas, nav, left.as_str(), name, content);
         #[cfg(not(feature = "node"))]
         page(canvas, nav, left.as_str(), name, strs);
     }

@@ -191,6 +191,9 @@ pub fn scrollbar(canvas: &mut impl Canvas, first: usize, lines: usize) {
 pub enum Content<'a> {
     /// Every line, from the first. On a list screen, every line is an entry.
     Lines(&'a [&'a str]),
+    /// A list whose entries take `per` lines each: every line, from the
+    /// first, and every `per` of them one entry, highlighted whole.
+    Entries { lines: &'a [&'a str], per: usize },
     /// A list with nothing in it yet: lines that say so, none of them an
     /// entry, so nothing is highlighted and select does what it does on an
     /// ordinary screen.
@@ -237,17 +240,19 @@ pub fn page_of<A: Copy + 'static, M: Modal<A>, D: Detail<A>>(
 ) {
     let layout = Layout::for_canvas(canvas);
     canvas.fill(false);
-    let (lines, total, entries) = match content {
-        Content::Lines(lines) => (lines, lines.len(), lines.len()),
-        Content::Empty(lines) => (lines, lines.len(), 0),
-        Content::Window { total, lines } => (lines, total, 0),
+    let (lines, total, entries, per) = match content {
+        Content::Lines(lines) => (lines, lines.len(), lines.len(), 1),
+        Content::Entries { lines, per } => (lines, lines.len(), lines.len() / per.max(1), per),
+        Content::Empty(lines) => (lines, lines.len(), 0, 1),
+        Content::Window { total, lines } => (lines, total, 0, 1),
     };
+    let per = per.max(1);
     let modal = nav.modal_is_open();
     let first = if modal {
         0
     } else {
         nav.set_content(total, layout.visible_lines());
-        nav.set_entries(entries);
+        nav.set_entries_of(entries, per);
         nav.scroll()
     };
     // A window starts at the scroll; the rest are drawn from it.
@@ -265,7 +270,8 @@ pub fn page_of<A: Copy + 'static, M: Modal<A>, D: Detail<A>>(
         .enumerate()
     {
         let y = layout.content_top + n * font::LINE_HEIGHT;
-        let lit = highlight == Some(first + n);
+        let line_no = first + n;
+        let lit = line_no < entries * per && highlight == Some(line_no / per);
         if lit {
             // From just left of the text to a pixel short of the scrollbar.
             let x = layout.content_left.saturating_sub(2);
@@ -612,6 +618,36 @@ mod tests {
             .filter(|&row| barred(&b, &layout, row))
             .collect();
         assert_eq!(lit, [10], "entry 15 is the eleventh row drawn");
+    }
+
+    /// A list of two-line entries lights both lines of the highlighted one,
+    /// and moving the highlight moves it by an entry.
+    #[test]
+    fn a_list_of_two_line_entries_highlights_both_lines() {
+        let layout = Layout::of(128, 128);
+        let lines = ["Ana", "  near", "Bea", "  far"];
+        let entries = Content::Entries {
+            lines: &lines,
+            per: 2,
+        };
+        let mut nav = nav();
+        for _ in 0..INBOX {
+            nav.handle(Input::Right);
+        }
+        let mut b = Square::new();
+        page_of(&mut b, &mut nav, "", "", entries);
+        let lit = |c: &Square| -> Vec<usize> {
+            (0..lines.len())
+                .filter(|&row| barred(c, &layout, row))
+                .collect()
+        };
+        assert_eq!(lit(&b), [0, 1]);
+        nav.handle(Input::Down);
+        page_of(&mut b, &mut nav, "", "", entries);
+        assert_eq!(nav.selected(), Some(1));
+        assert_eq!(lit(&b), [2, 3]);
+        nav.handle(Input::Down);
+        assert_eq!(nav.selected(), Some(1), "two entries, not four");
     }
 
     /// An empty list says so in lines that are not entries: nothing lit.

@@ -508,8 +508,13 @@ impl Scene {
             (Action::Set(setting), None) => self.state.radio.config.apply(setting),
             (Action::Open, _) => {
                 let rows = &self.state.conversations.rows;
-                if let Some(row) = self.nav.selected().and_then(|n| rows[n]) {
-                    self.nav.open_conversation(row.peer);
+                let peer = self.nav.selected().and_then(|n| match self.nav.current() {
+                    #[cfg(feature = "node")]
+                    ui::Screen::Peers => self.state.peers.nth(n).map(|row| row.destination),
+                    _ => rows[n].map(|row| row.peer),
+                });
+                if let Some(peer) = peer {
+                    self.nav.open_conversation(peer);
                 }
             }
             (Action::Compose, _) => self.nav.compose(),
@@ -539,26 +544,25 @@ impl Scene {
         } else {
             Wait::Turn
         };
-        let Some(recorded) = self.recorded.iter_mut().find(|r| r.peer == peer) else {
-            return Ok(());
-        };
-        let content = match action {
-            Action::RetryFailed => {
-                let failed = recorded
-                    .messages
-                    .iter_mut()
-                    .filter(|m| matches!(m.direction, Direction::Sent(Delivery::Failed(_))));
-                let mut any = false;
-                for m in failed {
-                    m.direction = Direction::Sent(Delivery::Queued(held));
-                    any = true;
-                }
-                return if any {
-                    Ok(())
-                } else {
-                    Err(ui::Refusal::NothingFailed)
-                };
+        if action == Action::RetryFailed {
+            let failed = self
+                .recorded
+                .iter_mut()
+                .filter(|r| r.peer == peer)
+                .flat_map(|r| r.messages.iter_mut())
+                .filter(|m| matches!(m.direction, Direction::Sent(Delivery::Failed(_))));
+            let mut any = false;
+            for m in failed {
+                m.direction = Direction::Sent(Delivery::Queued(held));
+                any = true;
             }
+            return if any {
+                Ok(())
+            } else {
+                Err(ui::Refusal::NothingFailed)
+            };
+        }
+        let content = match action {
             Action::SendPosition => {
                 let mut text = String::new();
                 screens::position_text(&self.state.position, &mut text)?;
@@ -571,13 +575,40 @@ impl Scene {
                 .unwrap_or_default(),
             _ => action.reply().unwrap_or_default().to_string(),
         };
-        recorded.messages.push(conversation::Message {
+        let message = conversation::Message {
             direction: Direction::Sent(Delivery::Queued(held)),
             age_s: Some(0),
             content,
             attachment: false,
             unread: false,
-        });
+        };
+        if let Some(recorded) = self.recorded.iter_mut().find(|r| r.peer == peer) {
+            recorded.messages.push(message);
+            return Ok(());
+        }
+        // Written to a peer nothing has been said with: it has a
+        // conversation from now on, at the top of the Messages screen, as
+        // the node gives it one.
+        let name = self
+            .state
+            .peers
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| row.destination == peer)
+            .and_then(|row| row.name.as_ref())
+            .map(|name| name.as_str().to_string());
+        let recorded = Recorded {
+            peer,
+            name,
+            messages: vec![message],
+        };
+        let rows = &mut self.state.conversations.rows;
+        if !rows.iter().flatten().any(|row| row.peer == peer) {
+            rows.rotate_right(1);
+            rows[0] = Some(recorded.row());
+        }
+        self.recorded.push(recorded);
         Ok(())
     }
 
@@ -740,6 +771,47 @@ mod tests {
         empty.state.conversations = Default::default();
         assert!(empty
             .run(&script::parse("right select").unwrap())
+            .is_empty());
+        assert_eq!(empty.nav.conversation(), None);
+    }
+
+    /// OK on a peer nothing has been said with opens an empty thread with
+    /// it; a message typed there is its first, and the peer is on the
+    /// Messages screen from then on.
+    #[cfg(feature = "node")]
+    #[test]
+    fn a_peer_is_written_to_first_from_the_peers_screen() {
+        let mut scene = Scene::with_state(standalone());
+        scene.state.peers = full_of_peers();
+        scene.state.conversations = Default::default();
+        let peers = format!("right*{}", ui::Screen::Peers.index());
+        let actions = scene.run(&script::parse(&format!("{peers} down select")).unwrap());
+        assert_eq!(actions, [Action::Open]);
+        let row = scene.state.peers.rows[1].unwrap();
+        assert_eq!(
+            scene.nav.conversation().map(|c| c.peer()),
+            Some(row.destination)
+        );
+        assert!(!scene.recorded.iter().any(|r| r.peer == row.destination));
+        let typed = script::typing("Hi 2", true).unwrap();
+        let actions = scene.run(&script::parse(&format!("select down select {typed}")).unwrap());
+        assert_eq!(actions, [Action::Compose, Action::SendTyped]);
+        let recorded = scene.recorded.iter().find(|r| r.peer == row.destination);
+        let recorded = recorded.expect("a conversation now");
+        assert_eq!(recorded.messages.len(), 1);
+        assert_eq!(recorded.messages[0].content, "Hi 2");
+        assert_eq!(recorded.name.as_deref(), Some("oxinode 1B3C"));
+        let listed = scene.state.conversations.rows[0].unwrap();
+        assert_eq!(listed.peer, row.destination);
+        // Back on the Peers screen, on the peer it was opened from.
+        scene.press(Input::Back);
+        assert_eq!(scene.nav.current(), ui::Screen::Peers);
+        assert_eq!(scene.nav.selected(), Some(1));
+        // A screen with no peers opens nothing.
+        let mut empty = Scene::with_state(standalone());
+        empty.state.peers = Default::default();
+        assert!(empty
+            .run(&script::parse(&format!("{peers} select")).unwrap())
             .is_empty());
         assert_eq!(empty.nav.conversation(), None);
     }

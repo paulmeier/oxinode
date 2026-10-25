@@ -67,8 +67,7 @@ has to rediscover it.
 - **The six canned lines are fixed.** *OK*, *Yes*, *No*, *On my way*,
   *Can't talk now* and *Where are you?* are in the firmware, and cannot be
   changed from the panel or a host. Anything else is typed on the
-  keyboard. A conversation starts when a peer writes first: the Peers
-  screen cannot open one yet.
+  keyboard.
 - **The keyboard types what the font draws, at the end of the text.** It
   has the letters, the digits, space and `! # % ' ( ) * + , - . / : = ?`;
   no accents, no `" $ & @ ;`, and no emoji. The cursor is always at the end:
