@@ -96,6 +96,7 @@ use oxinode::battery::Sense;
 use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
 use oxinode::display::{self, Boost, Panel};
+use oxinode::ext_flash;
 use oxinode::gps;
 use oxinode::modem::{CsmaReport, Modem, RxReport, TxOutcome, TxReport};
 use oxinode::node::Listener;
@@ -121,6 +122,7 @@ use oxinode_core::screens::{self, Air, Host, Identity};
 use oxinode_core::sh1107;
 use oxinode_core::status::Bluetooth;
 use oxinode_core::ui::{self, Nav, NavExt};
+use oxinode_core::w25q::Verdict;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -256,6 +258,29 @@ async fn main(_spawner: Spawner) {
     let spi = radio::new_spi(p.SPI2, Irqs, p.P1_13, p.P1_15, p.P1_14, p.P1_12);
     let reset = radio::RadioReset::new(p.P1_10, p.P1_11);
     let mut irq = radio::RadioIrq::new(p.P1_08);
+
+    // The 16 MB QSPI flash, which nothing here uses yet: woken in case the
+    // last boot left it asleep, asked for its ID, and put in deep
+    // power-down, with its pins held for as long as this runs. See
+    // `oxinode::ext_flash`.
+    let (_qspi_flash, flash_awake, flash_asleep) = ext_flash::park(ext_flash::Bitbang::new(
+        p.P0_03, p.P0_26, p.P0_30, p.P0_29, p.P0_28, p.P0_02,
+    ));
+    defmt::info!(
+        "qspi flash: id {=u8:02x} {=u8:02x} {=u8:02x} awake, {=u8:02x} {=u8:02x} {=u8:02x} after B9h; {=str}",
+        flash_awake.manufacturer,
+        flash_awake.memory_type,
+        flash_awake.capacity,
+        flash_asleep.manufacturer,
+        flash_asleep.memory_type,
+        flash_asleep.capacity,
+        match (flash_awake.verdict(), flash_asleep.verdict()) {
+            (Verdict::W25q128, Verdict::Silent) => "a W25Q128, in deep power-down",
+            (Verdict::Silent, _) => "nothing answered",
+            (_, Verdict::Silent) => "not the expected part, in deep power-down",
+            _ => "still answering after B9h: not asleep",
+        }
+    );
 
     // Takes over the `POWER` half of the shared interrupt before MPSL unmasks
     // it; see the binding above.

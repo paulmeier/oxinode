@@ -23,6 +23,7 @@ pub mod board;
 pub mod boot;
 pub mod bringup;
 pub mod display;
+pub mod ext_flash;
 pub mod gps;
 pub mod logger;
 pub mod modem;

@@ -90,7 +90,7 @@ schematic and the variant disagree, the schematic wins.
 | LR1121 RF switch | — | the chip's own DIO5/DIO6, set by an on-chip command, not MCU GPIO |
 | OLED I²C SDA / SCL | P0.24 / P0.25 | SH1107 at **0x3C**; 128 × 128, 1.12"; 5.1 kΩ pull-ups on board |
 | OLED 12 V boost enable | P0.23 | must be driven **high** or the panel is dark |
-| QSPI SCK / CS / IO0–3 | P0.03 / P0.26 / P0.30, P0.29, P0.28, P0.02 | W25Q128, 16 MB; not driven by oxinode |
+| QSPI SCK / CS / IO0–3 | P0.03 / P0.26 / P0.30, P0.29, P0.28, P0.02 | W25Q128JV, 16 MB; put in deep power-down at boot by `rnode`, exercised by `qspi` |
 | LF clock | — | external 32.768 kHz crystal (LFXO) |
 | Navigation pad up / down / left / right | P0.21 / P0.17 / P1.05 / P0.16 | active low, internal pull-ups |
 | Navigation pad OK / back | P0.10 / P0.15 | active low; **P0.10 is an NFC pin** |
@@ -152,7 +152,18 @@ module's numbers and refuses rather than clamping: a host that asks for
 
 **The QSPI flash is 16 MB.** The variant declares a `W25Q32JVSS` (4 MB) and
 the product page says 8 MB, but the Rev 01 schematic populates a
-**W25Q128JVPIQ**. oxinode does not drive it.
+**W25Q128JVPIQ**, and it answers as one: JEDEC ID `EF 40 18`. Its QE bit is
+set from the factory, so the four-line reads and writes work without writing
+the status register. Measured with the `qspi` image at 8 MHz: a 4 KB sector
+erases in 45 ms, programs in 10.7 ms, and reads in 4.18 ms on one line or
+1.07 ms on four. A pattern written there survives a reset of the nRF52.
+
+**A reset of the nRF52 does not wake the flash.** Once it is in deep
+power-down (`B9h`), it answers nothing but `ABh`, and a sleeping chip leaves
+its output undriven, so its ID reads `00 00 00` with IO1 pulled down. The
+product image therefore wakes it first, reads its ID, puts it back to sleep
+and keeps all six pins driven, and logs both IDs at boot. Nothing stores
+anything on it yet.
 
 **There is no DFU button.** The bootloader's `BUTTON_1` and `BUTTON_2` are
 both P0.05, which is unconnected. Double-tap reset and the software path

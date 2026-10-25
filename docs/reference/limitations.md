@@ -47,7 +47,10 @@ has to rediscover it.
   board that hears nothing and cannot say why.
 - **The GPS module is not configured.** It is taken as it wakes; nothing asks
   it for a faster rate or standby.
-- **The QSPI flash** is not driven.
+- **The QSPI flash holds nothing.** The product image wakes it at boot,
+  checks its ID and puts it in deep power-down; the `qspi` image proves it
+  reads, writes and keeps a pattern across a reset. What lives on it is the
+  messaging store's to decide (#65).
 - **An announce made without a GPS time says it was made at time zero.** The
   board has no other clock, and zero is Reticulum's "not known". It costs
   nothing over the air directly; a receiver holding a path to the board
