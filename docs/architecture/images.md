@@ -1,6 +1,6 @@
 # Firmware images
 
-`src/bin/` holds six images. One is the product; the rest exist because the
+`src/bin/` holds seven images. One is the product; the rest exist because the
 board has no debug probe, and a failure you can bisect by choosing which image
 to flash is worth the duplication.
 
@@ -9,6 +9,7 @@ to flash is worth the duplication.
 | `rnode` | `ble` | **The product.** RNode over USB and Bluetooth, the panel, the pad, the GPS, provisioning. |
 | `radio` | default | Radio bring-up diagnostic with a serial console. |
 | `display` | default | OLED bring-up diagnostic. |
+| `qspi` | default | QSPI flash bring-up diagnostic, and a cycle for measuring its deep power-down. |
 | `ble` | `ble` | Bluetooth stack bring-up diagnostic, built to be debugged without a probe. |
 | `usb-cdc` | default | Two serial ports, echo on the first, log on the second. Proves the USB path. |
 | `blink` | default | Blinks the green LED. Proves the toolchain, the linker script and flashing. |
@@ -77,6 +78,44 @@ scans the bus with the 12 V rail off and on, draws an asymmetric test
 pattern (a corner square, a wide short bar, a staircase) that settles which
 way the axes run, and then renders a status page. See
 [The display](../hardware/display.md).
+
+## `qspi`
+
+Exposes a single CDC port, like `radio`. Before anything else it reads the
+W25Q128's JEDEC ID on plain GPIOs, which says whether the last boot left the
+chip in deep power-down: a reset of the nRF52 does not wake it, and a
+sleeping chip leaves its output undriven, so the ID reads as zeros. It then
+wakes the chip (`ABh`), reads the ID and both status registers, and looks at
+the test sector, the chip's last 4 KB. It reports the sector as erased, as
+holding a pattern an earlier boot wrote (with any bytes that differ counted
+and the first located), or as holding something else. Writing a pattern and
+reading it after `R` is how a pattern is shown to survive a reset. The
+pattern and its check are `oxinode_core::w25q`, tested on the host.
+
+The ID and the status registers are read on GPIOs rather than through the
+QSPI peripheral. `embassy-nrf` has the peripheral poll the busy bit before
+every custom instruction, which a sleeping chip never answers, and it sends
+a write enable ahead of each one, so a status read through it would always
+show the latch set. Erasing, writing and reading go through the peripheral,
+single-line at 8 MHz unless `q` asks for four lines.
+
+| Key | What it does |
+|---|---|
+| `i` | The ID as the chip is now, then wake it, the ID again, and the status registers |
+| `r` | Read the test sector and say what is there |
+| `w` | Erase the test sector, write a new pattern, and read it back |
+| `x` | Erase the test sector |
+| `q` | Read the test sector on four lines; refused while QE is clear |
+| `s` `a` | Deep power-down (`B9h`) or wake (`ABh`), with the ID read after |
+| `m` | The measuring cycle, until the next key |
+| `R` | Reset the nRF52, leaving the flash as it is |
+| `b` | Reboot into the bootloader |
+
+With no terminal within five seconds of boot, the image starts the measuring
+cycle by itself: the chip in standby, then in deep power-down, ten seconds
+each, over and over, with the LED off, because the LED draws more than the
+difference. A meter in the battery lead, with USB unplugged, shows the
+difference as a square wave.
 
 ## `ble`
 

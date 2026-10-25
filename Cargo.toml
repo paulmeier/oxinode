@@ -175,6 +175,12 @@ required-features = ["ble"]
 name = "display"
 path = "src/bin/display.rs"
 
+# Bring-up image for the W25Q128 QSPI flash: its ID, its status, a pattern
+# that has to survive a reset, and a standby/power-down cycle for a meter.
+[[bin]]
+name = "qspi"
+path = "src/bin/qspi.rs"
+
 # Bring-up image for the Bluetooth stack. Needs the `ble` feature, and
 # therefore a different critical section, so it cannot be built in the same
 # invocation as the others:

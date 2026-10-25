@@ -41,3 +41,4 @@ pub mod sh1107;
 pub mod status;
 pub mod ui;
 pub mod usb;
+pub mod w25q;
