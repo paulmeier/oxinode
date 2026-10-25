@@ -96,6 +96,7 @@ schematic and the variant disagree, the schematic wins.
 | Navigation pad OK / back | P0.10 / P0.15 | active low; **P0.10 is an NFC pin** |
 | Power OFF / Power ON / GPS ON switch | P1.09 / P0.12 | P1.09 high in Power ON, P0.12 high in GPS ON, no pull; Power OFF cuts the board's power |
 | GPS load switch (`GPS_EN`) | P1.01 | **active high**; gates the switched 3V3 rail the module lives on, 500 mA |
+| Buzzer load switch (`PIN_BUZZER`) | P0.22 | **active high**; gates the switched 3V3 rail the buzzer lives on. Driven low from boot by `rnode`; a 2 kHz square wave for each beep of the alert for a message, since the buzzer is passive |
 | GPS UART | P0.20 / P0.19 | the module transmits on **P0.20** (nRF52840 `RXD`) and receives on P0.19; 9600 baud, 8N1 |
 | Battery sense | P0.31 (`AIN7`) | the cell through 806 kΩ / 1.5 MΩ, ratio 0.65048; SAADC at gain 1/6, 12-bit |
 | Charger status | P1.02 | BQ25185 `STAT2`, open drain, **low while charging**; 100 kΩ pull-up on the board plus the internal one; also drives the red LED |
@@ -118,6 +119,19 @@ and P0.22 (`PIN_BUZZER`) each drive an NMOS that gates a high-side PMOS
 feeding a switched 3V3 rail out to the expansion connector. Both are active
 high, and P0.22 powers the buzzer rather than sounding it. 500 mA per switch,
 600 mA total on the 3.3 V rail.
+
+**The buzzer is a passive one.** P0.22 held high only clicks it, once as
+the rail comes up and once as it goes down, for any length from 50 ms to
+10 s. A square wave on P0.22, through the load switch, sounds it: at 1, 2
+and 3 kHz, and not at 4 kHz, which the switch does not follow. Of 1, 2 and
+3 kHz, 2 kHz is the loudest, and the alert plays it from the PWM
+peripheral. Heard on 7F23 with the `buzzer` image
+on 2026-10-25, after a first reading on 2026-10-24 took the cycle's 2 kHz
+tone for the held phase and called it active. The Super IO has no
+schematic, so this is known only by ear. The current it draws while
+sounding has not been measured, and nobody has yet looked at the Super IO
+for a vibration motor; none appears on the Base Duo schematic or in the
+Meshtastic variant.
 
 **The GPS UART is named from opposite ends in the two sources.** The
 schematic labels P0.20 `UART_GPS_TX` (the net, from the module's side); the

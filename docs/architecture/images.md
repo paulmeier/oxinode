@@ -1,6 +1,6 @@
 # Firmware images
 
-`src/bin/` holds seven images. One is the product; the rest exist because the
+`src/bin/` holds eight images. One is the product; the rest exist because the
 board has no debug probe, and a failure you can bisect by choosing which image
 to flash is worth the duplication.
 
@@ -10,6 +10,7 @@ to flash is worth the duplication.
 | `radio` | default | Radio bring-up diagnostic with a serial console. |
 | `display` | default | OLED bring-up diagnostic. |
 | `qspi` | default | QSPI flash bring-up diagnostic, and a cycle for measuring its deep power-down. |
+| `buzzer` | default | Buzzer bring-up: P0.22 held high or driven with a square wave, to tell an active buzzer from a passive one by ear. |
 | `ble` | `ble` | Bluetooth stack bring-up diagnostic, built to be debugged without a probe. |
 | `usb-cdc` | default | Two serial ports, echo on the first, log on the second. Proves the USB path. |
 | `blink` | default | Blinks the green LED. Proves the toolchain, the linker script and flashing. |
@@ -116,6 +117,36 @@ cycle by itself: the chip in standby, then in deep power-down, ten seconds
 each, over and over, with the LED off, because the LED draws more than the
 difference. A meter in the battery lead, with USB unplugged, shows the
 difference as a square wave.
+
+## `buzzer`
+
+The Super IO's buzzer sits behind a load switch on P0.22, and what is on the
+far side of it is not on any schematic. This image settles it by ear. An
+active buzzer has its own oscillator, so P0.22 held high sounds a continuous
+tone; a passive one clicks as the rail comes up and goes down, and needs a
+square wave, which only works through the switch if the switch is fast
+enough to follow it. The square wave comes from the PWM peripheral at 1 MHz
+divided down. Between sounds the pin is driven low, never left floating.
+
+Exposes a single CDC port, like `qspi`.
+
+| Key | What it does |
+|---|---|
+| `h` `H` | P0.22 held high for 1 s, or for 10 s (for a meter) |
+| `1`–`8` | A square wave at 1–8 kHz for 1 s |
+| `s` | A sweep from 500 Hz to 8 kHz, 400 ms a step, each step logged |
+| `w` | P0.22 held high for 50, 100, 150, 200, 300 and 500 ms, 2 s apart: how long a beep has to be to sound as a tone |
+| `p` | The alert pattern, held: two 80 ms beeps 80 ms apart |
+| `P` | The alert pattern as a 4 kHz square wave |
+| `c` | The cycle below, until the next key |
+| `R` | Reset |
+| `b` | Reboot into the bootloader |
+
+With no terminal within five seconds of boot, it plays a cycle with the LED
+off, so it can be listened to on the battery with nothing to read: held for
+1 s, 2 kHz for 1 s, 4 kHz for 1 s, the pattern held, the pattern at 4 kHz,
+held for 10 s and 4 kHz for 10 s, two seconds apart, then five seconds of
+silence and again.
 
 ## `ble`
 

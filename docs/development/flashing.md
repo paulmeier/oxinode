@@ -183,3 +183,22 @@ These need a board on the bench and Paul there to double-tap:
    would clear an overflow trap, and see whether the next attempt is
    acknowledged. If it is, that confirms the mechanism, and gives
    `dfu-flash.sh` a software recovery in place of the double-tap.
+
+One data point for the third, on 2026-10-24 at 22:46, flashing the 30 KB
+`buzzer` image onto 7F23 by touch. The first attempt raised `No data
+received`; the retry printed `Device programmed.`, and the board came up in
+its bootloader. Read back through `CURRENT.UF2`, the first 50 of the image's
+119 256-byte blocks matched and the rest did not: the partial write
+described above, on a short erase, not a long one. The next attempt could
+not reach the bootloader. Four SLIP frames of four zero bytes each, opened
+at 115200 baud, got no reply, and the attempt after them still could not
+reach it. That does not rule the overflow trap out (nothing showed the
+frames were read), but it is not the software recovery hoped for.
+
+A second, on 2026-10-25 at 09:10, the same board and a 31 KB `buzzer`
+image, touched out of the `buzzer` image itself. This time the **first**
+attempt printed `Device programmed.` with no error and no retry, and the
+board came up in its bootloader. `CURRENT.UF2` matched the first 38 of 124
+blocks. The next attempt could not reach the bootloader, as before. So a
+partial write does not need a retry against a bootloader mid-transfer to
+happen, and `Device programmed.` alone is not proof of a flash.

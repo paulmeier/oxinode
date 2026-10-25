@@ -181,6 +181,12 @@ path = "src/bin/display.rs"
 name = "qspi"
 path = "src/bin/qspi.rs"
 
+# Bring-up image for the Super IO's buzzer: P0.22 held high, or driven with
+# a square wave, to tell by ear whether it is an active or a passive part.
+[[bin]]
+name = "buzzer"
+path = "src/bin/buzzer.rs"
+
 # Bring-up image for the Bluetooth stack. Needs the `ble` feature, and
 # therefore a different critical section, so it cannot be built in the same
 # invocation as the others:

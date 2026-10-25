@@ -79,7 +79,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_futures::join::{join, join3, join5};
+use embassy_futures::join::{join, join4, join5};
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_futures::yield_now;
 use embassy_nrf::usb::{self, Driver};
@@ -95,6 +95,7 @@ use nrf_sdc::{self as sdc, mpsl};
 use oxinode::battery::Sense;
 use oxinode::ble::{self, Vbus};
 use oxinode::board::{self, Led};
+use oxinode::buzzer;
 use oxinode::display::{self, Boost, Panel};
 use oxinode::ext_flash;
 use oxinode::gps;
@@ -363,6 +364,10 @@ async fn main(_spawner: Spawner) {
         GPS_TX.init([0; gps::TX_BUFFER]),
     );
     let gps_task = gps::serve(receiver, &mode_switch);
+
+    // The buzzer: its pin driven low now, and the alert for a message
+    // played when the node asks; see `oxinode::buzzer`.
+    let buzzer_task = buzzer::serve(p.PWM0, p.P0_22);
 
     // The cell through its divider on P0.31, and the charger's two
     // status lines. Read once per redraw, for the Home screen's battery and
@@ -651,7 +656,7 @@ async fn main(_spawner: Spawner) {
         pump,
         feed_host_rx,
         modem,
-        join3(bluetooth, nav_pad, gps_task),
+        join4(bluetooth, nav_pad, gps_task, buzzer_task),
     )
     .await;
 }
@@ -870,6 +875,7 @@ where
     let ble_name = interop::advertised_name(mcu_id);
     node.adopt(storage, &ble_name[interop::NAME_PREFIX.len()..])
         .await;
+    node.set_alert(protocol.store().alert);
     let mut decoder = kiss::Decoder::<{ kiss::HW_MTU }>::new();
     // The phone's own decoder, and an outbox per transport, so a frame in
     // progress on one is never spliced with the other's. Which outbox a
@@ -1261,6 +1267,9 @@ where
             .await;
             if change.persist {
                 dirty_since = Some(Instant::now());
+            }
+            if action == ui::Action::ToggleAlert {
+                node.set_alert(protocol.store().alert);
             }
             if change.radio != Action::None {
                 act(
@@ -2163,6 +2172,17 @@ async fn perform(
                 persist: true,
             }
         }
+        // Stored with the radio configuration; the loop, which holds the
+        // node, tells it.
+        ui::Action::ToggleAlert => {
+            let store = protocol.store_mut();
+            store.alert = !store.alert;
+            defmt::info!("ui: alert {=str}", if store.alert { "on" } else { "off" });
+            PanelChange {
+                radio: Action::None,
+                persist: true,
+            }
+        }
         // The receiver is the GPS task's; this only asks.
         ui::Action::ToggleGps => {
             defmt::info!("ui: gps on/off");
@@ -2249,6 +2269,7 @@ impl Facts {
                 identity: identity_of(protocol),
                 node: self.node,
                 announce_gap_s,
+                alert: protocol.store().alert,
                 free_ram: board::free_ram_bytes(),
             },
             // The node's, which the caller adds; the radio-less loop has none.

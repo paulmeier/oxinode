@@ -166,6 +166,7 @@ pub fn populated() -> State {
             // The populated configuration, SF8 at 125 kHz: the board's
             // 183-byte announce is 0.52 s on the air, so 26 s between two.
             announce_gap_s: Some(26),
+            alert: true,
             free_ram: Some(126_976),
         },
         peers: three_peers(),

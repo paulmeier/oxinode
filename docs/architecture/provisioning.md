@@ -53,13 +53,21 @@ made over erased bytes.
 
 ```
 0xEA000 ┌──────────────────────────────────────────┐
-        │ magic "OXN1" · version 2 · length        │
+        │ magic "OXN1" · version 2 · flags         │
+        │ CRC-32 over every other byte             │
         │ EEPROM image (256 bytes)                 │
+        │ device signature (64 bytes)              │
         │ target firmware hash (32 bytes)          │
         │ bonds: count + up to 4 × (address, keys) │
-        │ CRC-32 over everything above             │
         └──────────────────────────────────────────┘
 ```
+
+The flags byte says whether the signature and the hash are present, and
+carries one setting of the node's: bit 2 set means the alert for a message
+is off. It is set for off so that a record written before the setting
+existed reads as on, the default, and the record's version did not have to
+move for it. A firmware from before the bit keeps it clear when it writes,
+so a downgrade turns the alert back on and loses nothing else.
 
 `0xEA000` is the first page of the 40 KB the bootloader reserves with
 `DFU_APP_DATA_RESERVED` and refuses to write through on both of its flashing
