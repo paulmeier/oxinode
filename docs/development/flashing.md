@@ -166,6 +166,21 @@ So nothing in `dfu-flash.sh` changes here. Its retry still handles the failure
 it was written for, a touch that loses the race to the bootloader's
 enumeration, where nothing has reached the bootloader yet.
 
+### A good transfer, packet by packet
+
+At 22:15, after a double-tap on 354B, the node image (618,496 bytes) went
+over at the first attempt. The tool's packet log was recorded (a wrapper that
+turns on its DEBUG logging, with timestamps). There were 1,211 packets and
+1,211 acknowledgements, every one in sequence. Acknowledgements took 5 ms at
+the median, 6 ms at the 99th percentile and 18 ms at worst, against the tool's
+1 s timeout. The start packet was acknowledged straight away, the erase sleep
+ran 13.6 s, and the whole transfer took 37.0 s. The per-board check reported
+354B in its bootloader and sent no touch. The cached-baud reset reopened the
+new image's port 2.8 s after it enumerated.
+
+So a healthy bootloader is nowhere near the timeout. A missing acknowledgement
+is not a slow one; something has stopped it altogether.
+
 ## What would settle it
 
 These need a board on the bench and Paul there to double-tap:
