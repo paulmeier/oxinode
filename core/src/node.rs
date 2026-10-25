@@ -2437,6 +2437,7 @@ mod sending {
         let mut nav = ui::nav();
         nav.open_conversation(to());
         nav.handle(Input::Select);
+        nav.handle(Input::Down); // Type a Message
         nav.handle(Input::Down); // OK
         nav.handle(Input::Down); // Yes
         let action = nav.handle(Input::Select).unwrap();
@@ -2453,6 +2454,67 @@ mod sending {
         assert_eq!(got.message.content, "Yes");
         assert_eq!(got.message.source, board().hashes().lxmf);
         assert_eq!(air.len(), 1, "and proves it");
+    }
+
+    /// The same, typed: open the keyboard from the menu, type "Hi 2" --
+    /// *Shift*, a capital, a space, a digit -- press *Send*, and the peer
+    /// reads exactly that.
+    #[test]
+    fn a_message_typed_on_the_pad_is_the_message_the_peer_reads() {
+        use crate::ui::{self, Input, NavExt};
+        use Input::{Down, Left, Right, Select, Up};
+        let mut b = bench();
+        let mut nav = ui::nav();
+        nav.open_conversation(to());
+        nav.handle(Select);
+        nav.handle(Down);
+        assert_eq!(nav.handle(Select), Some(ui::Action::Compose));
+        nav.compose();
+        // From h: down to the bottom row, left round to Shift; up to h's
+        // row and round to h again; i; Space; then 2, and Send.
+        let presses = [
+            Down, Left, Left, Left, Left, Left, Left, Select, // Shift
+            Up, Right, Right, Right, Right, Right, Right, Select, // H
+            Up, Right, Right, Select, // i
+            Down, Right, Right, Right, Select, // Space
+            Up, Up, Right, Right, Select, // 2
+            Down, Left, Left, Select, // Send
+        ];
+        let mut chosen = Vec::new();
+        for input in presses {
+            chosen.extend(nav.handle(input));
+        }
+        assert_eq!(chosen, [ui::Action::SendTyped]);
+        let peer = nav.conversation().unwrap().peer();
+        let text = nav.typing().unwrap().text();
+        assert_eq!(text, "Hi 2");
+        let hash = b
+            .station
+            .compose(&b.board, &peer, text, 0, 0, None)
+            .unwrap();
+        nav.written();
+        assert!(nav.typing().is_none());
+        let (_, attempt) = attempt(&mut b, 0);
+        let (_, _) = peer_hears(&mut b, &attempt.packet, 500);
+        let got = b.peers_station.messages.get(&hash).unwrap();
+        assert_eq!(got.message.content, "Hi 2");
+    }
+
+    /// The keyboard's limit is exactly what fits: a full keyboard's text
+    /// is written, and nothing typed can be refused as too long.
+    #[test]
+    fn a_full_keyboard_fits_one_packet() {
+        use crate::ui::{self, Input, Typing};
+        let mut typing = Typing::new();
+        for _ in 0..ui::MESSAGE_MAX + 5 {
+            typing.handle(Input::Select);
+        }
+        assert_eq!(typing.len(), lxmf::MAX_CONTENT);
+        let mut b = bench();
+        assert!(b
+            .station
+            .compose(&b.board, &to(), typing.text(), 0, 0, None)
+            .is_ok());
     }
 
     #[test]

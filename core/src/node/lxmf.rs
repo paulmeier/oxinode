@@ -107,6 +107,9 @@ pub const ENCRYPTED_MDU: usize = rns_core::constants::ENCRYPTED_MDU;
 /// the content as bin16 and an empty map.
 pub const MAX_CONTENT: usize = ENCRYPTED_MDU - (HASH_LEN + SIGNATURE_LEN + 1 + 9 + 2 + 3 + 1);
 
+// The panel's keyboard types up to this, and is built without the node.
+const _: () = assert!(crate::ui::MESSAGE_MAX == MAX_CONTENT);
+
 /// A message the board would send that does not fit in one packet, by this
 /// many bytes. It is refused, never cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

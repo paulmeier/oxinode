@@ -17,7 +17,7 @@ Messages screen opens the thread with each peer.
 
 Held directions auto-repeat after 400 ms at eight steps a second. OK and back
 do not repeat: an action chosen once is chosen once. A notice closes on any
-key.
+key. The keyboard has keys of its own; see *Typing a message* below.
 
 The bottom of every screen is a strip of icons, one a screen, saying where you are; the
 top is a title bar with the screen's name, the battery percentage on the left
@@ -68,7 +68,8 @@ back returns to Messages on the line it was opened from. A message is read
 once the lit panel has shown its last line, and Home's count and the `*`
 on Messages follow. OK opens the reply menu.
 
-**Replying.** The reply menu has six lines that are sent as they read --
+**Replying.** The reply menu starts with *Type a Message*, which opens the
+keyboard (below). Then come six lines that are sent as they read --
 *OK*, *Yes*, *No*, *On my way*, *Can't talk now*, *Where are you?* -- then
 *Send Position* and *Retry Failed*. Choosing a line sends it at once to the
 peer whose conversation it is, and the thread moves to its end, where the
@@ -84,6 +85,32 @@ no fix at all it is not sent, and a notice says so. Under a host a reply is
 written and kept, `queued (held for the host)`, and goes when the host has
 gone; with no radio configuration stored it is `queued (no radio config)`.
 Any key closes a notice.
+
+**Typing a message.** The keyboard is a grid of keys under the text, in the
+order of a QWERTY keyboard:
+
+```text
+1 2 3 4 5 6 7 8 9 0  Quit
+q w e r t y u i o p  Send
+a s d f g h j k l '  Space
+z x c v b n m . , ?  Shift
+```
+
+| Switch | In the keyboard |
+|---|---|
+| up / down / left / right | move the highlight; it wraps at every edge |
+| OK | type the highlighted key, or do what it says |
+| back | delete the last character; with nothing typed, leave |
+
+The highlight starts on `h`. *Shift* makes the next character a capital,
+and turns the number row into `! # % ( ) * + - = /` and `'` into `:`, and
+the grid shows what it will type while it is on. The line over the grid
+counts against the limit, `35/287`. A message is one packet, so typing past
+287 characters is refused (`No room`), not cut. *Send* writes the message
+to the peer, closes the keyboard and shows it at the end of the thread. If
+it cannot be written, the reason is shown where the text was, and the next
+key brings the text back for another go. *Quit* leaves; with text typed it
+asks first, and OK throws the text away while back keeps typing.
 
 **Peers**, in an image with the node only, after Messages. Who else is
 around: every Sideband, MeshChat or oxinode the board has heard announce an

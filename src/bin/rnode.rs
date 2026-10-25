@@ -1181,6 +1181,8 @@ where
             if let Some(peer) = ui.nav.conversation().map(|c| c.peer()) {
                 let done = match action {
                     ui::Action::Reply(_) => action.reply().map(|text| node.reply(peer, text)),
+                    // What the keyboard holds; it waits, open, for the answer.
+                    ui::Action::SendTyped => ui.nav.typing().map(|t| node.reply(peer, t.text())),
                     ui::Action::SendPosition => {
                         let mut text = heapless::String::<64>::new();
                         Some(
@@ -1201,11 +1203,7 @@ where
                         ui.nav.refuse(refusal);
                     }
                     // What was written is at the end of the thread: show it.
-                    Some(Ok(())) if action != ui::Action::RetryFailed => {
-                        if let Some(open) = ui.nav.conversation_mut() {
-                            open.show_end();
-                        }
-                    }
+                    Some(Ok(())) if action != ui::Action::RetryFailed => ui.nav.written(),
                     _ => {}
                 }
             }
@@ -2060,7 +2058,13 @@ async fn perform(
         // The loop opened the conversation: it has the list as drawn.
         ui::Action::Open => PanelChange::NONE,
         // The loop wrote the message: the node is its.
-        ui::Action::Reply(_) | ui::Action::SendPosition | ui::Action::RetryFailed => {
+        ui::Action::Reply(_)
+        | ui::Action::SendTyped
+        | ui::Action::SendPosition
+        | ui::Action::RetryFailed => PanelChange::NONE,
+        // Nothing to ask anyone: the keyboard opens over the conversation.
+        ui::Action::Compose => {
+            ui.nav.compose();
             PanelChange::NONE
         }
         // Nobody has the radio, or this would have been the notice above.
