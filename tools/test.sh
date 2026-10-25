@@ -137,8 +137,9 @@ done
 # Raised from 576 KiB on 2026-10-24 by the conversation screens (#62): the
 # image went from 583,280 to 593,384 bytes, 10,104 of them the thread's
 # layout and wrapping, the windowed page and the loop's part. 608 KiB leaves
-# about 29 KB, room for sending (#63) and no more; the store (#65) and text
-# entry (#66) make their own case.
+# about 29 KB, room for sending (#63) and no more. Sending took 22,096 bytes
+# and the keyboard (#66) 2,712, to 618,192; the store (#65) makes its own
+# case.
 NODE_MAX_FLASH=622592   # 608 KiB of the 784 KiB the bootloader leaves
 NODE_MAX_RAM=131072     # 128 KiB of 256 KiB; the stack has the rest
 step "build firmware (ble + node: rnode)"

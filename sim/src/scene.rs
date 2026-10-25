@@ -512,18 +512,16 @@ impl Scene {
                     self.nav.open_conversation(row.peer);
                 }
             }
-            (Action::Reply(_) | Action::SendPosition | Action::RetryFailed, _) => {
-                match self.write(action) {
-                    Err(refusal) => self.nav.refuse(refusal),
-                    // What was written is at the end of the thread: shown.
-                    Ok(()) if action != Action::RetryFailed => {
-                        if let Some(open) = self.nav.conversation_mut() {
-                            open.show_end();
-                        }
-                    }
-                    Ok(()) => {}
-                }
-            }
+            (Action::Compose, _) => self.nav.compose(),
+            (
+                Action::Reply(_) | Action::SendTyped | Action::SendPosition | Action::RetryFailed,
+                _,
+            ) => match self.write(action) {
+                Err(refusal) => self.nav.refuse(refusal),
+                // What was written is at the end of the thread: shown.
+                Ok(()) if action != Action::RetryFailed => self.nav.written(),
+                Ok(()) => {}
+            },
             _ => {}
         }
     }
@@ -566,6 +564,11 @@ impl Scene {
                 screens::position_text(&self.state.position, &mut text)?;
                 text
             }
+            Action::SendTyped => self
+                .nav
+                .typing()
+                .map(|t| t.text().to_string())
+                .unwrap_or_default(),
             _ => action.reply().unwrap_or_default().to_string(),
         };
         recorded.messages.push(conversation::Message {

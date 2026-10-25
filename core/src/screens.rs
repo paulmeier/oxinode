@@ -1911,6 +1911,10 @@ pub fn render_with(
         refusal.lines_in(&mut lines, rows);
         let strs = lines.as_strs();
         page(canvas, nav, left.as_str(), name, &strs[..lines.len()]);
+    } else if let Some(typing) = nav.typing().copied() {
+        // The chrome with no lines, and the keyboard in the content area.
+        page(canvas, nav, left.as_str(), name, &[]);
+        monopanel::keyboard::draw(canvas, &typing);
     } else if let Some(open) = nav.conversation().copied() {
         let none = Thread {
             peer: open.peer(),

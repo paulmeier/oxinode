@@ -27,6 +27,9 @@
 //!   there are more.
 //! * **Optionally, a [`Modal`].** Something the application opens over a
 //!   screen that takes the keys until it is done: an editor, a notice.
+//! * **Optionally, a [`Keyboard`].** A modal for typing a line of text on
+//!   the pad: a QWERTY grid under the text, which the application wraps in
+//!   its own modal and draws with [`keyboard::draw`].
 //! * **Optionally, lists and a [`Detail`].** A screen whose
 //!   [`Screen::open`] is set is a list: select hands that action back for
 //!   the highlighted line. A detail is opened over a screen, browsed like
@@ -89,6 +92,7 @@
 pub mod canvas;
 pub mod draw;
 pub mod font;
+pub mod keyboard;
 pub mod layout;
 pub mod nav;
 
@@ -99,6 +103,7 @@ pub use canvas::{Bitmap, Canvas, Readable};
 pub use draw::{
     draw_icon, icon_bar, menu, menu_of, menu_window, page, page_of, scrollbar, title_bar, Content,
 };
+pub use keyboard::{Keyboard, Typed};
 pub use layout::Layout;
 pub use nav::{
     Detail, Icon, Input, Item, Modal, Nav, NoDetail, NoModal, Outcome, Screen, ICON_CELL, ICON_H,

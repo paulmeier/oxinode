@@ -171,6 +171,10 @@ pub enum Outcome<A> {
     Close,
     /// The modal is finished and the caller has this to do.
     Emit(A),
+    /// The caller has this to do, and the modal stays open until it has:
+    /// what to do is in the modal ([`Nav::modal`]), and the caller closes
+    /// it ([`Nav::close_modal`]) or tells it why not ([`Nav::modal_mut`]).
+    Keep(A),
 }
 
 /// Something the application opens over a screen that takes the keys until
@@ -369,6 +373,22 @@ impl<A: 'static, M, D> Nav<A, M, D> {
         matches!(self.overlay, Overlay::Modal(_))
     }
 
+    /// The modal, to change it while it is open.
+    pub fn modal_mut(&mut self) -> Option<&mut M> {
+        match &mut self.overlay {
+            Overlay::Modal(modal) => Some(modal),
+            _ => None,
+        }
+    }
+
+    /// Close the modal, if one is open: the caller's answer to
+    /// [`Outcome::Keep`] once it has done what the modal asked.
+    pub fn close_modal(&mut self) {
+        if self.modal_is_open() {
+            self.overlay = Overlay::None;
+        }
+    }
+
     /// Open `modal` over the current screen, replacing whatever overlay
     /// there was.
     pub fn open(&mut self, modal: M) {
@@ -528,6 +548,7 @@ impl<A: Copy + 'static, M: Modal<A>, D: Detail<A>> Nav<A, M, D> {
                     self.overlay = Overlay::None;
                     Some(action)
                 }
+                Outcome::Keep(action) => Some(action),
             },
             Overlay::None => self.browsing(input),
         }

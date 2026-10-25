@@ -246,17 +246,17 @@ pub fn cases() -> Vec<Case> {
             ("thread-outgoing-top", Some("Ana"), "up*99"),
             ("thread-unverified", None, ""),
             ("thread-undrawable", Some("Zo\u{eb} \u{1f642}"), ""),
-            ("thread-replied", Some("Bench peer"), "select down*2 select"),
+            ("thread-replied", Some("Bench peer"), "select down*3 select"),
             (
                 "thread-position",
                 Some("Bench peer"),
-                "select down*7 select",
+                "select down*8 select",
             ),
-            ("thread-retried", Some("Ana"), "select down*8 select up*99"),
+            ("thread-retried", Some("Ana"), "select down*9 select up*99"),
             (
                 "thread-refused-nothing-failed",
                 Some("Bench peer"),
-                "select down*8 select",
+                "select down*9 select",
             ),
         ] {
             cases.push(Case {
@@ -283,7 +283,7 @@ pub fn cases() -> Vec<Case> {
         no_fix.position = oxinode_core::gps::Position::OFF;
         cases.push(Case {
             name: "messages-thread-refused-no-fix".to_string(),
-            script: format!("{messages} select select down*7 select"),
+            script: format!("{messages} select select down*8 select"),
             state: no_fix,
             size: square,
         });
@@ -292,9 +292,44 @@ pub fn cases() -> Vec<Case> {
         under_a_host.home.mode = scene::populated().home.mode;
         cases.push(Case {
             name: "messages-thread-replied-held".to_string(),
-            script: format!("{messages} select select down*2 select"),
+            script: format!("{messages} select select down*3 select"),
             state: under_a_host,
             size: square,
+        });
+        // The keyboard, from the menu's *Type a Message*: empty; a message
+        // of two lines; *Shift* on; the question *Quit* asks; full, with the
+        // press past the limit refused; and sent, in the thread.
+        let typing = format!("{messages} select select down select");
+        let typed = |text: &str, send: bool| script::typing(text, send).expect("typeable");
+        for (name, then) in [
+            ("typing", String::new()),
+            (
+                "typing-text",
+                typed("On my way to the trailhead, 10 min!", false),
+            ),
+            ("typing-shift", "down left*6 select".to_string()),
+            (
+                "typing-quit",
+                format!("{} up right*3 select", typed("Hi", false)),
+            ),
+            (
+                "typing-full",
+                format!("select*{}", oxinode_core::ui::MESSAGE_MAX + 1),
+            ),
+            ("typed-sent", typed("Hi there!", true)),
+        ] {
+            cases.push(Case {
+                name: format!("messages-thread-{name}"),
+                script: format!("{typing} {then}"),
+                state: scene::with_conversations(&named(Some("Bench peer"))),
+                size: square,
+            });
+        }
+        cases.push(Case {
+            name: format!("{}/messages-thread-typing", Size::WIDE.name()),
+            script: format!("{typing} {}", typed("On my way to the trailhead", false)),
+            state: scene::with_conversations(&named(Some("Bench peer"))),
+            size: Size::WIDE,
         });
         cases.push(Case {
             name: format!("{}/messages-thread", Size::WIDE.name()),
@@ -589,9 +624,10 @@ mod tests {
         // confirmed. With the node, four more of the Peers screen, Home
         // with messages unread, two more of the Messages screen, thirteen
         // conversations and every item of the reply menu, two refused and
-        // one held reply, and a conversation on the second panel.
+        // one held reply, six of the keyboard, and a conversation and the
+        // keyboard on the second panel.
         let node = if cfg!(feature = "node") {
-            4 + 1 + 2 + 13 + oxinode_core::ui::Conversation::new([0; 16]).menu().len() + 2
+            4 + 1 + 2 + 13 + oxinode_core::ui::Conversation::new([0; 16]).menu().len() + 2 + 6
         } else {
             0
         };
@@ -617,7 +653,7 @@ mod tests {
             + 3
             + 1
             + 1
-            + usize::from(cfg!(feature = "node"));
+            + 2 * usize::from(cfg!(feature = "node"));
         assert_eq!(cases.len(), square + wide);
         assert_eq!(cases.iter().filter(|c| c.size == Size::WIDE).count(), wide);
         for field in Field::ALL {
@@ -712,6 +748,16 @@ mod tests {
                     "{}",
                     case.name
                 );
+                // And the keyboard exactly when it says typing.
+                let typing = scene.nav.typing();
+                assert_eq!(typing.is_some(), stem.contains("-typing"), "{}", case.name);
+                if let Some(typing) = typing {
+                    assert_eq!(typing.quitting(), stem.ends_with("-quit"), "{}", case.name);
+                    assert_eq!(typing.shifted(), stem.ends_with("-shift"), "{}", case.name);
+                    if stem.ends_with("-full") {
+                        assert_eq!(typing.len(), oxinode_core::ui::MESSAGE_MAX);
+                    }
+                }
             } else {
                 assert!(!scene.nav.is_editing(), "{}", case.name);
             }

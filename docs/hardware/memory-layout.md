@@ -132,8 +132,10 @@ in opening a conversation and marking it read. It is now 608 KiB, about
 29 KB over that. Sending and the canned replies
 ([#63](https://github.com/paulmeier/oxinode/issues/63),
 [#64](https://github.com/paulmeier/oxinode/issues/64)) took 22,096 bytes of
-it on 2026-10-24, to 615,480 (RAM 122,772), which leaves 7,112; the store and
-text entry make their own case when they come.
+it on 2026-10-24, to 615,480 (RAM 122,772), which leaves 7,112. The keyboard
+([#66](https://github.com/paulmeier/oxinode/issues/66)) took 2,712 more, to
+618,192 (RAM 123,044, the text being typed), which leaves 4,400; the store
+makes its own case when it comes.
 
 ## How the layout is kept honest
 

@@ -419,6 +419,28 @@ The modem loop answers each for the open conversation's peer. What the board
 will not write -- no fix, a full outbox, nothing failed -- opens a notice
 saying why (`Overlay::Refused`), which any key closes.
 
+Above the canned lines is *Type a Message*, `Action::Compose`, which the
+loop answers with `NavExt::compose`: `Overlay::Compose`, holding
+`monopanel::Keyboard`, a QWERTY grid of four rows of ten characters and
+*Quit*, *Send*, *Space* and *Shift* in a wider column. The keyboard is
+`monopanel`'s, with nothing of oxinode in it; it holds the text, up to
+`ui::MESSAGE_MAX` bytes (287, asserted equal to `lxmf::MAX_CONTENT`), and
+`keyboard::draw` puts the text, a status line and the grid in the content
+area under the usual chrome. There is no long-press and no double-press:
+a capital is *Shift* and then the letter, and back deletes. On ten short
+messages the grid takes under five presses a character, moves and the
+press together, against about ten for a wheel of letters at each position;
+`keyboard::tests::presses_per_character` holds it to that.
+
+*Send* is the one place a modal hands back an action and stays open
+(`monopanel::Outcome::Keep`). `Action::SendTyped` reaches the loop with the
+text still in the keyboard; the loop writes `NavExt::typing`'s text as it
+writes a canned line, then calls `NavExt::written`, which closes the
+keyboard and shows the end of the thread, or `NavExt::refuse`, which over
+the keyboard says why inside it and keeps the text. Between *Send* and
+the answer the keyboard ignores keys, so a press queued behind *Send* in
+the same pass cannot change what is written.
+
 `render_with` returns how many of the thread's messages have had their last
 line in view (`Thread::read_through`), and the loop marks those read
 (`Station::read`, counting both ways), but only when the panel is lit: the page is drawn into

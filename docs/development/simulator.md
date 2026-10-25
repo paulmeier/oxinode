@@ -85,7 +85,11 @@ a long thread and characters the font lacks. The scene opens the
 highlighted conversation as the board does, and marks read what the thread
 shows. A reply chosen from a thread's menu lands at its end, queued, or held
 under a host; *Send Position* writes the fixture's fix, or opens the notice
-with none; *Retry Failed* queues the failed ones again. `--conversation FILE` puts another file's conversations on the
+with none; *Retry Failed* queues the failed ones again. *Type a Message*
+opens the keyboard, which the directions and OK type on as on the board,
+and *Send* puts what was typed at the thread's end; in a test,
+`script::typing("On my way", true)` is the script that types a text and
+sends it. `--conversation FILE` puts another file's conversations on the
 standalone board instead, so one seen on the bench can be written down and
 looked at again:
 

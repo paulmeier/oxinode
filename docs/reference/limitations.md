@@ -64,12 +64,16 @@ has to rediscover it.
   when a seventeenth comes the oldest one read goes, or the oldest if none
   has been; a conversation whose messages have all gone leaves the Messages
   screen.
-- **The board answers with six fixed lines and its position.** *OK*,
-  *Yes*, *No*, *On my way*, *Can't talk now* and *Where are you?* are in the
-  firmware, and cannot be changed from the panel or a host; anything else
-  waits for text entry
-  ([#66](https://github.com/paulmeier/oxinode/issues/66)). A conversation
-  starts when a peer writes first: the Peers screen cannot open one yet.
+- **The six canned lines are fixed.** *OK*, *Yes*, *No*, *On my way*,
+  *Can't talk now* and *Where are you?* are in the firmware, and cannot be
+  changed from the panel or a host. Anything else is typed on the
+  keyboard. A conversation starts when a peer writes first: the Peers
+  screen cannot open one yet.
+- **The keyboard types what the font draws, at the end of the text.** It
+  has the letters, the digits, space and `! # % ' ( ) * + , - . / : = ?`;
+  no accents, no `" $ & @ ;`, and no emoji. The cursor is always at the end:
+  a typo further back is deleted back to. The display name cannot be edited
+  with it yet ([#66](https://github.com/paulmeier/oxinode/issues/66)).
 - **What the board sends is one packet: 287 bytes of text, no title, no
   fields.** That is a little under LXMF's 295, so it fits through a
   transport node too. Longer is refused, never cut; links and resources are

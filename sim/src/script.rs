@@ -66,6 +66,45 @@ pub fn key_named(word: &str) -> Option<Input> {
     })
 }
 
+/// The presses that type `text` on a fresh keyboard, as a script: the
+/// shortest way round to each key, *Shift* first where a character needs
+/// it, and then *Send* if `send`. `None` if the grid cannot type a
+/// character of it.
+pub fn typing(text: &str, send: bool) -> Option<String> {
+    use monopanel::keyboard::{find, COLS, ROWS, START};
+    let mut words = Vec::new();
+    let mut at = START;
+    let mut go = |to: (usize, usize), words: &mut Vec<String>| {
+        let down = (to.0 + ROWS - at.0) % ROWS;
+        let right = (to.1 + COLS - at.1) % COLS;
+        let (rows, cols) = (down.min(ROWS - down), right.min(COLS - right));
+        let vertical = if down <= ROWS - down { "down" } else { "up" };
+        let sideways = if right <= COLS - right {
+            "right"
+        } else {
+            "left"
+        };
+        for (word, n) in [(vertical, rows), (sideways, cols)] {
+            if n > 0 {
+                words.push(format!("{word}*{n}"));
+            }
+        }
+        words.push("select".to_string());
+        at = to;
+    };
+    for c in text.bytes() {
+        let (row, col, shift) = find(c)?;
+        if shift {
+            go((ROWS - 1, COLS - 1), &mut words);
+        }
+        go((row, col), &mut words);
+    }
+    if send {
+        go((1, COLS - 1), &mut words);
+    }
+    Some(words.join(" "))
+}
+
 /// The word for an input, as [`parse`] reads it. Used to name dumped frames.
 pub fn name_of(input: Input) -> &'static str {
     input.name()
@@ -142,5 +181,22 @@ mod tests {
         ] {
             assert_eq!(parse(name_of(input)).unwrap(), [input]);
         }
+    }
+
+    /// What [`typing`] writes types what it was given, on the keyboard.
+    #[test]
+    fn typing_types_its_text() {
+        use monopanel::{Keyboard, Typed};
+        for text in ["", "h", "On my way, 10 min!", "Where are you?"] {
+            let mut k = Keyboard::<64>::new();
+            let mut sent = false;
+            for input in parse(&typing(text, true).unwrap()).unwrap() {
+                sent |= k.handle(input) == Typed::Send;
+            }
+            assert_eq!(k.text(), text);
+            assert_eq!(sent, !text.is_empty(), "{text:?}");
+        }
+        assert_eq!(typing("h", false).unwrap(), "select");
+        assert_eq!(typing("\u{e9}", false), None);
     }
 }

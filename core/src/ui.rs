@@ -19,7 +19,13 @@
 //!
 //! The one exception -- one value, opened from a menu item -- is the
 //! crate's [`Modal`]. oxinode's is [`Overlay`]: an [`Editor`] for one radio
-//! parameter, or a [`Lock`] notice saying why it cannot be edited right now.
+//! parameter, or a [`Lock`] notice saying why it cannot be edited right now,
+//! or the crate's [`Keyboard`], typing a message in a conversation
+//! ([`NavExt::compose`]). The keyboard's *Send* is [`Action::SendTyped`],
+//! handed back with the keyboard still open: the caller reads the text from
+//! it ([`NavExt::typing`]), and either closes it because the message was
+//! written ([`NavExt::written`]) or puts the refusal in it
+//! ([`NavExt::refuse`]), where the text is kept for another go.
 //!
 //! The other is the crate's [`Detail`]: oxinode's is a [`Conversation`],
 //! the thread with one peer, opened from the Messages screen's list. Like an
@@ -32,7 +38,7 @@
 //! that knows whether a host has the radio, in which case it opens a
 //! [`NavExt::notice`] instead.
 
-use monopanel::{Detail, Icon, Item, Layout, Modal, Outcome, Screen as Spec};
+use monopanel::{Detail, Icon, Item, Keyboard, Layout, Modal, Outcome, Screen as Spec, Typed};
 
 use crate::edit::{Confirm, Editor, Field, Lock};
 use crate::lr1121::config::Setting;
@@ -107,11 +113,21 @@ pub const REPLIES: [&str; 6] = [
     "Where are you?",
 ];
 
-/// What a conversation offers: the replies, sent at once to the peer whose
-/// conversation it is; the board's position, written when it is sent; and
-/// another go for whatever in the conversation failed.
-const REPLY_MENU: [Item<Action>; 9] = [
+/// The longest message the keyboard types: what fits in one packet, which
+/// is `node::lxmf::MAX_CONTENT`, asserted equal there. A number here because
+/// the interface is built without the node too.
+pub const MESSAGE_MAX: usize = 287;
+
+/// A message being typed: the crate's keyboard, held to [`MESSAGE_MAX`].
+pub type Typing = Keyboard<MESSAGE_MAX>;
+
+/// What a conversation offers: a message typed on the keyboard; the
+/// replies, sent at once to the peer whose conversation it is; the board's
+/// position, written when it is sent; and another go for whatever in the
+/// conversation failed.
+const REPLY_MENU: [Item<Action>; 10] = [
     Item::BACK,
+    Item::new("Type a Message", Action::Compose),
     Item::new(REPLIES[0], Action::Reply(0)),
     Item::new(REPLIES[1], Action::Reply(1)),
     Item::new(REPLIES[2], Action::Reply(2)),
@@ -344,6 +360,13 @@ pub enum Action {
     /// screen. The caller answers with [`NavExt::open_conversation`]; see
     /// the module docs.
     Open,
+    /// Open the keyboard over the open conversation. The caller answers
+    /// with [`NavExt::compose`], as it does [`Action::Edit`].
+    Compose,
+    /// The keyboard's *Send*: write what it holds to the peer whose
+    /// conversation is open, then [`NavExt::written`] or
+    /// [`NavExt::refuse`]. See the module docs.
+    SendTyped,
     /// Send [`REPLIES`]`[n]` to the peer whose conversation is open.
     Reply(u8),
     /// Send the board's position, as [`crate::screens::position_text`]
@@ -378,6 +401,8 @@ impl Action {
             Action::Bootloader => "bootloader",
             Action::Announce => "announce now",
             Action::Open => "open conversation",
+            Action::Compose => "type a message",
+            Action::SendTyped => "send typed",
             Action::Reply(n) if (n as usize) < REPLIES.len() => REPLIES[n as usize],
             Action::Reply(_) => "reply",
             Action::SendPosition => "send position",
@@ -407,6 +432,11 @@ impl Action {
 }
 
 /// What can replace a screen's content: the third navigation level.
+///
+/// The keyboard makes it a few hundred bytes, the text being typed, where
+/// the rest are a few. Not boxed: the RNode image has no allocator, and
+/// there is one overlay, in the one navigator, for the board's life.
+#[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Overlay {
     /// An editor for one value.
@@ -415,6 +445,8 @@ pub enum Overlay {
     Notice(Lock),
     /// A notice saying why a message was not sent. Any key closes it.
     Refused(Refusal),
+    /// A message being typed in the open conversation.
+    Compose(Typing),
 }
 
 /// Why a message was not written, from a conversation's menu.
@@ -426,8 +458,8 @@ pub enum Refusal {
     /// Every message the board keeps is still on its way.
     Full,
     /// It does not fit in one packet. Never a canned line or the position,
-    /// which are a few dozen bytes; a typed message (#66) is held to the
-    /// limit as it is typed.
+    /// which are a few dozen bytes, or a typed message, which is held to
+    /// [`MESSAGE_MAX`] as it is typed.
     TooLong,
     /// *Retry Failed* in a conversation where nothing has failed.
     NothingFailed,
@@ -470,6 +502,7 @@ impl Modal<Action> for Overlay {
             Overlay::Editor(editor) => editor.field().title(),
             Overlay::Notice(_) => "Locked",
             Overlay::Refused(refusal) => refusal.title(),
+            Overlay::Compose(_) => "Message",
         }
     }
 
@@ -482,7 +515,17 @@ impl Modal<Action> for Overlay {
     /// Any key acknowledges a notice. Left and right included: the notice
     /// is over one screen and a sideways press should not change it
     /// underneath.
+    ///
+    /// The keyboard's keys are the keyboard's; its *Send* is
+    /// [`Action::SendTyped`], with the keyboard left open for the answer.
     fn handle(&mut self, input: Input) -> Outcome<Action> {
+        if let Overlay::Compose(typing) = self {
+            return match typing.handle(input) {
+                Typed::Stay => Outcome::Stay,
+                Typed::Leave => Outcome::Close,
+                Typed::Send => Outcome::Keep(Action::SendTyped),
+            };
+        }
         let Overlay::Editor(editor) = self else {
             return Outcome::Close;
         };
@@ -616,8 +659,18 @@ pub trait NavExt {
     /// Why a message was not sent, while that is showing.
     fn refusal_shown(&self) -> Option<Refusal>;
     /// Say why a message was not sent. The caller's answer to a reply it
-    /// cannot write.
+    /// cannot write. Over a typed one, the keyboard says it and keeps the
+    /// text.
     fn refuse(&mut self, refusal: Refusal);
+    /// Open the keyboard, empty, over the open conversation: the caller's
+    /// answer to [`Action::Compose`].
+    fn compose(&mut self);
+    /// The keyboard, while one is open.
+    fn typing(&self) -> Option<&Typing>;
+    /// A message from the conversation's menu or its keyboard was written:
+    /// close the keyboard if it was typed there, and show the thread's end,
+    /// where the message now is.
+    fn written(&mut self);
     /// Whether an editor or a notice has replaced the screen's content.
     fn is_editing(&self) -> bool;
     /// Open an editor. The caller's answer to [`Action::Edit`] when nobody
@@ -663,7 +716,31 @@ impl NavExt for Nav {
     }
 
     fn refuse(&mut self, refusal: Refusal) {
-        self.open(Overlay::Refused(refusal));
+        if let Some(Overlay::Compose(typing)) = self.modal_mut() {
+            typing.refuse(refusal.headline(), refusal.reason());
+        } else {
+            self.open(Overlay::Refused(refusal));
+        }
+    }
+
+    fn compose(&mut self) {
+        self.open(Overlay::Compose(Typing::new()));
+    }
+
+    fn typing(&self) -> Option<&Typing> {
+        match self.modal() {
+            Some(Overlay::Compose(typing)) => Some(typing),
+            _ => None,
+        }
+    }
+
+    fn written(&mut self) {
+        if self.typing().is_some() {
+            self.close_modal();
+        }
+        if let Some(open) = self.conversation_mut() {
+            open.show_end();
+        }
     }
 
     fn is_editing(&self) -> bool {
@@ -871,20 +948,22 @@ mod tests {
         assert_eq!(nav.selected(), Some(1), "back on the line it opened");
     }
 
-    /// The reply menu: Back, every canned line in order, the position and
-    /// the retry. Each line is sent as it reads, and fits the menu.
+    /// The reply menu: Back, the keyboard, every canned line in order, the
+    /// position and the retry. Each line is sent as it reads, and fits the
+    /// menu.
     #[test]
     fn the_reply_menu_sends_each_line_as_it_reads() {
         assert_eq!(REPLY_MENU[0], Item::BACK);
+        assert_eq!(REPLY_MENU[1].action, Some(Action::Compose));
         for (n, reply) in REPLIES.iter().enumerate() {
-            let item = REPLY_MENU[1 + n];
+            let item = REPLY_MENU[2 + n];
             assert_eq!(item.label, *reply);
             assert_eq!(item.action, Some(Action::Reply(n as u8)));
             assert_eq!(item.action.unwrap().reply(), Some(*reply));
             assert!(reply.len() <= crate::screens::LINE_CHARS - 2, "{reply}");
         }
-        assert_eq!(REPLY_MENU[7].action, Some(Action::SendPosition));
-        assert_eq!(REPLY_MENU[8].action, Some(Action::RetryFailed));
+        assert_eq!(REPLY_MENU[8].action, Some(Action::SendPosition));
+        assert_eq!(REPLY_MENU[9].action, Some(Action::RetryFailed));
         assert_eq!(Action::Reply(REPLIES.len() as u8).reply(), None);
         assert_eq!(Action::SendPosition.reply(), None);
         // Writing a message is not taking the radio from a host: it waits.
@@ -897,6 +976,7 @@ mod tests {
             .flat_map(|s| s.menu())
             .chain(&REPLY_MENU)
             .filter_map(|i| i.action.map(Action::name))
+            .chain([Action::SendTyped.name()])
             .collect();
         let all = names.len();
         names.sort();
@@ -1207,5 +1287,75 @@ mod tests {
         assert!(
             Action::Set(Setting::Band(crate::lr1121::pa::Band::HighFrequency)).changes_the_radio()
         );
+    }
+
+    /// A navigator with the keyboard open over the conversation with
+    /// `[7; 16]`, as the menu's *Type a Message* and the caller's answer
+    /// leave it.
+    fn typing_to_seven() -> Nav {
+        let mut nav = nav();
+        nav.open_conversation([7; 16]);
+        nav.handle(Input::Select);
+        nav.handle(Input::Down);
+        assert_eq!(nav.handle(Input::Select), Some(Action::Compose));
+        nav.compose();
+        nav
+    }
+
+    /// Typing, then *Send*: the action comes back with the keyboard still
+    /// open and holding the text, over the conversation, and closes when
+    /// the caller says the message was written.
+    #[test]
+    fn send_hands_the_text_back_and_written_closes_it() {
+        let mut nav = typing_to_seven();
+        assert_eq!(nav.title(), "Message");
+        assert!(!Action::Compose.changes_the_radio());
+        assert!(!Action::SendTyped.changes_the_radio());
+        nav.handle(Input::Select); // h
+        nav.handle(Input::Up);
+        nav.handle(Input::Right);
+        nav.handle(Input::Right);
+        nav.handle(Input::Select); // i
+                                   // Down to Send: from row one, column seven, to column ten.
+        for _ in 0..3 {
+            nav.handle(Input::Right);
+        }
+        assert_eq!(nav.typing().unwrap().key(), monopanel::keyboard::Key::Send);
+        assert_eq!(nav.handle(Input::Select), Some(Action::SendTyped));
+        assert_eq!(nav.typing().map(Typing::text), Some("hi"));
+        assert_eq!(nav.conversation().map(Conversation::peer), Some([7; 16]));
+        nav.written();
+        assert!(nav.typing().is_none());
+        assert!(nav.conversation().unwrap().wants_end());
+        assert_eq!(nav.title(), "Thread");
+    }
+
+    /// A refusal over the keyboard is said in it, and the text is kept;
+    /// the refusal notice is for the menu's lines.
+    #[test]
+    fn a_refused_typed_message_keeps_its_text() {
+        let mut nav = typing_to_seven();
+        nav.handle(Input::Select);
+        nav.handle(Input::Up);
+        for _ in 0..5 {
+            nav.handle(Input::Right);
+        }
+        assert_eq!(nav.handle(Input::Select), Some(Action::SendTyped));
+        nav.refuse(Refusal::Full);
+        assert_eq!(nav.refusal_shown(), None);
+        let typing = nav.typing().unwrap();
+        assert_eq!(typing.refused(), Some(Refusal::Full.headline()));
+        assert_eq!(typing.text(), "h");
+        nav.handle(Input::Back);
+        assert_eq!(nav.typing().map(Typing::text), Some("h"), "Back read on");
+    }
+
+    /// Back on nothing typed leaves the keyboard for the thread under it.
+    #[test]
+    fn back_on_nothing_goes_back_to_the_thread() {
+        let mut nav = typing_to_seven();
+        assert_eq!(nav.handle(Input::Back), None);
+        assert!(nav.typing().is_none());
+        assert_eq!(nav.conversation().map(Conversation::peer), Some([7; 16]));
     }
 }
