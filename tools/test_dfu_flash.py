@@ -55,41 +55,153 @@ exit 0
 """
 
 
-# Stub python3, for the one place the script shells out to it: reopening the
-# port at 115200 so the host stops caching the touch rate. It records the baud
-# rate it was asked for, since that is the whole point of the call.
-REOPEN_STUB = """#!/usr/bin/env bash
-printf 'reopen 115200 %s\\n' "$*" >> "$STTY_LOG"
-exit 0
+# Stub Python, for the one place the script shells out to it: reopening the
+# port at 115200 so the host stops caching the touch rate. One script under
+# several names. It answers the script's `-c 'import serial'` probe yes only if
+# its name is in PY_WITH_SERIAL, and records the reopen -- its name, its
+# arguments and the program on stdin, since the baud rate is in the program.
+# Anything else goes to the real interpreter: the script's own Python tools
+# run through `env python3`, which this shadows. The one named python-nrfutil
+# stands in for the interpreter on adafruit-nrfutil's `#!` line, and so runs
+# the (bash) stub tool when asked to.
+PYTHON_STUB = """#!/usr/bin/env bash
+me="$(basename "$0")"
+if [[ "${1:-}" == "-c" && "${2:-}" == "import serial" ]]; then
+    [[ " ${PY_WITH_SERIAL:-} " == *" $me "* ]]
+    exit $?
+fi
+if [[ "${1:-}" == "-" ]]; then
+    program="$(cat)"
+    printf '%s %s\\n%s\\n' "$me" "$*" "$program" >> "$STTY_LOG"
+    [[ -z "${PY_REOPEN_FAIL:-}" ]]
+    exit $?
+fi
+if [[ "$me" == python-nrfutil ]]; then exec bash "$@"; fi
+exec "$PY_REAL" "$@"
 """
+
+# ioreg, as the script reads it: IOREG_BEFORE until the first `dfu serial`
+# has run, IOREG_AFTER from then on -- which is how a board is shown leaving
+# its application for its bootloader.
+IOREG_STUB = """#!/usr/bin/env bash
+if [[ -n "${IOREG_AFTER:-}" && -f "$NRFUTIL_LOG.serial" ]]; then
+    cat "$IOREG_AFTER"
+elif [[ -n "${IOREG_BEFORE:-}" ]]; then
+    cat "$IOREG_BEFORE"
+fi
+"""
+
+# The bench's two boards as `ioreg -r -c IOUSBHostDevice -l` showed them on
+# 2026-10-24, trimmed to the lines the script reads plus the ones that look
+# like them: 7F23 running an application, 354B in its bootloader. The nested,
+# repeated keys and the "USB Device Info" dictionary are real, and are what a
+# parser that took the wrong line would trip on.
+SERIAL_7F23 = "65C11224153B1DFD"
+SERIAL_354B = "D3304814DC467229"
+
+
+def app_device(serial, port, indent=""):
+    return f"""{indent}+-o oxinode qspi bring-up@01100000  <class IOUSBHostDevice, id 0x100050485, registered, matched, active, busy 0 (231 ms), retain 25>
+{indent}  |   "idProduct" = 6
+{indent}  |   "USB Product Name" = "oxinode qspi bring_up"
+{indent}  |   "locationID" = 17825792
+{indent}  |   "kUSBSerialNumberString" = "{serial}"
+{indent}  |   "idVendor" = 4617
+{indent}  |   "USB Serial Number" = "{serial}"
+{indent}  | |   "idProduct" = 6
+{indent}  | |   "idVendor" = 4617
+{indent}  | |   "USB Serial Number" = "{serial}"
+{indent}      |   "idProduct" = 6
+{indent}      |   "idVendor" = 4617
+{indent}            "IOCalloutDevice" = "{port}"
+{indent}            "IODialinDevice" = "{port.replace("/cu.", "/tty.")}"
+"""
+
+
+def bootloader_device(serial, port, indent=""):
+    return f"""{indent}+-o muzi Base@03100000  <class IOUSBHostDevice, id 0x1000504db, registered, matched, active, busy 0 (248 ms), retain 29>
+{indent}  |   "idProduct" = 129
+{indent}  |   "USB Product Name" = "muzi Base"
+{indent}  |   "locationID" = 51380224
+{indent}  |   "kUSBSerialNumberString" = "{serial}"
+{indent}  |   "idVendor" = 9114
+{indent}  |   "USB Serial Number" = "{serial}"
+{indent}  | |   "idProduct" = 129
+{indent}  | |   "idVendor" = 9114
+{indent}  |   |   "idProduct" = 129
+{indent}  |   |   "idVendor" = 9114
+{indent}  |         "IOCalloutDevice" = "{port}"
+{indent}  |         "IODialinDevice" = "{port.replace("/cu.", "/tty.")}"
+{indent}      |   "USB Device Info" = {{"bcdDevice"=256,"idProduct"=129,"kUSBSerialNumberString"="{serial}","USB Product Name"="muzi Base","idVendor"=9114,"bInterfaceClass"=8}}
+{indent}      |   "idVendor" = 9114
+"""
+
+
+def hub(*children):
+    """A hub with no serial number of its own, its children nested under it --
+    so a port's nearest device is not the first one in the tree."""
+    head = """+-o USB2.1 Hub@03000000  <class IOUSBHostDevice, id 0x100050400, registered, matched, active, busy 0 (12 ms), retain 20>
+  |   "idProduct" = 9488
+  |   "idVendor" = 1507
+"""
+    return head + "".join(c for c in children)
 
 
 @unittest.skipUnless(
     os.path.isfile(ELF), "no release ELF built; run `cargo build --release` first"
 )
 class TestDfuFlash(unittest.TestCase):
-    def run_script(self, **env_extra):
+    def setUp(self):
+        # Ports as files in a directory of their own, not the bench's real
+        # /dev/cu.usbmodem1101 and 3101: what is plugged in decides nothing,
+        # and the script finds them present without waiting.
+        ports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, ports, ignore_errors=True)
+        for name in ("cu.usbmodem1101", "cu.usbmodem3101", "tty.usbmodem3101"):
+            open(os.path.join(ports, name), "w").close()
+        self.port_a = os.path.join(ports, "cu.usbmodem1101")
+        self.port_b = os.path.join(ports, "cu.usbmodem3101")
+
+    def run_script(
+        self, nrfutil_shebang=None, ioreg_before=None, ioreg_after=None, **env_extra
+    ):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
 
-        stub = os.path.join(tmp, "adafruit-nrfutil")
-        with open(stub, "w", encoding="utf-8") as f:
-            f.write(STUB)
-        os.chmod(stub, 0o755)
+        def write(name, text, mode=0o755):
+            path = os.path.join(tmp, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(path, mode)
+            return path
 
-        reopen = os.path.join(tmp, "reopen-stub")
-        with open(reopen, "w", encoding="utf-8") as f:
-            f.write(REOPEN_STUB)
-        os.chmod(reopen, 0o755)
+        stub = STUB
+        if nrfutil_shebang:
+            stub = nrfutil_shebang + "\n" + stub.split("\n", 1)[1]
+        write("adafruit-nrfutil", stub)
+
+        # Every interpreter the script might try is a stub, so what the host
+        # happens to have installed decides nothing.
+        for name in ("reopen-python", "python3.11", "python3", "python-nrfutil"):
+            write(name, PYTHON_STUB)
         self.stty_log = os.path.join(tmp, "reopen.log")
+
+        ioreg = write("ioreg-stub", IOREG_STUB)
 
         log = os.path.join(tmp, "calls.log")
         env = dict(os.environ)
         env["PATH"] = tmp + os.pathsep + env["PATH"]
         env["NRFUTIL_LOG"] = log
         env["STTY_LOG"] = self.stty_log
-        env["OXINODE_PYTHON"] = reopen
+        env["PY_REAL"] = sys.executable
+        env["PY_WITH_SERIAL"] = "reopen-python"
+        env["OXINODE_PYTHON"] = os.path.join(tmp, "reopen-python")
         env["OXINODE_DFU_PORT"] = "/dev/null"
+        env["OXINODE_DFU_IOREG"] = ioreg
+        if ioreg_before is not None:
+            env["IOREG_BEFORE"] = write("ioreg-before.txt", ioreg_before, 0o644)
+        if ioreg_after is not None:
+            env["IOREG_AFTER"] = write("ioreg-after.txt", ioreg_after, 0o644)
         env.update(env_extra)
         for key, value in list(env_extra.items()):
             if value is None:
@@ -276,6 +388,156 @@ class TestDfuFlash(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"stderr:\n{proc.stderr}")
         self.assertIn("--touch 1200", calls[1])
 
+
+    # -- Finding a Python that can reopen the port -------------------------
+
+    def reopens(self):
+        if not os.path.exists(self.stty_log):
+            return []
+        with open(self.stty_log, encoding="utf-8") as f:
+            return [line.split()[0] for line in f if line.startswith(("python", "reopen"))]
+
+    def test_no_python_with_pyserial_says_so_rather_than_skipping(self):
+        """What happened on the bench: `python3` was radioconda's, without
+        pyserial, and the ImportError went to /dev/null. The cached 1200 baud
+        stayed, and the board was touched back into its bootloader by the next
+        open of its port, with nothing anywhere to say why."""
+        proc, _ = self.run_script(
+            OXINODE_PYTHON=None, PY_WITH_SERIAL="", OXINODE_DFU_IN_DFU="1",
+            OXINODE_DFU_SETTLE="0",
+        )
+        # The flash itself happened, so it is still a success...
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # ...but a loud one, before the flash and again after it, naming what
+        # was tried.
+        self.assertEqual(
+            proc.stderr.count("no Python with pyserial found"), 2, proc.stderr
+        )
+        self.assertIn("python3.11 python3", proc.stderr)
+        self.assertEqual(self.reopens(), [])
+
+    def test_an_interpreter_without_pyserial_is_passed_over(self):
+        proc, _ = self.run_script(
+            PY_WITH_SERIAL="python3.11", OXINODE_DFU_IN_DFU="1", OXINODE_DFU_SETTLE="0"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.reopens(), ["python3.11"])
+        self.assertNotIn("no Python with pyserial", proc.stderr)
+
+    def test_oxinode_python_comes_first(self):
+        proc, _ = self.run_script(
+            PY_WITH_SERIAL="reopen-python python3.11 python3",
+            OXINODE_DFU_IN_DFU="1", OXINODE_DFU_SETTLE="0",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.reopens(), ["reopen-python"])
+
+    def test_the_flashers_own_interpreter_is_tried(self):
+        """adafruit-nrfutil needs pyserial itself, so the interpreter on its
+        `#!` line has it -- on the bench, the venv's python3.11, when neither
+        `python3` on PATH nor anything else did."""
+        proc, calls = self.run_script(
+            nrfutil_shebang="#!/usr/bin/env python-nrfutil",
+            OXINODE_PYTHON=None, PY_WITH_SERIAL="python-nrfutil",
+            OXINODE_DFU_IN_DFU="1", OXINODE_DFU_SETTLE="0",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(any("dfu serial" in c for c in calls), calls)
+        self.assertEqual(self.reopens(), ["python-nrfutil"])
+
+    def test_a_reopen_that_fails_is_reported(self):
+        proc, _ = self.run_script(
+            PY_REOPEN_FAIL="1", OXINODE_DFU_IN_DFU="1", OXINODE_DFU_SETTLE="0"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("could not reopen /dev/null at 115200", proc.stderr)
+
+    # -- Which board is in its bootloader ------------------------------------
+    #
+    # The bench case: two boards attached, one of them in its bootloader. The
+    # old check asked whether *any* bootloader drive was mounted.
+
+    def two_boards(self):
+        return app_device(SERIAL_7F23, self.port_a) + bootloader_device(
+            SERIAL_354B, self.port_b
+        )
+
+    def test_another_boards_bootloader_does_not_skip_the_touch(self):
+        proc, calls = self.run_script(
+            ioreg_before=self.two_boards(), OXINODE_DFU_PORT=self.port_a,
+            OXINODE_DFU_SETTLE="0",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertIn("--touch 1200", serial[0])
+        self.assertIn(f"USB serial {SERIAL_7F23}, running an application", proc.stdout)
+
+    def test_this_boards_bootloader_skips_the_touch(self):
+        for port in (self.port_b, self.port_b.replace("/cu.", "/tty.")):
+            with self.subTest(port=port):
+                proc, calls = self.run_script(
+                    ioreg_before=self.two_boards(), OXINODE_DFU_PORT=port,
+                    OXINODE_DFU_SETTLE="0",
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                serial = [c for c in calls if "dfu serial" in c]
+                self.assertNotIn("--touch", serial[0])
+                self.assertIn(f"USB serial {SERIAL_354B}, in its bootloader", proc.stdout)
+
+    def test_a_board_behind_a_hub_is_told_apart(self):
+        """A port belongs to the nearest device above it, not the first one in
+        the tree: here that is a hub with no serial of its own."""
+        tree = app_device(SERIAL_7F23, self.port_a) + hub(
+            bootloader_device(SERIAL_354B, self.port_b, indent="  | ")
+        )
+        for port, touch in ((self.port_b, False), (self.port_a, True)):
+            with self.subTest(port=port):
+                _proc, calls = self.run_script(
+                    ioreg_before=tree, OXINODE_DFU_PORT=port, OXINODE_DFU_SETTLE="0"
+                )
+                serial = [c for c in calls if "dfu serial" in c]
+                self.assertEqual("--touch" in serial[0], touch, serial)
+
+    def test_a_lost_race_is_retried_when_this_board_reaches_its_bootloader(self):
+        """The retry, decided per board: 7F23 is touched, the tool loses the
+        race, and 7F23 comes back as the bootloader under the same serial."""
+        after = bootloader_device(SERIAL_7F23, self.port_a) + bootloader_device(
+            SERIAL_354B, self.port_b
+        )
+        proc, calls = self.run_script(
+            ioreg_before=self.two_boards(), ioreg_after=after,
+            OXINODE_DFU_PORT=self.port_a, OXINODE_DFU_RETRY_DELAY="0",
+            OXINODE_DFU_SETTLE="0", NRFUTIL_FAIL_SERIAL="1",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertEqual(len(serial), 2, calls)
+        self.assertIn("--touch", serial[0])
+        self.assertNotIn("--touch", serial[1])
+
+    def test_the_other_boards_bootloader_is_not_a_reason_to_retry(self):
+        """7F23's touch fails and 7F23 stays an application. 354B sitting in
+        its bootloader says nothing about that, and retrying without a touch
+        would only fail against 7F23's running image three more times."""
+        proc, calls = self.run_script(
+            ioreg_before=self.two_boards(), ioreg_after=self.two_boards(),
+            OXINODE_DFU_PORT=self.port_a, OXINODE_DFU_RETRY_DELAY="0",
+            OXINODE_DFU_SETTLE="0", NRFUTIL_FAIL_SERIAL="9",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertEqual(len(serial), 1, calls)
+
+    def test_a_port_with_no_usb_device_behind_it_is_not_in_its_bootloader(self):
+        """No serial, nothing to match -- not "some bootloader is up"."""
+        proc, calls = self.run_script(
+            ioreg_before=self.two_boards(), OXINODE_DFU_PORT="/dev/null",
+            OXINODE_DFU_SETTLE="0",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        serial = [c for c in calls if "dfu serial" in c]
+        self.assertIn("--touch 1200", serial[0])
+        self.assertNotIn("USB serial", proc.stdout)
 
 
 if __name__ == "__main__":

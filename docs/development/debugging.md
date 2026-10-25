@@ -150,7 +150,8 @@ The touch is state on the host, and it outlives the operation that set it.
   first two seconds after boot, which sits between the 1.5 s the flasher
   allows and anything a person would notice.
 - **Reading the log is a touch** after a failed one. `tools/dfu-flash.sh`
-  resets the cached rate to 115200 after every flash, successful or not.
+  resets the cached rate to 115200 after every flash, successful or not,
+  and warns loudly when it cannot (it needs a Python with pyserial).
 
 ## When a command "succeeds"
 
