@@ -30,8 +30,8 @@ the board ships with.
 - **A runtime-configurable radio, validated before it reaches the chip.**
   Frequency, bandwidth, spreading factor, coding rate and power are values a
   host sets, checked against what the module can actually do, and refused
-  rather than clamped. The module's 73 ppm reference error is corrected in
-  arithmetic.
+  rather than clamped. The frequency commanded is the frequency asked for:
+  the module's reference is within half a ppm of nominal.
 - **An on-device interface.** Five screens on the 128 × 128 OLED, driven by
   the six-switch navigation pad: Home, Radio, Bluetooth, Position, System;
   six in an image with the node, which adds Peers.

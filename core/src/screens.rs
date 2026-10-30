@@ -3120,7 +3120,7 @@ mod tests {
             ("crc", |s| s.radio.config.crc = false),
             ("header", |s| s.radio.config.implicit_header = true),
             ("iq", |s| s.radio.config.invert_iq = true),
-            ("correction", |s| s.radio.config.correct_reference = false),
+            ("correction", |s| s.radio.config.correct_reference = true),
             ("radio air", |s| {
                 s.radio.air = Air::Refused(ConfigError::PowerAboveModuleRating)
             }),

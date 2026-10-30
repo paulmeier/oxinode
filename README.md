@@ -35,8 +35,8 @@ board ships with.
   254 and reassembled, carrier sense with random backoff before every
   transmission.
 - Radio parameters validated against what the module can actually do and
-  refused rather than clamped; the module's 73 ppm reference error cancelled
-  in arithmetic.
+  refused rather than clamped, and commanded at exactly the frequency asked
+  for.
 - Five screens on the 128 × 128 OLED driven by the six-switch pad, with every
   radio parameter editable when no host owns the radio.
 - The Super IO's GPS, parsed on the board and shown on the Position screen.

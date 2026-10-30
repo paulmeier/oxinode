@@ -156,40 +156,47 @@ internal regulator cannot supply the PA, so the high-power PA is switched to
 VBAT at exactly that boundary. Getting this wrong is not an error the chip
 reports; it is a brown-out.
 
-## The 73 ppm reference error
+## The reference: on frequency, and the 73 ppm that wasn't
 
-The module's 32 MHz reference runs **73.3 ± 0.5 ppm low**. At 915 MHz that is
-67 kHz, over half a 125 kHz LoRa channel.
+The module's 32 MHz reference is **within ±0.5 ppm of nominal**. The firmware
+used to command every frequency 73.3 ppm high to cancel an error it does not
+have. That correction is now off by default.
 
-That number was measured on an SDR by chopping between two carriers inside a
-single capture, which separates the transmitter's clock error from the
-receiver's (the RTL-SDR's own error came out at −1.4 ppm). It is not the TCXO
-tune voltage (all eight codes start the oscillator and the frequency does not
-care) and not a crystal driven in the wrong mode (without `SetTcxoMode` the
-oscillator does not start). What is left is the module's own reference, which
-also drifts about 0.65 ppm/°C, roughly twenty times a TCXO's stability. And it
-is a property of the module rather than of one board: sweeping the receive
-frequency against a second Base Duo gives a reception window symmetric about
-zero, so both carry the same error.
+**What was believed.** A commanded 915.000 MHz carrier read 914.934 MHz on an
+RTL-SDR, −73.3 ppm. Chopping between 913.7 and 915.3 MHz inside one capture
+gave −117.3 Hz across the span, which was taken to prove the error was the
+transmitter's, since the receiver's tuning was held fixed. Two Base Duos
+agreed with each other, so the error was put down to the nRFLR1121 module.
 
-So the correction is arithmetic in `oxinode_core::lr1121::reference`, as an
-integer in tenths of a ppm, first-order (`f × (1 + p)`, which differs from the
-exact form by 5 Hz at 915 MHz against a 460 Hz measurement uncertainty).
-Compile-time assertions check that correcting 902, 915 and 928 MHz and then
-applying the measured error lands back within 100 Hz. Turning the correction
-on moves the receive window's edge against the peer board by −74 ± 14 kHz
-against −66.5 kHz predicted.
+**Why that experiment could not tell.** An RTL-SDR's tuner and ADC sample
+clock come from the same crystal. Fixing the tuner cancels its offset, but
+every baseband frequency is still read against the sample clock, which scales
+the carriers' spacing by the receiver's error. An SDR 73 ppm fast gives the
+same −117 Hz difference and the same 66 kHz absolute reading as a transmitter
+73 ppm slow. The two boards agreeing only showed that they matched each other.
 
-**Whether to apply it is a configuration field, not a constant.** Corrected,
-the board is right in absolute terms and 73 ppm away from every other
-nRFLR1121, including one on the bench next to it. Uncorrected, it is wrong in
-absolute terms and agrees with them exactly. The default is corrected, because
-an RNode's peers are other RNodes. The `radio` image's `R` key toggles it.
+**What was measured instead (2026-10-30).** The reference was a SenseCAP P1
+(SX1262 with a TCXO), checked against four independent public Meshtastic
+nodes: all four were within about 0.5 kHz (0.5 ppm) of it. With the old
+correction on, the two oxinodes landed **+67.03 kHz and +67.14 kHz** above
+915.000 MHz, against a correction of +67.07 kHz. Without it they sit at −0.04
+and +0.08 ppm. The offsets came from the SX1262's frequency-error estimate on
+clean packets (SNR +12 dB) at five receiver settings 5 kHz apart, so the
+estimate's scale cancels and only its zero crossing is used. Uncorrected
+oxinodes are therefore on frequency for RNodes, Meshtastic nodes and anything
+else correctly tuned. Corrected, they had been 67 kHz high, too far for a
+125 kHz channel at SF8 to decode in either direction.
 
-The consequence for the protocol is that the **commanded** frequency is 73 ppm
-above the **wanted** one, and Reticulum rejects a frequency that comes back
-more than 100 Hz from what it set. The protocol reports the wanted frequency;
-the Radio screen shows both.
+**What is left.** The arithmetic in `oxinode_core::lr1121::reference` is
+unchanged, and `RadioConfig::correct_reference` with the `radio` image's `R`
+key can still apply it, so the old behaviour can be reproduced. Nothing turns
+it on by default. The protocol still reports the **wanted** frequency rather
+than the **commanded** one, because Reticulum rejects an echo more than 100 Hz
+from what it set, and the Radio screen still shows both.
+
+The reference's temperature drift, about 0.65 ppm/°C, was measured on the
+same RTL-SDR and has not been rechecked; some or all of it may be the SDR
+warming up.
 
 ## The 2.4 GHz path
 
@@ -280,9 +287,9 @@ refusal fits under the editor. See [The panel](../getting-started/panel.md).
 2478 MHz rather than the middle of the band because the middle of this band
 is somebody's Wi-Fi: it sits above channel 11's top edge, under the band's,
 and 2 MHz clear of Bluetooth's advertising channel 39 at 2480, with room for
-the widest LoRa bandwidth. Uncorrected because the only radio that answers
-on 2.4 GHz is another Base Duo carrying the same 73 ppm error — which is
-181 kHz up here, still inside an 812.5 kHz channel either way.
+the widest LoRa bandwidth. Uncorrected, like every configuration: the module's
+reference is on frequency (see
+[the reference](#the-reference-on-frequency-and-the-73-ppm-that-wasnt)).
 
 **Whether a host can ask for it** — question 2 of
 [#35](https://github.com/paulmeier/oxinode/issues/35) — has a plain answer
@@ -463,8 +470,8 @@ die is commanded at 11 dBm on a PA whose ceiling is 13, the module is rated
 11.5, and nothing on the bench tunes above 1.7 GHz. A power meter, or an SDR
 that reaches 2.5 GHz (a HackRF One, a LimeSDR, a tinySA Ultra as a spectrum
 analyser), answers both questions in one sitting: the power leaving the
-connector at 11 dBm commanded, and whether the 73 ppm reference error
-scales to the 181 kHz it should at 2478 MHz.
+connector at 11 dBm commanded, and the reference's error at 2478 MHz, which
+should be the same fraction of a ppm it is at 915 MHz.
 
 **An exchange at each bandwidth: run on the desk, not yet across a room.**
 `tools/air_exchange.py --frequency 2478000000 --txpower 11` at each of the

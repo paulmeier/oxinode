@@ -122,9 +122,10 @@ sequenceDiagram
     P-->>R: CMD_STAT_RSSI · CMD_STAT_SNR · CMD_DATA
 ```
 
-The host validates exactly once, and compares frequency to within 100 Hz. The
-commanded frequency is 73 ppm above the wanted one (67 kHz at 915 MHz, 670
-times the tolerance), so the protocol reports the *wanted* frequency. Nothing
+The host validates exactly once, and compares frequency to within 100 Hz. With
+the bench's reference offset on, the commanded frequency is 73 ppm above the
+wanted one (67 kHz at 915 MHz, 670 times the tolerance), so the protocol
+always reports the *wanted* frequency. By default the two are the same. Nothing
 clamps: a refused configuration comes back with the radio state off, and the
 host prints *make sure that your hardware actually supports the parameters
 specified in the configuration*. `CMD_ERROR` with `ERROR_INITRADIO` would

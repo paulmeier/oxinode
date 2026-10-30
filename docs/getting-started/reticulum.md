@@ -56,9 +56,9 @@ Two things to know when choosing parameters:
   supports the parameters specified in the configuration*. The specific
   reason goes to the log.
 - **The frequency you get is the frequency you asked for.** The chip is
-  commanded 73 ppm higher to cancel the module's reference error, and the
-  protocol reports the wanted frequency back, which is what Reticulum
-  compares. See [The radio](../hardware/radio.md).
+  commanded exactly that, and the module's reference is within half a ppm of
+  nominal, so an oxinode is on frequency for any correctly tuned RNode. See
+  [The radio](../hardware/radio.md).
 - **The frequency decides the band.** 902–928 MHz is the SMA connector with
   the bandwidths 62.5 to 500 kHz; 2400–2483.5 MHz is the u.FL with 203.125,
   406.25 or 812.5 kHz and 11 dBm at most. `frequency = 2478000000`,
