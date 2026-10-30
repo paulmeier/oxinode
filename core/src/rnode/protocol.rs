@@ -13,12 +13,13 @@
 //! So every setter here answers, and answers with what it was told rather than
 //! with what it will do about it.
 //!
-//! That distinction is the whole of [`Protocol::set_frequency`]'s subtlety. The
-//! frequency the modem *commands* is 73 ppm above the one the host asked for
-//! — 67 kHz at 915 MHz, against a 100 Hz tolerance, or 670 times too far. The
-//! host must be told the frequency it asked for, and the config keeping the
-//! wanted and commanded frequencies as separate fields is what makes that one
-//! line instead of a bug hunt.
+//! That distinction is the whole of [`Protocol::set_frequency`]'s subtlety. By
+//! default the modem commands exactly the frequency the host asked for, but
+//! with the bench's reference offset switched on it commands 73 ppm higher —
+//! 67 kHz at 915 MHz, against a 100 Hz tolerance, or 670 times too far. The
+//! host must be told the frequency it asked for either way, and the config
+//! keeping the wanted and commanded frequencies as separate fields is what
+//! makes that one line instead of a bug hunt.
 //!
 //! # Invalid configurations
 //!
@@ -606,11 +607,11 @@ impl Protocol {
 
     /// The **wanted** frequency, not the commanded one.
     ///
-    /// The modem commands 73 ppm high to cancel the module's reference error.
-    /// At 915 MHz that is 67 kHz, and the host rejects a mismatch beyond
-    /// 100 Hz — so reporting the commanded frequency would make every
-    /// interface fail to come online, with a message pointing at the frequency
-    /// the operator had configured correctly.
+    /// With the reference offset on, the modem commands 73 ppm high: 67 kHz at
+    /// 915 MHz, and the host rejects a mismatch beyond 100 Hz — so reporting
+    /// the commanded frequency would make every interface fail to come online,
+    /// with a message pointing at the frequency the operator had configured
+    /// correctly. Off, which is the default, the two are the same.
     fn report_frequency<S: Sink>(&self, out: &mut S) {
         out.frame(cmd::FREQUENCY, &self.config.frequency_hz.to_be_bytes());
     }
@@ -989,11 +990,10 @@ mod tests {
         assert_eq!(valid.band(), pa::Band::HighFrequency);
         assert_eq!(valid.bandwidth_code(), 0x0F);
         assert_eq!(valid.pa_config(), pa::HIGH_FREQUENCY);
-        // Uncorrected is the bench's choice, not the host's: a host that
-        // set nothing about the reference gets the default, which is to
-        // correct, and the correction is still invisible to it.
-        assert!(valid.correct_reference);
-        assert!(valid.commanded_frequency_hz() > hz);
+        // A host that set nothing about the reference gets the default,
+        // which is uncorrected: the radio is told what the host asked for.
+        assert!(!valid.correct_reference);
+        assert_eq!(valid.commanded_frequency_hz(), hz);
     }
 
     /// **A host moving between bands one field at a time.** The frequency
@@ -1087,20 +1087,38 @@ mod tests {
         assert_eq!(third.config().frequency_hz, 2_483_500_000);
     }
 
-    /// The 73 ppm correction must not reach the host. It is 67 kHz at 915 MHz
-    /// against a 100 Hz tolerance — 670 times too far — so a device that
-    /// reported the commanded frequency would fail to come online *every time*,
-    /// with a message pointing at a frequency the operator had set correctly.
+    /// By default the radio is commanded exactly what the host asked for: the
+    /// module's reference is within a fraction of a ppm of nominal, and the old
+    /// 73 ppm correction put every oxinode 67 kHz away from correctly tuned
+    /// peers.
     #[test]
-    fn the_reference_correction_is_invisible_to_the_host() {
+    fn the_host_frequency_is_commanded_unchanged() {
         let mut p = Protocol::new();
         let mut out = Frames::default();
         p.handle(Command::SetFrequency(915_000_000), &mut out);
 
         let reported = u32::from_be_bytes(out.payload(cmd::FREQUENCY).unwrap().try_into().unwrap());
         assert_eq!(reported, 915_000_000, "the host must see what it asked for");
+        assert!(!p.config().correct_reference);
+        assert_eq!(p.config().commanded_frequency_hz(), 915_000_000);
+    }
 
-        // ...while the radio is still commanded 67 kHz higher.
+    /// The reference offset, when the bench turns it on, must not reach the
+    /// host. It is 67 kHz at 915 MHz against a 100 Hz tolerance — 670 times
+    /// too far — so a device that reported the commanded frequency would fail
+    /// to come online *every time*, with a message pointing at a frequency the
+    /// operator had set correctly.
+    #[test]
+    fn the_reference_offset_is_invisible_to_the_host() {
+        let mut p = Protocol::new();
+        p.config.correct_reference = true;
+        let mut out = Frames::default();
+        p.handle(Command::SetFrequency(915_000_000), &mut out);
+
+        let reported = u32::from_be_bytes(out.payload(cmd::FREQUENCY).unwrap().try_into().unwrap());
+        assert_eq!(reported, 915_000_000, "the host must see what it asked for");
+
+        // ...while the radio is commanded 67 kHz higher.
         let commanded = p.config().commanded_frequency_hz();
         assert!(p.config().correct_reference);
         assert!(commanded - reported > 60_000);

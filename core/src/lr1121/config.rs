@@ -22,8 +22,9 @@
 //!
 //! Bandwidth travels as hertz and arrives as a four-bit code. Coding rate
 //! travels as the denominator of 4/n — 5 to 8 — and arrives as 1 to 4.
-//! Frequency travels as the frequency somebody wants and has to arrive 73 ppm
-//! higher, for the reason in [`super::reference`]. Every one of those is a
+//! Frequency travels as the frequency somebody wants and, unless the bench's
+//! reference offset is switched on, arrives unchanged; [`super::reference`]
+//! says why that offset exists and why it is off. Every one of those is a
 //! place where a wrong answer produces a radio that works perfectly at settings
 //! nobody chose, which on hardware with no probe is the expensive kind of bug.
 //! They are all pure functions, and they are all tested here.
@@ -122,11 +123,13 @@ pub struct RadioConfig {
     pub preamble_symbols: u16,
     /// Sync word.
     pub sync_word: u8,
-    /// Whether to correct for the module's 73 ppm reference error.
+    /// Whether to shift the commanded frequency by the old 73 ppm "reference
+    /// correction".
     ///
-    /// A field rather than a constant because the right answer depends on who
-    /// is listening: corrected is right for another RNode and wrong for another
-    /// nRFLR1121. See [`super::reference`].
+    /// Off everywhere by default. The 73 ppm turned out to be the RTL-SDR's
+    /// error, not the module's, so turning this on moves the carrier 67 kHz
+    /// away from every correctly tuned radio. It stays a field so the bench
+    /// can reproduce the old behaviour. See [`super::reference`].
     pub correct_reference: bool,
     /// Implicit header: the receiver is told the length rather than reading it.
     pub implicit_header: bool,
@@ -147,7 +150,8 @@ pub struct RadioConfig {
 ///   extreme one, and fast enough that a bench test is not spent waiting.
 /// * **14 dBm** — the top of the low-power PA, which is the only PA that has
 ///   ever been measured on this board.
-/// * **corrected** — because an RNode's peers are other RNodes.
+/// * **uncorrected** — the module's reference is within a fraction of a ppm
+///   of nominal, so the frequency asked for is the frequency commanded.
 pub const DEFAULT: RadioConfig = RadioConfig {
     frequency_hz: pa::CW_TEST_HZ,
     bandwidth_hz: 125_000,
@@ -156,7 +160,7 @@ pub const DEFAULT: RadioConfig = RadioConfig {
     tx_power_dbm: pa::LP_MAX_DBM,
     preamble_symbols: 8,
     sync_word: SYNC_WORD_PRIVATE,
-    correct_reference: true,
+    correct_reference: false,
     implicit_header: false,
     crc: true,
     invert_iq: false,
@@ -171,12 +175,11 @@ pub const DEFAULT: RadioConfig = RadioConfig {
 /// * **2478 MHz** — see [`pa::CW_TEST_2G4_HZ`] for why not the middle.
 /// * **812.5 kHz, SF8, CR 4/5** — the widest bandwidth the path has, because
 ///   the question this configuration exists to answer is whether the path
-///   works at all, and the widest channel is the most forgiving of the
-///   181 kHz the 73 ppm reference error amounts to up here.
+///   works at all, and the widest channel is the most forgiving of any
+///   tuning error.
 /// * **11 dBm** — the module's rating, so the number a receiver reports is a
 ///   bound on what the path delivers and not on what the bench chose.
-/// * **uncorrected** — the only radio that answers on 2.4 GHz is another Base
-///   Duo, which carries the same error.
+/// * **uncorrected** — like [`DEFAULT`]; see [`super::reference`].
 pub const BENCH_2G4: RadioConfig = RadioConfig {
     frequency_hz: pa::CW_TEST_2G4_HZ,
     bandwidth_hz: 812_500,
@@ -371,11 +374,11 @@ impl RadioConfig {
         }
     }
 
-    /// The frequency to command, which is not the frequency wanted.
+    /// The frequency to command, which with the reference offset on is not the
+    /// frequency wanted.
     ///
-    /// See [`super::reference`]. With the correction off this is the identity,
-    /// which is what the bench needs in order to talk to another board carrying
-    /// the same error.
+    /// See [`super::reference`]. With the offset off, which is the default,
+    /// this is the identity.
     pub const fn commanded_frequency_hz(&self) -> u32 {
         if self.correct_reference {
             reference::command_for(self.frequency_hz)
@@ -672,6 +675,11 @@ pub const fn coding_rate_from_code(code: u8) -> Option<u8> {
 // when the crate compiles rather than when its tests run, because a build that
 // cannot produce a working radio should not exist.
 const _: () = assert!(DEFAULT.check().is_ok());
+// What the firmware boots with commands exactly what it was asked for. The
+// module's reference is within a fraction of a ppm of nominal, so any shift
+// here would be an error introduced rather than one removed.
+const _: () = assert!(!DEFAULT.correct_reference && !BENCH_2G4.correct_reference);
+const _: () = assert!(DEFAULT.commanded_frequency_hz() == DEFAULT.frequency_hz);
 // ...and it has to be something a host could also ask for, or the firmware
 // boots into a state it cannot describe.
 const _: () = assert!(DEFAULT.is_rnode_representable());
@@ -1177,9 +1185,8 @@ mod tests {
         );
     }
 
-    /// The correction is off by default in the *value* only when asked. What
-    /// matters is that the field actually reaches the commanded frequency, in
-    /// both positions — a flag that is read nowhere is worse than no flag.
+    /// The correction is off by default. What matters is that the field
+    /// actually reaches the commanded frequency, in both positions — a flag that is read nowhere is worse than no flag.
     #[test]
     fn the_reference_correction_reaches_the_commanded_frequency() {
         let corrected = RadioConfig {

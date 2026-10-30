@@ -1,31 +1,44 @@
-//! The module's frequency reference, and the correction for its error.
+//! The old 73 ppm "reference correction", kept as a bench offset and off by
+//! default.
 //!
-//! This board's transmitter was measured at **−73.3 ppm** on an SDR, and the
-//! number was then shown to belong to the nRFLR1121 module rather than to the
-//! unit on the bench: sweeping the receive frequency against a *second* Base
-//! Duo gives a reception window centred on zero, which it could not be if
-//! only one of the two were wrong. Both boards are off by the same amount, so
-//! replacing either would change nothing.
+//! # What was believed
 //!
-//! That is what makes a software correction the right answer rather than a
-//! workaround. The error is a property of the part, it is stable — the drift
-//! is ≈0.65 ppm/°C, so a 40 °C swing moves it by 26 ppm against 73 — and there
-//! is no register to trim it with whose address is known here. What is left is
-//! to command a frequency that is wrong by exactly as much as the chip is, in
-//! the other direction.
+//! A commanded 915.000 MHz carrier was measured on an RTL-SDR at 914.934 MHz,
+//! −73.3 ppm, and a chopping experiment (see `pa::MEASURED_TX_ERROR_PPM`) was
+//! taken to show that the error was the transmitter's rather than the
+//! receiver's. Both Base Duos agreed with each other, so the error was put down
+//! to the nRFLR1121 module and cancelled here in arithmetic, on by default.
 //!
-//! # The correction is not free, and it is not always wanted
+//! # What was measured instead
 //!
-//! Applying it makes this board correct in absolute terms and 73 ppm away from
-//! every *other* nRFLR1121, including the second Base Duo it was measured
-//! against. Uncorrected, it is wrong in absolute terms and agrees with them
-//! exactly.
+//! Against a SenseCAP P1 (SX1262 with a TCXO) the corrected oxinodes landed
+//! **+67.03 kHz and +67.14 kHz** above 915.000 MHz, which is the correction and
+//! nothing else: with it removed, the two modules sit at −0.04 and +0.08 ppm.
+//! The P1 was itself checked against four independent Meshtastic nodes on the
+//! public US mesh, all within about 0.5 ppm of it. The offset was read from
+//! the SX1262's frequency-error estimate on clean packets (SNR +12 dB) at five
+//! receiver settings 5 kHz apart, so its scale cancels and only the zero
+//! crossing is used.
 //!
-//! Which is right depends on who is listening, so this module supplies the
-//! arithmetic and does not decide. An RNode talks to other RNodes, whose
-//! references are not this one, so the firmware's default is corrected — but
-//! the bench needs the other setting to talk to the Meshtastic board, and any
-//! measurement of the correction itself needs both.
+//! # Why the SDR measurement could not tell
+//!
+//! An RTL-SDR derives both its tuner and its ADC sample clock from one crystal.
+//! Holding the tuner fixed cancels the tuner's error, but the two carriers'
+//! baseband frequencies are still read against the sample clock, and a sample
+//! clock running fast by *p* shrinks their 1.6 MHz spacing by the same *p*. An
+//! SDR 73 ppm fast therefore produces both the −117 Hz chop difference and the
+//! −66 kHz absolute reading, exactly as a transmitter 73 ppm slow would. The
+//! "receiver −1.4 ppm" figure is what is left of the absolute reading after
+//! the chop result has been attributed to the transmitter, so it rests on the
+//! assumption being tested. Agreement between the two boards only ever showed
+//! that they matched each other.
+//!
+//! # What is left here
+//!
+//! The arithmetic, unchanged, so `RadioConfig::correct_reference` and the
+//! `radio` image's `R` key can still reproduce the old behaviour for
+//! comparison. Nothing turns it on by default, and it should not be turned on
+//! to talk to any correctly tuned radio: it moves the carrier 67 kHz high.
 //!
 //! # Why parts per ten million
 //!
@@ -35,11 +48,11 @@
 //! target for no benefit, and this value is multiplied by a frequency near
 //! 2³⁰, where the difference is tens of hertz.
 
-/// How far this module's reference sits from nominal, in tenths of a ppm.
+/// What the RTL-SDR reported as this module's error, in tenths of a ppm.
 ///
-/// Negative because the transmitter is **low**: a commanded 915.000 MHz carrier
-/// was measured at 914.934 MHz. `pa::MEASURED_TX_ERROR_PPM` carries the same
-/// number as a float for documentation; this is the one that is used.
+/// **Not the module's error**: that is within ±0.5 ppm of zero (see the module
+/// documentation). This is the number the old correction was built from, kept
+/// so the bench offset reproduces exactly what the firmware used to command.
 pub const MEASURED_ERROR_TENTH_PPM: i32 = -733;
 
 /// How much to add to a commanded frequency, in tenths of a ppm.
@@ -53,10 +66,11 @@ pub const CORRECTION_TENTH_PPM: i32 = -MEASURED_ERROR_TENTH_PPM;
 
 /// Temperature coefficient of the reference, in hundredths of a ppm per °C.
 ///
-/// Measured, and recorded here because it bounds how good a *static*
-/// correction can be. A TCXO is 0.5–2 ppm over its whole range; this drifts
-/// that much every two or three degrees, which is the strongest evidence that
-/// what is in the module is not a compensated oscillator at all.
+/// Measured on the same RTL-SDR as the 73 ppm, so it carries the same doubt:
+/// an SDR warming up drifts too. Recorded here because it bounds how good a
+/// *static* correction can be. A TCXO is 0.5–2 ppm over its whole range; this
+/// reads as that much every two or three degrees, which is either the module's
+/// reference or the SDR's, and has not been separated.
 pub const TEMPCO_HUNDREDTH_PPM_PER_C: i32 = 65;
 
 /// Shift a frequency by a signed number of tenths of a ppm.
@@ -113,7 +127,7 @@ pub const fn correction_hz(hz: u32) -> i32 {
 const _: () = assert!(CORRECTION_TENTH_PPM == -MEASURED_ERROR_TENTH_PPM);
 const _: () = assert!(
     CORRECTION_TENTH_PPM > 0,
-    "the transmitter is low, so the commanded frequency has to go up"
+    "the SDR read the transmitter low, so the old correction commands higher"
 );
 // Round-tripping is the property that matters: commanding `command_for(f)` on a
 // chip that is `MEASURED_ERROR_TENTH_PPM` off must land back on `f`. Checked at
@@ -123,8 +137,8 @@ const _: () = assert!(lands_at(command_for(902_000_000)).abs_diff(902_000_000) <
 const _: () = assert!(lands_at(command_for(915_000_000)).abs_diff(915_000_000) <= 100);
 const _: () = assert!(lands_at(command_for(928_000_000)).abs_diff(928_000_000) <= 100);
 // And the correction is not a rounding detail. At 915 MHz it is tens of
-// kilohertz -- over half a 125 kHz LoRa channel -- which is the whole reason
-// this module exists.
+// kilohertz -- over half a 125 kHz LoRa channel -- which is why turning it on
+// by mistake takes a board off the air for every correctly tuned peer.
 const _: () = assert!(correction_hz(915_000_000) > 60_000);
 
 #[cfg(test)]

@@ -59,7 +59,7 @@ found. It then takes single-character commands on the same port:
 | \`0\` | Stop transmitting |
 | \`S\` \`W\` \`C\` \`P\` | Cycle spreading factor, bandwidth, coding rate, power |
 | \`[\` \`]\` | Step the frequency down or up by 100 kHz |
-| \`R\` | Toggle the correction for the module's 73 ppm reference error |
+| \`R\` | Toggle the old 73 ppm reference offset (off by default; it was the RTL-SDR's error) |
 | \`N\` | Switch sync word between 0x12 (RNode) and 0x2b (Meshtastic) |
 | \`M\` \`D\` | Load the Meshtastic LongFast preset, or the default |
 | \`A\` | Apply the current configuration without transmitting |

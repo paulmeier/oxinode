@@ -26,9 +26,9 @@ pub const STEP_NS: u32 = 30_520;
 /// `tune` code for a 3.0 V TCXO supply.
 ///
 /// **Chosen as a nominal value, not from the board.** Nobody has established
-/// what the Base Duo's TCXO actually wants, and the transmitter is 73 ppm low —
-/// far outside what a TCXO should manage, which points at it being driven wrong
-/// rather than at a bad part. See [`TUNE_CODES`].
+/// what the Base Duo's TCXO actually wants. The 73 ppm error once blamed on it
+/// was the RTL-SDR's (see [`super::reference`]); at this code the module is
+/// within ±0.5 ppm of nominal. See [`TUNE_CODES`].
 pub const TUNE_3V0: u8 = 0x06;
 
 /// Every supply voltage `SetTcxoMode` can select, in the order the chip codes
@@ -137,10 +137,10 @@ const _: () = assert!(
 /// *entire* rated temperature range, call it 0.03 ppm/°C. This part is roughly
 /// twenty times worse, which is uncompensated-crystal behaviour.
 ///
-/// The practical consequence: the 73 ppm the transmitter is out by cannot be
-/// dismissed as a one-off trim. A static correction would fix the bulk of it,
-/// but the residual moves with temperature, so anything relying on it needs to
-/// know that.
+/// Measured on the same RTL-SDR whose 73 ppm turned out to be its own (see
+/// [`super::reference`]), so some or all of this may be the SDR warming up
+/// rather than the module. Anything relying on the reference's stability
+/// should measure it against something better first.
 pub const MEASURED_TEMPCO_PPM_PER_C: f32 = 0.65;
 
 // The whole reason this constant is recorded: it is far outside TCXO territory.

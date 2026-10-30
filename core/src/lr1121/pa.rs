@@ -265,6 +265,15 @@ pub const CW_TEST_HZ: u32 = 915_000_000;
 ///
 /// Small, but the term it has to be separated from cancels exactly: `C·e` does
 /// not depend on `F_commanded` at all.
+///
+/// **The model above is incomplete, and the experiment does not separate the
+/// two after all.** It treats the receiver's error as a tuning offset only. An
+/// RTL-SDR's ADC sample clock comes from the same crystal as its tuner, and
+/// every baseband frequency is read against that clock, so the report is
+/// really `(F − C·(1 + e)) / (1 + e) + C ≈ F·(1 − e)`. That has an
+/// `F`-dependent receiver term, `−(F₂ − F₁)·e`, which the chop does not cancel:
+/// a receiver 73 ppm fast gives the same −117 Hz as a transmitter 73 ppm slow.
+/// See [`super::reference`] for the measurement that settled it.
 pub const CW_SWEEP_HZ: [u32; 2] = [913_700_000, 915_300_000];
 
 /// Receiver centre frequency the sweep assumes, in hertz.
@@ -274,8 +283,10 @@ pub const CW_SWEEP_HZ: [u32; 2] = [913_700_000, 915_300_000];
 /// between the two carriers so neither lands on the receiver's DC spike.
 pub const CW_SWEEP_CENTER_HZ: u32 = 914_500_000;
 
-/// How far the bench board's transmitter sits from where it is told to be, in
-/// parts per million. **Measured, and it is the transmitter, not the receiver.**
+/// The bench board's transmitter error as the RTL-SDR reported it, in parts per
+/// million. **Measured, but it is the receiver's error, not the transmitter's**:
+/// against a TCXO-referenced SX1262 the module is within ±0.5 ppm of nominal.
+/// See [`super::reference`].
 ///
 /// A commanded 915.000 MHz carrier lands at 914.934 MHz — 66 kHz low. That is
 /// either the LR1121's clock or the receiver's, and a single measurement cannot
@@ -289,12 +300,10 @@ pub const CW_SWEEP_CENTER_HZ: u32 = 914_500_000;
 /// against −116 Hz predicted if the transmitter is at fault and 0 Hz if the
 /// receiver is.
 ///
-/// So: transmitter −73.3 ± 0.5 ppm, receiver −1.4 ppm. The RTL-SDR is fine.
-///
-/// **This is a problem, not a curiosity.** 73 ppm is 67 kHz at 915 MHz — over
-/// half of a 125 kHz LoRa channel — and it is far outside what a TCXO should
-/// do, which suggests the TCXO is not being driven as it expects rather than
-/// that it is simply a bad part. The protocol layer cannot ignore it.
+/// That was read as transmitter −73.3 ± 0.5 ppm, receiver −1.4 ppm. As the note
+/// on [`CW_SWEEP_HZ`] explains, the same −117 Hz comes from an SDR whose
+/// sample clock runs 73 ppm fast, and that is what it was. The number is kept
+/// because the bench's reference offset is built from it.
 pub const MEASURED_TX_ERROR_PPM: f32 = -73.3;
 
 /// Whether a frequency is inside the US915 ISM band.
@@ -397,13 +406,12 @@ const _: () = assert!(
     "the sweep span is too narrow to separate a transmitter error from a \
      receiver one"
 );
-// And the measured error is not a rounding detail: at 915 MHz it is over a
-// third of a 125 kHz LoRa channel. Pinned so that "only a few tens of ppm"
-// cannot creep into anyone's reasoning later.
+// And the reading is not a rounding detail: at 915 MHz it is over half a
+// 125 kHz LoRa channel, which is how far the bench offset moves a carrier.
 const _: () = assert!(
     (CW_TEST_HZ as f32) * MEASURED_TX_ERROR_PPM * 1e-6 < -60_000.0,
-    "the transmitter's measured frequency error is tens of kilohertz; anything \
-     that makes this assertion fail has lost that fact"
+    "the SDR's reading is tens of kilohertz, and so is the bench offset built \
+     from it"
 );
 // Both carriers must fit inside one 2.048 MS/s capture window centred on
 // CW_SWEEP_CENTER_HZ, or the receiver cannot see them without retuning -- and

@@ -571,11 +571,11 @@ where
                             }
                         }
                         // Step to the next TCXO supply voltage and restart the
-                        // radio on it. The transmitter is 73 ppm low, which is
-                        // far outside what a TCXO should do, and 3.0 V was
-                        // taken from the documentation rather than from the
-                        // board -- so the voltage is swept against a receiver
-                        // instead of being assumed.
+                        // radio on it. 3.0 V was taken from the documentation
+                        // rather than from the board, so the voltage is swept
+                        // against a receiver instead of being assumed. (The
+                        // 73 ppm that first prompted this was the RTL-SDR's
+                        // error, not the oscillator's.)
                         b'g' => {
                             if let Some(dev) = radio.as_mut() {
                                 cw_until = None;
@@ -1329,9 +1329,10 @@ where
 
 /// Step the receive frequency across a range and count what arrives at each.
 ///
-/// One use is establishing that the 73 ppm error belongs to the module:
-/// against a second Base Duo the window comes out centred on zero, which it
-/// could not be if only one of the two boards were wrong.
+/// One use is checking that two boards agree: against a second Base Duo the
+/// window comes out centred on zero, so their references match. That says
+/// nothing about whether either is right; for that, see
+/// `oxinode_core::lr1121::reference`.
 ///
 /// The other use is the opposite purpose. With the reference
 /// correction on, this board is deliberately 73 ppm away from the peer, so the
@@ -1423,7 +1424,7 @@ const SWEEP_COARSE: SweepPlan = SweepPlan {
 /// So this sweeps only the upper edge, at a fifth of the reconnaissance step.
 /// The prediction has a sign and a magnitude: with the correction on, the edge
 /// must sit 66.5 kHz *lower*, because the correction moves this board away from
-/// a peer that carries the same error. An edge that does not move, or moves the
+/// a peer on the same reference. An edge that does not move, or moves the
 /// other way, falsifies the correction rather than being explained away.
 ///
 /// The range runs +220 kHz to +400 kHz because both edges have to be inside it
@@ -1525,10 +1526,9 @@ fn edit_config(config: &mut RadioConfig, key: u8) {
         }
         // The peer board's settings, in one key.
         //
-        // The correction goes *off* with this preset, and that is the whole
-        // point of it being a preset: the peer carries the same 73 ppm error
-        // this board does, so correcting for it would move this board 67 kHz
-        // away from the only radio on the bench that answers.
+        // The correction goes *off* with this preset, as it is by default: the
+        // offset would move this board 67 kHz away from the peer, which is on
+        // the same reference, and from every other correctly tuned radio.
         b'M' => {
             *config = RadioConfig {
                 frequency_hz: meshtastic::US_LONG_FAST_HZ,
@@ -1579,9 +1579,9 @@ fn validate(config: &RadioConfig) -> Option<ValidConfig> {
 /// Print a configuration in the units a person reasons in.
 ///
 /// Both frequencies, always. The commanded one is what the chip is told and the
-/// wanted one is what should come out of the antenna; the 73 ppm between them
-/// took a long time to find, and a status line that showed only one of the two
-/// would make that distinction invisible again.
+/// wanted one is what should come out of the antenna. With the reference
+/// offset on they are 73 ppm apart, and a status line that showed only one of
+/// the two would make that invisible.
 fn log_config(config: &ValidConfig) {
     defmt::info!(
         "config: {=str} band, {=u32} Hz wanted, {=u32} Hz commanded ({=str}), SF{=u8} BW{=u32} CR4/{=u8}, {=i8} dBm",
